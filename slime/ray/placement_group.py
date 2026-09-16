@@ -1,4 +1,3 @@
-import copy
 import logging
 import socket
 
@@ -97,134 +96,29 @@ def _create_placement_group(num_gpus):
     return pg, pg_reordered_bundle_indices, pg_reordered_gpu_ids
 
 
-def _get_placement_group_layout(args) -> tuple[int, int]:
-    actor_num_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
-
-    if args.debug_train_only:
-        return actor_num_gpus, 0
-
-    if args.rollout_external:
-        if args.debug_rollout_only:
-            return actor_num_gpus, 0
-        return actor_num_gpus, actor_num_gpus
-
-    if args.debug_rollout_only:
-        return args.rollout_num_gpus, 0
-
-    if args.colocate:
-        return max(actor_num_gpus, args.rollout_num_gpus), 0
-
-    return actor_num_gpus + args.rollout_num_gpus, actor_num_gpus
-
-
 def create_placement_groups(args):
-    """Create placement groups for actor, critic, and rollout engines."""
-
-    num_gpus, rollout_offset = _get_placement_group_layout(args)
-
-    logger.info(f"Creating placement group with {num_gpus} GPUs...")
-    pg, actor_pg_reordered_bundle_indices, actor_pg_reordered_gpu_ids = _create_placement_group(num_gpus)
-    rollout_pg_reordered_bundle_indices = actor_pg_reordered_bundle_indices[rollout_offset:]
-    rollout_pg_reordered_gpu_ids = actor_pg_reordered_gpu_ids[rollout_offset:]
-
-    result = {
-        "actor": (pg, actor_pg_reordered_bundle_indices, actor_pg_reordered_gpu_ids),
-        "rollout": (pg, rollout_pg_reordered_bundle_indices, rollout_pg_reordered_gpu_ids),
-    }
-
-    result["critic"] = result["actor"] if args.use_critic else None
-
-    return result
+    """Reserve only training GPUs; Omni services own their separate resources."""
+    count = 0 if args.debug_rollout_only else args.actor_num_nodes * args.actor_num_gpus_per_node
+    return {"actor": _create_placement_group(count)}
 
 
-def allocate_train_group(
-    args,
-    num_nodes,
-    num_gpus_per_node,
-    pg,
-    role="actor",
-    with_ref=False,
-    with_opd_teacher=False,
-    actor_cls=None,
-):
-    return RayTrainGroup(
-        args=args,
-        num_nodes=num_nodes,
-        num_gpus_per_node=num_gpus_per_node,
-        pg=pg,
-        num_gpus_per_actor=0.4,
-        role=role,
-        with_ref=with_ref,
-        with_opd_teacher=with_opd_teacher,
-        actor_cls=actor_cls,
-    )
-
-
-def create_actor_model(args, pgs, rollout_manager, actor_cls=None):
-    actor_args = args
-    if args.megatron_config_path is not None:
-        from slime.utils.arguments import parse_megatron_role_args
-
-        actor_args = parse_megatron_role_args(args, args.megatron_config_path, role="actor")
-
-    actor_model_kwargs = {}
-    if actor_cls is not None:
-        actor_model_kwargs["actor_cls"] = actor_cls
-    actor_model = allocate_train_group(
-        args=actor_args,
-        num_nodes=args.actor_num_nodes,
-        num_gpus_per_node=args.actor_num_gpus_per_node,
-        pg=pgs["actor"],
-        with_ref=actor_args.kl_coef != 0 or actor_args.use_kl_loss,
-        with_opd_teacher=actor_args.use_opd and actor_args.opd_type == "megatron",
-        **actor_model_kwargs,
-    )
-    actor_start_rollout_ids = actor_model.create(rollout_manager=rollout_manager)
-    return actor_model, actor_start_rollout_ids
-
-
-def create_training_models(args, pgs, rollout_manager, actor_cls=None):
-    actor_model, actor_start_rollout_ids = create_actor_model(args, pgs, rollout_manager, actor_cls=actor_cls)
-
-    critic_model = None
-    if args.use_critic and args.num_rollout != 0:
-        from slime.utils.arguments import parse_megatron_role_args
-
-        critic_args = (
-            parse_megatron_role_args(args, args.megatron_config_path, role="critic")
-            if args.megatron_config_path is not None
-            else copy.deepcopy(args)
-        )
-        if args.megatron_config_path is None:
-            critic_args.disable_param_buffers_cpu_backup = False
-
-        critic_model = allocate_train_group(
-            args=critic_args,
-            num_nodes=args.critic_num_nodes,
-            num_gpus_per_node=args.critic_num_gpus_per_node,
-            pg=pgs["critic"],
-            role="critic",
-        )
-        critic_start_rollout_ids = critic_model.create(rollout_manager=rollout_manager)
-
-    # TODO how to decide rollout start id when critic is involved? For now we just require user to specify it via args.
-    if critic_model is not None:
-        start_rollout_ids = critic_start_rollout_ids
-    else:
-        start_rollout_ids = actor_start_rollout_ids
-
-    assert len(set(start_rollout_ids)) == 1
-
+def create_training_models(args, pgs, rollout_manager):
+    actor = RayTrainGroup(args, args.actor_num_nodes, args.actor_num_gpus_per_node, pgs["actor"])
+    try:
+        start_ids = actor.create(rollout_manager)
+    except BaseException:
+        actor.release()
+        raise
+    if len(set(start_ids)) != 1:
+        actor.release()
+        raise RuntimeError("Training ranks resumed different iterations")
     if args.start_rollout_id is None:
-        args.start_rollout_id = start_rollout_ids[0]
-
-    if args.rollout_global_dataset:
-        ray.get(rollout_manager.load.remote(args.start_rollout_id - 1))
-
-    return actor_model, critic_model
+        args.start_rollout_id = start_ids[0]
+    ray.get(rollout_manager.load.remote(args.start_rollout_id - 1))
+    return actor
 
 
-def create_rollout_manager(args, pg):
+def create_rollout_manager(args):
     from .rollout import RolloutManager
 
     rollout_manager_options = {
@@ -232,9 +126,7 @@ def create_rollout_manager(args, pg):
         "num_gpus": 0,
         "runtime_env": {"env_vars": add_default_ray_env_vars()},
     }
-    if getattr(args, "rollout_data_transport", "object-store") == "nixl":
-        rollout_manager_options["enable_tensor_transport"] = True
-    rollout_manager = RolloutManager.options(**rollout_manager_options).remote(args, pg)
+    rollout_manager = RolloutManager.options(**rollout_manager_options).remote(args)
 
     # calculate num_rollout from num_epoch
     num_rollout_per_epoch = None
@@ -242,12 +134,5 @@ def create_rollout_manager(args, pg):
         num_rollout_per_epoch = ray.get(rollout_manager.get_num_rollout_per_epoch.remote())
         args.num_rollout = num_rollout_per_epoch * args.num_epoch
         assert args.num_rollout > 0
-
-    if args.check_weight_update_equal:
-        ray.get(rollout_manager.check_weights.remote(action="snapshot"))
-        ray.get(rollout_manager.check_weights.remote(action="reset_tensors"))
-
-    if args.offload_rollout:
-        ray.get(rollout_manager.offload.remote())
 
     return rollout_manager, num_rollout_per_epoch

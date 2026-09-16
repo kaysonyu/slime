@@ -1,25 +1,15 @@
-accelerate
-anthropic
-blake3
-blobfile
-datasets
-e2b
-httpx[http2]
-mcp[cli]
-memray  # needed for debugging (but is lightweight), we can put it to dev mode when using pyproject.toml
-numba
-omegaconf
-openai
-openai-agents
-pillow
-pylatexenc
+# CUDA, Torch and Megatron are supplied by the training environment; the
+# validated GPU stack is recorded in docker/tts-runtime-versions.json.
+torch>=2.9
+transformers==5.12.1
+ray[default]==2.56.0
+safetensors>=0.8.0
+httpx[http2]>=0.28,<1
+numpy>=1.26
+packaging
+psutil
 pyyaml
-qwen_vl_utils # for VLM
-ray[default]
-safetensors
-sglang-router>=0.3.0
+omegaconf
+tqdm
 tensorboard
-transformers
 wandb
-xxhash  # disk delta weight sync (checksum + codec)
-zstandard

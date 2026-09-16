@@ -1,0 +1,19 @@
+{
+  "python": "3.12",
+  "cuda": "13.0",
+  "torch": "2.13.0+cu130",
+  "transformers": "5.12.1",
+  "sglang": "0.5.18",
+  "ray": "2.56.0",
+  "transformer_engine": "2.17.0",
+  "slime_base": "3778dbf6d1a533ab478ecf5ddaa11449a47752b2",
+  "sglang_omni_upstream_base": "1ddf9c17bb8b211b439e9e91c22f1c722fb3461f",
+  "sglang_omni_inspected_head": "e8c998291c9ae2ec1e48d18f1102952d9f0412a3",
+  "sglang_omni_has_required_worktree_changes": false,
+  "megatron_commit": "3f49de20de81c1ad5dfc10efa0f7d0c8098f1ce4",
+  "mosslite_reference": "43892a9b2797591fd6be35ae95066524ac984b1f",
+  "moss_local_reference_snapshot": "92a53c268a167e153cbe7f36b1d916b8a72c0b4f",
+  "moss_local_runtime_weight_layout": "gpt2_qkv_interleaved_v1",
+  "training_checkpoint_format": "torch_dist",
+  "original_neox_supported_in_runtime": false
+}

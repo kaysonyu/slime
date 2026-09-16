@@ -1,4 +1,10 @@
+"""Synchronous Omni rollout, Megatron update, checkpoint and weight publication."""
+
+import logging
+import signal
+
 import ray
+from ray.util.placement_group import remove_placement_group
 
 from slime.observability.logging_utils import configure_logger, finish_tracking, init_tracking
 from slime.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
@@ -8,92 +14,67 @@ from slime.utils.misc import should_run_periodic_action
 
 def train(args):
     configure_logger()
-    release_train = args.release_train
-
-    # allocate the GPUs
-    pgs = create_placement_groups(args)
-    init_tracking(args)
-
-    # create the rollout manager, with sglang engines inside.
-    # need to initialize rollout manager first to calculate num_rollout
-    rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
-
-    actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
-
-    if args.offload_rollout and not release_train:
-        ray.get(rollout_manager.onload_weights.remote())
-
-    # Always push actor weights to rollout once weights are loaded.
-    actor_model.update_weights()
-
-    if args.check_weight_update_equal:
-        ray.get(rollout_manager.check_weights.remote(action="compare"))
-
-    if args.offload_rollout:
-        ray.get(rollout_manager.onload_kv.remote())
-
-    # special case for eval-only
-    if args.num_rollout == 0 and args.eval_interval is not None:
-        ray.get(rollout_manager.eval.remote(rollout_id=0))
-
-    def offload_train(actor_trains_this_step):
-        # Each model auto-offloads after train() when offload_train is set,
-        # so we only need clear_memory for the non-offload case.
-        if not args.offload_train:
-            if not args.use_critic or actor_trains_this_step:
-                actor_model.clear_memory()
-            else:
-                critic_model.clear_memory()
-
-    # train loop.
-    for rollout_id in range(args.start_rollout_id, args.num_rollout):
-        if args.eval_interval is not None and rollout_id == 0 and not args.skip_eval_before_train:
-            ray.get(rollout_manager.eval.remote(rollout_id))
-
-        rollout_data_ref = ray.get(rollout_manager.generate.remote(rollout_id))
-
-        if args.offload_rollout:
-            ray.get(rollout_manager.offload.remote())
-
-        if release_train:
-            actor_model.create()
-
-        actor_trains = (not args.use_critic) or rollout_id >= args.num_critic_only_steps
-        if args.use_critic:
-            value_refs = critic_model.async_train(rollout_id, rollout_data_ref)
-            if actor_trains:
-                ray.get(actor_model.async_train(rollout_id, rollout_data_ref, external_data=value_refs))
-            else:
-                ray.get(value_refs)
+    owns_ray = not ray.is_initialized()
+    rollout_manager = actor = None
+    pgs = {}
+    if owns_ray:
+        if args.ray_address:
+            ray.init(address=args.ray_address)
         else:
-            ray.get(actor_model.async_train(rollout_id, rollout_data_ref))
-
-        if release_train or should_run_periodic_action(
-            rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout
-        ):
-            force_sync = release_train or rollout_id == args.num_rollout - 1
-            if actor_trains:
-                actor_model.save_model(rollout_id, force_sync=force_sync)
-            if args.use_critic:
-                critic_model.save_model(rollout_id, force_sync=force_sync)
-            if args.rollout_global_dataset:
+            ray.init(
+                address="local",
+                num_gpus=0 if args.debug_rollout_only else args.actor_num_gpus_per_node,
+                include_dashboard=False,
+            )
+    try:
+        pgs = create_placement_groups(args)
+        init_tracking(args)
+        rollout_manager, per_epoch = create_rollout_manager(args)
+        if not args.debug_rollout_only:
+            actor = create_training_models(args, pgs, rollout_manager)
+            actor.update_weights()
+        else:
+            args.start_rollout_id = args.start_rollout_id or 0
+        if args.num_rollout == 0 and args.eval_interval is not None:
+            ray.get(rollout_manager.eval.remote(0))
+        for rollout_id in range(args.start_rollout_id, args.num_rollout):
+            batch = ray.get(rollout_manager.generate.remote(rollout_id))
+            if actor is not None:
+                ray.get(actor.async_train(rollout_id, batch))
+            if args.save and should_run_periodic_action(rollout_id, args.save_interval, per_epoch, args.num_rollout):
+                if actor is not None:
+                    actor.save_model(rollout_id, force_sync=True)
                 ray.get(rollout_manager.save.remote(rollout_id))
-
-        offload_train(actor_trains)
-        if args.offload_rollout and not release_train:
-            ray.get(rollout_manager.onload_weights.remote())
-        actor_model.update_weights()
-
-        if args.offload_rollout:
-            ray.get(rollout_manager.onload_kv.remote())
-
-        if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
-            ray.get(rollout_manager.eval.remote(rollout_id))
-
-    ray.get(rollout_manager.dispose.remote())
-    finish_tracking(args)
+            if actor is not None:
+                actor.update_weights()
+            if should_run_periodic_action(rollout_id, args.eval_interval, per_epoch):
+                ray.get(rollout_manager.eval.remote(rollout_id))
+    finally:
+        if actor is not None:
+            try:
+                actor.dispose()
+            except Exception:
+                logging.getLogger(__name__).exception("Training-group cleanup failed")
+            finally:
+                actor.release()
+        if rollout_manager is not None:
+            try:
+                ray.get(rollout_manager.dispose.remote(), timeout=60)
+            except Exception:
+                logging.getLogger(__name__).exception("Rollout cleanup failed")
+            finally:
+                ray.kill(rollout_manager)
+        if pgs and pgs["actor"][0] is not None:
+            remove_placement_group(pgs["actor"][0])
+        finish_tracking(args)
+        if owns_ray:
+            ray.shutdown()
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    train(args)
+
+    def stop(signum, frame):
+        raise KeyboardInterrupt(f"Received signal {signum}")
+
+    signal.signal(signal.SIGTERM, stop)
+    train(parse_args())

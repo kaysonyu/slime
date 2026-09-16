@@ -1,31 +1,9 @@
-# slime Documentation
+# TTS RL 文档
 
-We recommend new contributors start from writing documentation, which helps you quickly understand slime codebase.
-Most documentation files are located under the `docs/` folder.
+- [运行说明](../README.md)
+- [原生轨迹、CP 与概率定义](tts_rl.md)
+- [当前 Local 布局迁移与验收](local_layout_migration.md)
+- [前一轮验证记录](tts_validation.md)
+- [Inspire 资源与占卡规则](../INSPIRE.md)
 
-## Docs Workflow
-
-### Install Dependency
-
-```bash
-apt-get update && apt-get install -y pandoc parallel retry
-pip install -r requirements.txt
-```
-
-### Update Documentation
-
-You can update the documentation in the en and zh folders by adding Markdown or Jupyter Notebook files to the appropriate subdirectories. If you create new files, make sure to update index.rst (or any other relevant .rst files) accordingly.
-
-## Build and Render
-
-```bash
-# build english version
-bash ./build.sh en
-bash ./serve.sh en
-
-# build chinese version
-bash ./build.sh zh
-bash ./serve.sh zh
-```
-
-You can then visit `http://localhost:8000` to view the documentation.
+slime 上游原有文档可在 `v0.3.2` tag 中查看。本分支移除了对应 backend 和示例，因此不继续发布那些运行指令。

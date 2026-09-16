@@ -3,7 +3,8 @@ from __future__ import annotations
 import socket
 import time
 from argparse import Namespace
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Sequence
+from importlib import import_module
 
 import ray
 import torch
@@ -17,51 +18,25 @@ from slime.utils import accelerator
 from slime.utils.distributed_utils import get_gloo_group, init_process_group
 from slime.utils.http_utils import _wrap_ipv6
 
-from ..megatron_to_hf import convert_to_hf
 from .common import all_gather_param, named_params_and_buffers
 
 
 class UpdateWeightFromDistributed:
-    """
-    Update distributed engines through a device process group. Each PP rank: group "slime-pp_{pp_rank}",
-    only DP=TP=0 transfers. Non-expert (TP) and expert (EP) params separate.
-    Subclasses override ``_send_weights`` / ``_on_chunk`` to inject per-mode behaviour.
-    """
+    """Gather native parameters, then publish complete HF weights to paused Omni stages."""
 
-    def __init__(
-        self,
-        args: Namespace,
-        model: Sequence[torch.nn.Module],
-        weights_getter: Callable[[], Mapping[str, torch.Tensor]],
-        *,
-        model_name: str,
-        quantization_config: dict[str, int | str | list[str]] | None,
-    ) -> None:
-        """
-        Initialize. Groups created in connect_rollout_engines.
-        """
+    def __init__(self, args, model):
         self.args = args
         self.model = model
-        self.model_name = model_name
-        self.quantization_config = quantization_config
+        self.adapter = import_module(f"slime_plugins.models.{args.model_family}.weights")
+        self.expected_names = self.adapter.expected_hf_names(args.hf_checkpoint)
         self.weight_version = 0
         self._model_update_groups = None
-        self.update_weight_metrics: dict[str, float] = {}
-
-    def pop_metrics(self) -> dict[str, float]:
-        """
-        Return and clear ``update_weight_metrics``. Drained by the actor onto the rollout/step log.
-        """
-        out, self.update_weight_metrics = self.update_weight_metrics, {}
-        return out
 
     def connect_rollout_engines(
         self,
         rollout_engines: Sequence[ActorHandle],
         rollout_engine_lock: ActorHandle,
         engine_gpu_counts: Sequence[int] | None = None,
-        engine_gpu_offsets: Sequence[int] | None = None,
-        engine_parallel_configs: Sequence[Mapping[str, object]] | None = None,
     ) -> None:
         """
         Create "slime-pp_{pp_rank}" if PP source (DP=TP=0). Lock prevents concurrent transfers.
@@ -78,7 +53,7 @@ class UpdateWeightFromDistributed:
         )
         pp_rank = mpu.get_pipeline_model_parallel_rank()
         if self._is_pp_src_rank:
-            self._group_name = f"slime-pp_{pp_rank}"
+            self._group_name = f"slime-{self.args.weight_sync_session}-pp_{pp_rank}"
 
         if self._is_pp_src_rank:
             if self._model_update_groups is not None:
@@ -101,55 +76,38 @@ class UpdateWeightFromDistributed:
     @torch.no_grad()
     def update_weights(self) -> None:
         """
-        Pause → flush → _send_weights → continue. Progress on PP source.
+        Pause → transfer all tensors → resume. Omni invalidates its stage cache on refit.
         """
         self.weight_version += 1
+        self._sent_names = set()
 
         if dist.get_rank() == 0:
             ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
-            ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
-
-            # int4/fp4 pre_process
-            if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
-                post_process_weights(
-                    restore_weights_before_load=True,
-                    post_process_quantization=False,
-                    rollout_engines=self.rollout_engines,
-                )
         dist.barrier(group=get_gloo_group())
 
         pbar = tqdm(desc=f"[{self._group_name}] Update weights", total=0) if self._is_pp_src_rank else None
         self._send_weights(pbar)
-
+        if self._is_pp_src_rank and self._sent_names != self.expected_names:
+            raise ValueError(
+                f"Incomplete Omni weight publication: missing={sorted(self.expected_names - self._sent_names)}, "
+                f"unexpected={sorted(self._sent_names - self.expected_names)}"
+            )
+        if pbar is not None:
+            pbar.close()
         if dist.get_rank() == 0:
-            # int4/fp4 post_process
-            if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
-                post_process_weights(
-                    restore_weights_before_load=False,
-                    post_process_quantization=True,
-                    rollout_engines=self.rollout_engines,
-                )
             ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
 
-    def _send_weights(self, pbar: tqdm | None) -> None:
-        """
-        Non-expert (TP) pass → barrier → expert (EP) pass → barrier. Each iterator
-        yields broadcast-ready chunks (bucketing happens internally); subclasses
-        override ``_on_chunk`` to inject per-chunk behaviour.
-        """
-        for chunk_iter in (self._iter_non_expert_chunks(), self._iter_expert_chunks()):
-            for hf_chunk in chunk_iter:
-                self._on_chunk(hf_chunk)
-                self._update_bucket_weights_from_distributed(hf_chunk, pbar=pbar)
-            dist.barrier(group=get_gloo_group())
+    def _send_weights(self, pbar):
+        for chunk in self._iter_chunks():
+            names = [name for name, _ in chunk]
+            if len(names) != len(set(names)) or self._sent_names.intersection(names):
+                raise ValueError("Duplicate tensors in Omni weight publication")
+            self._sent_names.update(names)
+            self._update_bucket_weights_from_distributed(chunk, pbar=pbar)
+        dist.barrier(group=get_gloo_group())
 
-    def _on_chunk(self, hf_chunk: list[tuple[str, torch.Tensor]]) -> None:
-        """
-        Hook for each HF chunk in ``_send_weights`` before its broadcast. No-op by default.
-        """
-
-    def _iter_non_expert_chunks(self) -> Iterator[list[tuple[str, torch.Tensor]]]:
+    def _iter_chunks(self) -> Iterator[list[tuple[str, torch.Tensor]]]:
         """
         Yield broadcast-sized HF chunks of non-expert params: TP all-gather +
         HF convert per param, then bucket up to ``--update-weight-buffer-size``.
@@ -158,12 +116,10 @@ class UpdateWeightFromDistributed:
         buffer_size = 0
         buffer: list[tuple[str, torch.Tensor]] = []
         for name, param in named_params_and_buffers(self.args, self.model):
-            if ".experts." in name:
-                continue
             param = all_gather_param(name, param)
             if not self._is_pp_src_rank:
                 continue
-            hf_chunk = convert_to_hf(self.args, self.model_name, name, param, self.quantization_config)
+            hf_chunk = self.adapter.export_parameter(self.args, name, param)
             chunk_bytes = sum(t.numel() * t.element_size() for _, t in hf_chunk)
             if buffer and buffer_size + chunk_bytes > self.args.update_weight_buffer_size:
                 yield buffer
@@ -173,68 +129,6 @@ class UpdateWeightFromDistributed:
             buffer_size += chunk_bytes
         if buffer:
             yield buffer
-
-    def _iter_expert_chunks(self) -> Iterator[list[tuple[str, torch.Tensor]]]:
-        """
-        Yield one HF chunk per EP-weighted batch of expert params: TP gather +
-        buffer until threshold, then EP gather + HF convert.
-        """
-        params = ((n, p) for n, p in named_params_and_buffers(self.args, self.model) if ".experts." in n)
-        buffer_size = 0
-        batch: list[tuple[str, torch.Tensor]] = []
-        for name, param in params:
-            param = all_gather_param(name, param)
-            param_size = param.numel() * param.element_size()
-            if (
-                buffer_size + param_size
-            ) * mpu.get_expert_model_parallel_world_size() > self.args.update_weight_buffer_size:
-                hf_chunk = self._ep_gather_and_convert(batch)
-                if hf_chunk:
-                    yield hf_chunk
-                batch = []
-                buffer_size = 0
-            batch.append((name, param))
-            buffer_size += param_size
-        if batch:
-            hf_chunk = self._ep_gather_and_convert(batch)
-            if hf_chunk:
-                yield hf_chunk
-
-    def _ep_gather_and_convert(self, named_tensors: list[tuple[str, torch.Tensor]]) -> list[tuple[str, torch.Tensor]]:
-        """
-        EP all-gather a buffered batch + HF convert on PP source. Returns HF tensors on
-        PP source, [] elsewhere. Clears ``named_tensors``.
-        """
-        names = [name for name, _ in named_tensors]
-        all_names = [None] * mpu.get_expert_model_parallel_world_size()
-        dist.all_gather_object(all_names, names, group=mpu.get_expert_model_parallel_group())
-
-        for names in all_names:
-            assert len(named_tensors) == len(names), f"mismatch names length: {len(named_tensors)} != {len(names)}"
-
-        all_gathered_params = [[] for _ in range(mpu.get_expert_model_parallel_world_size())]
-        handles = []
-        for i, (_name, param) in enumerate(named_tensors):
-            params = [
-                torch.empty_like(param.data, device=accelerator.current_device())
-                for _ in range(mpu.get_expert_model_parallel_world_size())
-            ]
-            handle = dist.all_gather(params, param.data, group=mpu.get_expert_model_parallel_group(), async_op=True)
-            handles.append(handle)
-            for ep_rank, names in enumerate(all_names):
-                all_gathered_params[ep_rank].append((names[i], params[ep_rank]))
-        for handle in handles:
-            handle.wait()
-
-        named_tensors.clear()
-        if not self._is_pp_src_rank:
-            return []
-
-        all_gathered_params = sum(all_gathered_params, [])
-        converted_hf_tensors = []
-        for name, param in all_gathered_params:
-            converted_hf_tensors += convert_to_hf(self.args, self.model_name, name, param, self.quantization_config)
-        return converted_hf_tensors
 
     def _update_bucket_weights_from_distributed(
         self,
@@ -249,18 +143,19 @@ class UpdateWeightFromDistributed:
         while not ray.get(self.rollout_engine_lock.acquire.remote()):
             time.sleep(0.1)
 
-        refs = update_weights_from_distributed(
-            self._group_name,
-            self._model_update_groups,
-            self.weight_version,
-            self.rollout_engines,
-            converted_named_tensors,
-            load_format=load_format,
-        )
-
-        ray.get(refs)
-        converted_named_tensors.clear()
-        ray.get(self.rollout_engine_lock.release.remote())
+        try:
+            refs = update_weights_from_distributed(
+                self._group_name,
+                self._model_update_groups,
+                self.weight_version,
+                self.rollout_engines,
+                converted_named_tensors,
+                load_format=load_format,
+            )
+            ray.get(refs)
+            converted_named_tensors.clear()
+        finally:
+            ray.get(self.rollout_engine_lock.release.remote())
         pbar.update(1)
 
 
@@ -352,22 +247,3 @@ def update_weights_from_distributed(
         handle.wait()
 
     return refs
-
-
-def post_process_weights(
-    restore_weights_before_load: bool,
-    post_process_quantization: bool,
-    rollout_engines: Sequence[ActorHandle],
-):
-    """
-    Trigger post-process for int4/fp4 quantization on all rollout engines.
-    """
-    ray.get(
-        [
-            engine.post_process_weights.remote(
-                restore_weights_before_load=restore_weights_before_load,
-                post_process_quantization=post_process_quantization,
-            )
-            for engine in rollout_engines
-        ]
-    )
