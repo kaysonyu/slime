@@ -1,0 +1,23 @@
+reward:
+  components:
+    - {name: wer, weight: 0.4}
+    - {name: reference_similarity, weight: 0.3}
+    - {name: judge, weight: 0.3}
+services:
+  wer:
+    protocol: qwen3_asr_chat_path
+    endpoint: ${TTS_ASR_URL}
+    model: qwen3-asr-1.7b
+    auth_token_env: INSPIRE_API_KEY
+    runtime: {timeout_seconds: 120, concurrency: 32, max_retries: 2}
+  timbre_sim:
+    endpoint: ${TTS_SIM_URL}
+    auth_token_env: INSPIRE_API_KEY
+    runtime: {timeout_seconds: 120, concurrency: 32, max_retries: 2}
+  judge:
+    protocol: openai_chat_path
+    endpoint: ${TTS_JUDGE_URL}
+    model: qwen3-omni-30b-a3b-thinker
+    tokenizer_path: /inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/models/AnyAudio-Judge-30B
+    auth_token_env: INSPIRE_API_KEY
+    runtime: {timeout_seconds: 120, concurrency: 32, max_retries: 2}

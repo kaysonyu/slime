@@ -8,7 +8,6 @@ import ray
 import torch
 import torch.distributed as dist
 
-import slime.utils.eval_config
 from slime.observability.logging_utils import configure_logger
 from slime.ray.ray_actor import RayActor
 from slime.utils import accelerator
@@ -49,8 +48,6 @@ class TrainRayActor(RayActor):
         self.role = role
         self.with_ref = with_ref
         self.with_opd_teacher = with_opd_teacher
-
-        torch.serialization.add_safe_globals([slime.utils.eval_config.EvalDatasetConfig])
 
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         accelerator.set_device(local_rank)
@@ -99,14 +96,6 @@ class TrainRayActor(RayActor):
         print_memory("before TrainRayActor.clear_memory")
         clear_memory()
         print_memory("after TrainRayActor.clear_memory")
-
-    @abc.abstractmethod
-    def sleep(self, tags):
-        raise NotImplementedError
-
-    @abc.abstractmethod
-    def wake_up(self, tags):
-        raise NotImplementedError
 
     @abc.abstractmethod
     def train(self, rollout_id, rollout_data_ref, external_data=None):

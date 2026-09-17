@@ -1,4 +1,6 @@
+import json
 import logging
+from pathlib import Path
 
 import wandb
 
@@ -32,6 +34,10 @@ def init_tracking(args, primary: bool = True, **kwargs):
 
 
 def finish_tracking(args):
+    if args.use_tensorboard:
+        instance = _TensorboardAdapter._instances.pop(_TensorboardAdapter, None)
+        if instance is not None:
+            instance.finish()
     if not args.use_wandb:
         return
     try:
@@ -43,6 +49,21 @@ def finish_tracking(args):
 
 # TODO further refactor, e.g. put TensorBoard init to the "init" part
 def log(args, metrics, step_key: str):
+    import torch
+
+    metrics = {
+        key: (
+            (value.detach().cpu().item() if value.numel() == 1 else value.detach().cpu().tolist())
+            if isinstance(value, torch.Tensor)
+            else value
+        )
+        for key, value in metrics.items()
+    }
+    if getattr(args, "metrics_jsonl", None):
+        path = Path(args.metrics_jsonl)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as stream:
+            stream.write(json.dumps(metrics, allow_nan=False) + "\n")
     if args.use_wandb:
         wandb.log(metrics)
 

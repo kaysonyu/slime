@@ -62,9 +62,6 @@ def init(args):
     # Pytorch distributed.
     _initialize_distributed(args)
 
-    # https://github.com/NVIDIA/Megatron-LM/issues/1563
-    assert np.__version__.startswith("1."), "Megatron does not support numpy 2.x"
-
     # Random seeds for reproducibility.
     if args.rank == 0:
         logger.info(f"> setting random seeds to {args.seed} ...")
@@ -74,7 +71,8 @@ def init(args):
         args.te_rng_tracker,
         args.inference_rng_tracker,
     )
-    _build_tokenizer(args)
+    if not getattr(args, "model_family", None):
+        _build_tokenizer(args)
     # We won't use this. initialize to pass some validation in megatron.
     init_num_microbatches_calculator(
         args.rank,

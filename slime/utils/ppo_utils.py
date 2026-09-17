@@ -8,6 +8,28 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 
+def action_policy_terms(current, old, advantages, mask, *, eps_clip=0.2, eps_clip_high=0.2):
+    """PPO surrogate for aligned discrete actions, independent of channel layout."""
+    if not (current.shape == old.shape == advantages.shape == mask.shape):
+        raise ValueError("Policy scores, targets and action masks must have equal shapes")
+    current = torch.where(mask, current.float(), 0)
+    old = torch.where(mask, old.detach().float(), 0)
+    advantage = torch.where(mask, advantages.detach().float(), 0)
+    ratio = (current - old).exp()
+    clipped = ratio.clamp(1 - eps_clip, 1 + eps_clip_high)
+    losses = -torch.minimum(ratio * advantage, clipped * advantage)
+    return losses, ratio, (ratio != clipped).float()
+
+
+def mopd_action_terms(current, student, teacher, mask, *, advantage_clip=5.0):
+    """Sampled MOPD on fixed student trajectories; teacher targets never carry gradients."""
+    if not (current.shape == student.shape == teacher.shape == mask.shape):
+        raise ValueError("MOPD must score the same actions under the same conditioning")
+    advantage = torch.where(mask, teacher.detach().float() - student.detach().float(), 0)
+    advantage = advantage.clamp(-advantage_clip, advantage_clip)
+    return -advantage * torch.where(mask, current.float(), 0), advantage
+
+
 @torch.compile(dynamic=True)
 def compute_approx_kl(
     log_probs: torch.Tensor,

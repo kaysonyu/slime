@@ -1,7 +1,10 @@
-# Documentation
+# TTS RL 文档
 
-The upstream documentation site and its build pipeline have been removed from the TTS cleanup baseline.
-Historical guides remain available in [slime v0.3.2](https://github.com/THUDM/slime/tree/v0.3.2/docs).
+- [运行说明](../README.md)
+- [原生轨迹、CP 与概率定义](tts_rl.md)
+- [公共奖励、数据、评估与 Inspire 训练入口](../examples/tts_grpo/README.md)
+- [当前 Local 布局迁移与验收](local_layout_migration.md)
+- [前一轮验证记录](tts_validation.md)
+- [Inspire 资源与占卡规则](../INSPIRE.md)
 
-Current branch scope is described in the [repository README](../README.md).
-TTS-specific documentation is introduced with [the implementation PR](https://github.com/kaysonyu/slime/pull/3).
+slime 上游原有文档可在 `v0.3.2` tag 中查看。本分支移除了对应 backend 和示例，因此不继续发布那些运行指令。

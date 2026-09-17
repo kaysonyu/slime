@@ -1,67 +1,61 @@
-import aiohttp
-import torch
+"""Domain-routed frozen-teacher scoring on the student's exact actions."""
 
-from slime.utils.processing_utils import encode_image_for_rollout_engine
-from slime.utils.types import Sample
+import asyncio
+import hashlib
+import json
+from importlib import import_module
 
-
-async def reward_func(args, sample, **kwargs):
-    payload = {
-        # "text": sample.prompt + sample.response,
-        "input_ids": sample.tokens,
-        "sampling_params": {
-            "temperature": args.rollout_temperature,
-            "max_new_tokens": 0,
-            "skip_special_tokens": False,
-        },
-        "return_logprob": True,
-        "logprob_start_len": 0,
-    }
-
-    if sample.multimodal_inputs and sample.multimodal_inputs.get("images"):
-        image_data = sample.multimodal_inputs["images"]
-        payload["image_data"] = [encode_image_for_rollout_engine(image) for image in image_data]
-
-    session_kwargs = {}
-    async with aiohttp.ClientSession(**session_kwargs) as session:
-        async with session.post(args.rm_url, json=payload) as resp:
-            resp.raise_for_status()
-            return await resp.json()
+from slime.backends.sglang_omni_utils.client import OmniClient
 
 
-def post_process_rewards(args, samples: list[Sample], **kwargs):
-    """Process rewards from teacher model and extract teacher log probabilities.
+class TeacherScorer:
+    def __init__(self, args):
+        self.args = args
+        self.clients = {}
+        for entry in args.mopd_teachers:
+            domain, separator, endpoint = entry.partition("=")
+            if (
+                not separator
+                or not domain
+                or domain in self.clients
+                or not endpoint.startswith(("http://", "https://"))
+            ):
+                raise ValueError("Teachers must be unique DOMAIN=URL routes")
+            self.clients[domain] = OmniClient(
+                endpoint.removesuffix("/score_actions"), args.omni_stage, args.omni_timeout
+            )
 
-    This function:
-    1. Extracts teacher log-probs from the reward response (which contains sglang's logprob output)
-    2. Trims them to match the response length
-    3. Stores them in sample.teacher_log_probs for OPD KL penalty computation
-    4. Returns scalar rewards (0.0 for pure distillation) compatible with GRPO/PPO
+    async def score(self, sample):
+        domain = sample.metadata.get("domain")
+        if domain not in self.clients:
+            raise ValueError(f"No teacher route for domain {domain!r}")
+        request = sample.trajectory.score_request(sample.index, self.args.rollout_temperature)
+        (result,) = await self.clients[domain].score_actions([request])
+        expected = hashlib.sha256(
+            json.dumps(
+                {key: value for key, value in request.items() if key != "sample_id"},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        if result.get("sample_id") != str(sample.index) or result.get("input_sha256") != expected:
+            raise ValueError("Teacher did not score the exact student conditioning and actions")
+        if (
+            result.get("temperature") != self.args.rollout_temperature
+            or result.get("logprob_semantics") != "temperature_scaled_full_vocab_v1"
+        ):
+            raise ValueError("Teacher/student scoring distributions differ")
+        if not result.get("teacher_weight_sha256") or result.get("weight_version") is None:
+            raise ValueError("A frozen teacher must identify its weights and version")
+        identity = {"version": str(result["weight_version"]), "weights": result["teacher_weight_sha256"]}
+        if self.args.teacher_versions.setdefault(domain, identity) != identity:
+            raise ValueError(f"Frozen teacher identity changed for domain {domain}")
+        adapter = import_module(f"slime_plugins.models.{self.args.model_family}.data")
+        sample.teacher_scores = adapter.teacher_scores(sample.trajectory, result, self.args.policy_config)
+        sample.metadata.update(
+            teacher_domain=domain, teacher_version=identity["version"], teacher_weight_sha256=identity["weights"]
+        )
+        sample.reward = 0.0
 
-    Note: The reward_func calls the teacher server which returns token-level log-probs.
-    For pure on-policy distillation without task rewards, we return 0.0 for each sample.
-    The actual learning signal comes from the OPD KL penalty applied in compute_advantages_and_returns.
-    """
-    raw_rewards = [sample.get_reward_value(args) for sample in samples]
-    response_lengths = [sample.response_length for sample in samples]
-
-    # Extract teacher log-probs from the sglang response
-    teacher_log_probs = [
-        torch.tensor([item[0] for item in reward["meta_info"]["input_token_logprobs"][1:]], dtype=torch.float32)
-        for reward in raw_rewards
-    ]
-    teacher_log_probs = [
-        t_log_prob[-response_length:]
-        for t_log_prob, response_length in zip(teacher_log_probs, response_lengths, strict=False)
-    ]
-
-    for sample, t_log_probs in zip(samples, teacher_log_probs, strict=False):
-        sample.teacher_log_probs = t_log_probs
-
-    # Return scalar rewards for GRPO/PPO advantage estimator
-    # For pure on-policy distillation, we use 0.0 as the task reward.
-    # The learning signal comes entirely from the OPD KL penalty.
-    # If you have task rewards, you can add them here.
-    scalar_rewards = [0.0] * len(samples)
-
-    return scalar_rewards, scalar_rewards
+    async def close(self):
+        await asyncio.gather(*(client.close() for client in self.clients.values()))
