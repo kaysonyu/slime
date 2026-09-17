@@ -35,7 +35,6 @@ Start by Use Case
 - New to slime: :doc:`get_started/quick_start`
 - Configure training and rollout arguments: :doc:`get_started/usage`
 - Add custom generation, reward, or rollout functions: :doc:`get_started/customization`
-- Build agentic RL workflows: :doc:`get_started/agent`
 - Configure production SGLang rollout topology: :doc:`advanced/sglang-config`
 - Connect external rollout engines: :doc:`advanced/external-rollout-engines`
 - Sync weights as byte-level deltas: :doc:`advanced/delta-weight-sync`
@@ -51,7 +50,6 @@ Start by Use Case
    get_started/quick_start.md
    get_started/usage.md
    get_started/customization.md
-   get_started/agent.md
    get_started/qa.md
 
 .. toctree::
@@ -93,11 +91,7 @@ Start by Use Case
    :caption: Other Usage
 
    examples/qwen3-4b-base-openhermes.md
-   _examples_synced/search-r1/README.md
    _examples_synced/fully_async/README.md
-   _examples_synced/retool/README.md
-   _examples_synced/multi_agent/README.md
-   _examples_synced/coding_agent_rl/README.md
 
 .. toctree::
    :maxdepth: 1

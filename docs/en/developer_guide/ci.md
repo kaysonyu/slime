@@ -68,16 +68,15 @@ The registered CPU suite currently covers:
 - DP/CP scheduling utilities and CP loss invariance;
 - metric reporting and distributed metric aggregation;
 - reward-model grading utilities for math, GPQA, F1, DeepScaler, and DAPO-style math;
-- `Sample` behavior, rollout validation, and agent trajectory merging;
+- `Sample` behavior, rollout validation,;
 - HF checkpoint saver behavior;
 - customization hook contracts for rollout functions, generate functions, runtime hooks, and path loading.
 
-Agent adapter tests are kept in a separate CPU job because they need extra SDK dependencies.
 
 Useful local commands:
 
 ```bash
-python tests/test_agent/test_trajectory_manager_branching.py
+python tests/test_dp_schedule.py
 python -m pytest tests/test_megatron_argument_validation.py tests/plugin_contracts/test_plugin_generate_contracts.py
 ```
 

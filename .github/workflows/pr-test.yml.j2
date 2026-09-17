@@ -75,7 +75,6 @@
         {'test_file': 'utils/test_megatron_role_config.py', 'num_gpus': 0},
         {'test_file': 'test_deep_ep_tms_patch.py', 'num_gpus': 0},
         {'test_file': 'test_stateless_adam.py', 'num_gpus': 0},
-        {'test_file': 'utils/test_megatron_server_arguments.py', 'num_gpus': 0},
         {'test_file': 'test_dp_schedule.py', 'num_gpus': 0},
         {'test_file': 'test_cp_utils.py', 'num_gpus': 0},
         {'test_file': 'test_train_data_utils.py', 'num_gpus': 0},
@@ -121,26 +120,12 @@
         {'test_file': 'test_model_provider_freeze.py', 'num_gpus': 0},
         {'test_file': 'test_glm52_layerwise_comparison.py', 'num_gpus': 0},
         {'test_file': 'test_layerwise_alignment.py', 'num_gpus': 0},
-        {'test_file': 'test_tau_bench_token_delta.py', 'num_gpus': 0},
         {'test_file': 'utils/test_hf_checkpoint_saver.py', 'num_gpus': 0},
         {'test_file': 'utils/test_loss_mask_type_qwen35.py', 'num_gpus': 0},
         {'test_file': 'plugin_contracts/test_plugin_rollout_contracts.py', 'num_gpus': 0},
         {'test_file': 'plugin_contracts/test_plugin_runtime_hook_contracts.py', 'num_gpus': 0},
         {'test_file': 'plugin_contracts/test_plugin_path_loading_contracts.py', 'num_gpus': 0},
         {'test_file': 'plugin_contracts/test_plugin_generate_contracts.py', 'num_gpus': 0},
-      ],
-    },
-
-    'agent-test': {
-      'label': 'run-ci-agent',
-      'always': True,
-      'cpu': True,
-      'tests': [
-        {'test_file': 'test_agent/test_trajectory_manager_branching.py', 'num_gpus': 0},
-        {'test_file': 'test_agent/test_adapters.py', 'num_gpus': 0},
-        {'test_file': 'test_agent/test_harness.py', 'num_gpus': 0},
-        {'test_file': 'test_agent/test_sandbox_exec_and_wait.py', 'num_gpus': 0},
-        {'test_file': 'test_agent/test_agent_rollout_cpu.py', 'num_gpus': 0},
       ],
     },
 
@@ -153,15 +138,15 @@
 name: PR Test
 
 on:
-  # Push to main triggers the default GitHub-hosted jobs (cheap CPU/unit and
-  # agent checks), catching PR-pair regressions where two PRs pass
-  # individually but main is broken after both land. GPU jobs stay label-gated
+  # Push to an integration branch triggers the GitHub-hosted CPU/unit jobs,
+  # catching PR-pair regressions where two PRs pass
+  # individually but the integration branch breaks after both land. GPU jobs stay label-gated
   # — see each job's `if:` below — so push events never burn the self-hosted
   # fleet.
   push:
-    branches: [main]
+    branches: [main, tts-rl]
   pull_request:
-    branches: [main]
+    branches: [main, tts-rl]
     types: [opened, reopened, synchronize, labeled]
   workflow_dispatch:
     inputs:

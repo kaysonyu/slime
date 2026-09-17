@@ -44,7 +44,6 @@ agentic workflow——multi-turn tool use、sandbox interaction、environment fe
 | 给 agentic 输出附加自定义 loss mask、metadata，或转换成训练数据 | [`--rollout-data-postprocess-path`](#rollout-data-postprocess-path)、[`--custom-convert-samples-to-train-data-path`](#custom-convert-samples-to-train-data-path) |
 | 调试长耗时的 custom generation、verifier、tool call 或 sandbox 调用 | [`slime.observability.trace_utils`](../developer_guide/trace.md) 中的 trace 工具 |
 
-这一模式的原生示例是 [`examples/search-r1`](../_examples_synced/search-r1/README.md)：通过 `--custom-generate-function-path` 接入搜索增强的多轮生成，外层仍然走 slime 默认的 `sglang_rollout`。[`examples/multi_agent`](../_examples_synced/multi_agent/README.md) 也使用同一接口实现 per-sample 多 agent 生成；如果需要替换整个 rollout 编排，可参考 [`examples/fully_async`](../_examples_synced/fully_async/README.md)。
 
 ## 详细接口参考
 
@@ -116,7 +115,6 @@ async def custom_generate(args, sample: Sample, sampling_params: dict) -> list[S
 
 如果一个完整 trajectory 只有一个总奖励、但被拆成了 `K` 个训练片段，常见做法是在这些片段之间分配这个奖励（例如每个片段写入 `reward / K`），避免把同一次 rollout 的奖励重复放大。
 
-**示例**: 参见 [examples/search-r1/generate_with_search.py](../../../examples/search-r1/generate_with_search.py) 和 [examples/multi_agent/rollout_with_multi_agents.py](../../../examples/multi_agent/rollout_with_multi_agents.py)
 
 ---
 

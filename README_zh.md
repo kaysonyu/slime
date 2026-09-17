@@ -100,17 +100,6 @@ slime 被当作 RL 基础设施来开发，因为“脚本能跑起来”远远�
 
 我们还提供了一些未在快速开始中覆盖的使用示例，请查看 [examples](examples/)。
 
-### Agentic RL 示例
-
-下面这些 example 通过 customization 接口接入标准的 rollout / Data Buffer 闭环，而不是独立的 framework：
-
-- [`examples/multi_agent`](examples/multi_agent/README.md)：在标准 rollout loop 内通过 `--custom-generate-function-path` 实现多 agent 生成。
-- [`examples/search-r1`](examples/search-r1/)：通过 `--custom-generate-function-path` 实现 search/RAG 风格的多轮生成。
-- [`examples/fully_async`](examples/fully_async/README.md)：fully-async rollout，适合不同样本生成耗时差异较大的 long-tail agentic 场景。
-- [`examples/coding_agent_rl`](examples/coding_agent_rl/README.md)：端到端 SWE coding-agent RL，包含 sandboxed tool use、test-based reward，以及通过 `--custom-generate-function-path` 导出的 token-correct trajectory segments。
-
-如何为某种 agentic workflow 选择合适的接口，请参考 [自定义指南](docs/zh/get_started/customization.md)。
-
 ## 基于 slime 构建的生态
 
 这些项目不只是 demo。它们是把 slime 作为可复用 RL substrate 的独立系统，覆盖生产级 post-training、agentic RL、domain RL 和 rollout-system research。

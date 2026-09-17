@@ -35,7 +35,6 @@ slime 的设计目标，是让这两大能力彼此强化，同时避免把系�
 - 第一次使用 slime：:doc:`get_started/quick_start`
 - 配置 training 和 rollout 参数：:doc:`get_started/usage`
 - 添加 custom generation、reward 或 rollout function：:doc:`get_started/customization`
-- 构建 agentic RL workflow：:doc:`get_started/agent`
 - 配置生产级 SGLang rollout topology：:doc:`advanced/sglang-config`
 - 接入 external rollout engines：:doc:`advanced/external-rollout-engines`
 - 以字节级 delta 同步权重：:doc:`advanced/delta-weight-sync`
@@ -51,7 +50,6 @@ slime 的设计目标，是让这两大能力彼此强化，同时避免把系�
    get_started/quick_start.md
    get_started/usage.md
    get_started/customization.md
-   get_started/agent.md
    get_started/qa.md
 
 .. toctree::
@@ -93,11 +91,7 @@ slime 的设计目标，是让这两大能力彼此强化，同时避免把系�
    :caption: 其他用法
 
    examples/qwen3-4b-base-openhermes.md
-   _examples_synced/search-r1/README.md
    _examples_synced/fully_async/README.md
-   _examples_synced/retool/README.md
-   _examples_synced/multi_agent/README.md
-   _examples_synced/coding_agent_rl/README.md
 
 .. toctree::
    :maxdepth: 1

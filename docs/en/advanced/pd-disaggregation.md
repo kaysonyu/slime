@@ -83,5 +83,4 @@ PD lets slime keep the training loop unchanged while using a rollout topology th
 ## Related Docs
 
 - [SGLang Config](sglang-config.md)
-- [Agentic RL Training Roadmap](../get_started/agent.md)
 - [Trace Viewer](../developer_guide/trace.md)

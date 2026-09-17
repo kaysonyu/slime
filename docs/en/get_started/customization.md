@@ -44,7 +44,6 @@ For most agentic use cases, **start with `--custom-generate-function-path` plus 
 | Attach custom loss masks, metadata, or convert agentic outputs into training data | [`--rollout-data-postprocess-path`](#rollout-data-postprocess-path), [`--custom-convert-samples-to-train-data-path`](#custom-convert-samples-to-train-data-path) |
 | Debug long-running custom generation, verifier calls, tool calls, or sandbox steps | trace utilities in [`slime.observability.trace_utils`](../developer_guide/trace.md) |
 
-A native example of this pattern is [`examples/search-r1`](../_examples_synced/search-r1/README.md), which adds search-augmented multi-turn generation via `--custom-generate-function-path` while keeping slime's default `sglang_rollout` outer loop. [`examples/multi_agent`](../_examples_synced/multi_agent/README.md) uses the same interface for per-sample multi-agent generation; when the entire rollout orchestration must be replaced, see [`examples/fully_async`](../_examples_synced/fully_async/README.md).
 
 ## Detailed Interface Reference
 
@@ -116,7 +115,6 @@ async def custom_generate(args, sample: Sample, sampling_params: dict) -> list[S
 
 If one full trajectory has a single total reward but is split into `K` training segments, a common pattern is to distribute that reward across the segments, for example by assigning `reward / K` to each segment, so the same rollout reward is not amplified.
 
-**Example**: See [examples/search-r1/generate_with_search.py](../../../examples/search-r1/generate_with_search.py) and [examples/multi_agent/rollout_with_multi_agents.py](../../../examples/multi_agent/rollout_with_multi_agents.py)
 
 ---
 

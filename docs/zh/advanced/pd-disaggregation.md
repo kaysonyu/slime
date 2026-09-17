@@ -83,5 +83,4 @@ PD 让 slime 在不改变 training loop 的情况下，使用更贴合真实 ser
 ## 相关文档
 
 - [SGLang Config](sglang-config.md)
-- [Agentic RL Training Roadmap](../get_started/agent.md)
 - [Trace Viewer](../developer_guide/trace.md)

@@ -68,16 +68,15 @@ CPU suite 是 correctness 的第一道防线，用来在进入昂贵 GPU run 之
 - DP/CP scheduling utilities 和 CP loss invariance；
 - metric reporting 和 distributed metric aggregation；
 - math、GPQA、F1、DeepScaler、DAPO-style math 等 reward-model grading utilities；
-- `Sample` 行为、rollout validation 和 agent trajectory merging；
+- `Sample` 行为、rollout validation；
 - HF checkpoint saver 行为；
 - rollout function、generate function、runtime hook 和 path loading 的 customization hook contracts。
 
-Agent adapter tests 单独放在一个 CPU job 中，因为它们需要额外 SDK 依赖。
 
 常用本地命令：
 
 ```bash
-python tests/test_agent/test_trajectory_manager_branching.py
+python tests/test_dp_schedule.py
 python -m pytest tests/test_megatron_argument_validation.py tests/plugin_contracts/test_plugin_generate_contracts.py
 ```
 
