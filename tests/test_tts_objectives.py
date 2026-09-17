@@ -23,9 +23,10 @@ def test_wer_preserves_insertions_and_empty_hypotheses(reference, hypothesis, ex
     assert word_error_rate(reference, hypothesis)["wer"] == pytest.approx(expected)
 
 
-def test_empty_reference_is_not_a_zero_reward():
-    with pytest.raises(ValueError, match="non-empty"):
-        word_error_rate("...", "hello")
+def test_empty_normalized_reference_matches_delay_definition():
+    # The requested Delay definition preserves raw +inf and clips reward to zero.
+    assert word_error_rate("...", "hello")["wer"] == float("inf")
+    assert 1 - min(word_error_rate("...", "hello")["wer"], 1) == 0
 
 
 def test_grpo_positive_and_negative_advantages_move_selected_probability():

@@ -1,15 +1,18 @@
 """Synchronous policy iterations with concurrent speech generation and scoring."""
 
 import asyncio
-import base64
-import hashlib
-from pathlib import Path
+import copy
 
 import httpx
 
 from slime.backends.sglang_omni_utils.client import OmniClient
 from slime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput
-from slime.rollout.rm_hub.wer import reward_func
+from slime.rollout.audio_artifacts import persist_audio
+from slime.rollout.failures import RecoverableRolloutError, RecoverableFailureBudget, mark_sample_failed
+from slime.rollout.rm_hub import batched_async_rm
+from slime.rollout.rm_hub.composite import reward_batch
+from slime.rollout.rm_hub.config import get_reward_config
+from slime.rollout.rm_hub.runtime import reward_http_runtime_scope
 from slime.utils.types import Sample
 
 
@@ -30,7 +33,7 @@ def build_request(args, sample):
             top_p=1,
             top_k=-1,
             max_new_tokens=args.rollout_max_response_len,
-            seed=args.rollout_seed + sample.index,
+            seed=args.rollout_seed + sample.index + sample.metadata.get("generation_attempt", 0) * 1000003,
         ),
         stage_params={args.omni_stage: parameters},
         metadata={"tts_params": parameters},
@@ -51,64 +54,107 @@ def apply_response(args, sample, response, rollout_id):
     sample.status = Sample.Status.COMPLETED if trace.finish_reason == "stop" else Sample.Status.TRUNCATED
     audio = response.get("audio")
     if audio and audio.get("data"):
-        directory = Path(args.audio_output_dir) / f"rollout_{rollout_id:06d}"
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"sample_{sample.index:08d}.wav"
-        data = base64.b64decode(audio["data"], validate=True)
-        path.write_bytes(data)
-        sample.audio_path = str(path)
-        sample.metadata["audio_sha256"] = hashlib.sha256(data).hexdigest()
+        sample.audio_path, details = persist_audio(
+            audio,
+            root=args.audio_output_dir,
+            namespace=getattr(args, "artifact_namespace", "train"),
+            rollout_id=rollout_id,
+            sample_id=sample.index,
+            attempt=sample.metadata.get("generation_attempt", 0),
+        )
+        sample.metadata.update(details)
     elif trace.num_frames:
         raise ValueError("Non-empty generated actions have no corresponding audio")
     sample.metadata["frames"] = trace.num_frames
 
 
 async def _collect(args, rollout_id, groups):
-    clients = [OmniClient(endpoint, args.omni_stage, args.omni_timeout) for endpoint in args.omni_endpoints]
     from slime.rollout.on_policy_distillation import TeacherScorer
 
+    clients = [OmniClient(endpoint, args.omni_stage, args.omni_timeout) for endpoint in args.omni_endpoints]
     teacher = TeacherScorer(args) if args.objective == "mopd" else None
     semaphore = asyncio.Semaphore(args.omni_concurrency)
-    samples = [sample for group in groups for sample in group]
-    try:
-        async with httpx.AsyncClient(timeout=args.omni_timeout, trust_env=False) as asr:
+    budget = RecoverableFailureBudget(getattr(args, "max_recoverable_rollout_failures", 32))
+    observed_version = getattr(args, "expected_weight_version", None)
+    retries = getattr(args, "rollout_group_max_retries", 2)
+    custom = getattr(args, "custom_rm_path", None) not in (None, "slime.rollout.rm_hub.wer.reward_func")
 
-            async def generate(index, sample):
-                async with semaphore:
-                    response = await clients[index % len(clients)].generate(build_request(args, sample))
-                    apply_response(args, sample, response, rollout_id)
-                    if args.objective == "grpo":
-                        if args.custom_rm_path == "slime.rollout.rm_hub.wer.reward_func":
-                            sample.reward = await reward_func(args, sample, client=asr)
-                        else:
-                            from slime.rollout.rm_hub import async_rm
+    async def generate_one(sample):
+        nonlocal observed_version
+        try:
+            # Generation permits are released before any reward-service request.
+            async with semaphore:
+                response = await clients[sample.index % len(clients)].generate(build_request(args, sample))
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code != 429 and error.response.status_code < 500:
+                raise
+            raise RecoverableRolloutError("generation.http_transient") from error
+        except httpx.TransportError as error:
+            raise RecoverableRolloutError("generation.transport") from error
+        apply_response(args, sample, response, rollout_id)
+        version = sample.trajectory.weight_version
+        if observed_version is None:
+            observed_version = version
+        if version != observed_version:
+            raise ValueError("Generation/retry crossed the published student weight version")
 
-                            sample.reward = await async_rm(args, sample)
+    async def run_group(original):
+        for attempt in range(retries + 1):
+            group = copy.deepcopy(original)
+            for sample in group:
+                sample.rollout_id = rollout_id
+                sample.metadata["generation_attempt"] = attempt
+            generated = await asyncio.gather(*(generate_one(sample) for sample in group), return_exceptions=True)
+            for sample, result in zip(group, generated, strict=True):
+                if isinstance(result, RecoverableRolloutError):
+                    mark_sample_failed(sample, result.failure)
+                elif isinstance(result, BaseException):
+                    raise result
+            if not any(sample.remove_sample for sample in group):
+                if teacher is not None:
+                    await asyncio.gather(*(teacher.score(sample) for sample in group))
+                else:
+                    if custom:
+                        rewards = await batched_async_rm(args, group)
                     else:
-                        await teacher.score(sample)
+                        rewards = await reward_batch(args, group)
+                    for sample, reward in zip(group, rewards, strict=True):
+                        sample.reward = reward
+            if not any(sample.remove_sample for sample in group):
+                return group
+            budget.record(group)
+            if attempt == retries:
+                raise RuntimeError("Complete prompt group retry budget exhausted")
+        raise AssertionError("Group retry loop exited unexpectedly")
 
-            tasks = [asyncio.create_task(generate(i, sample)) for i, sample in enumerate(samples)]
+    try:
+        async with reward_http_runtime_scope() as runtime:
+            if args.objective == "grpo" and not custom:
+                runtime.add_services(get_reward_config(args).services)
+            tasks = [asyncio.create_task(run_group(group)) for group in groups]
             try:
-                await asyncio.gather(*tasks)
+                completed = await asyncio.gather(*tasks)
             except BaseException:
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
                 raise
+            metrics = {**runtime.collect_metrics(), **budget.collect_metrics()}
+            metrics["rollout/retried_groups"] = sum(group[0].metadata["generation_attempt"] > 0 for group in completed)
+            return completed, metrics
     finally:
         await asyncio.gather(*(client.close() for client in clients))
         if teacher is not None:
             await teacher.close()
-    versions = {sample.trajectory.weight_version for sample in samples}
-    if len(versions) != 1:
-        raise ValueError(f"One synchronous rollout batch contains different policy versions: {versions}")
-    return groups
 
 
 def generate_rollout(args, rollout_id, data_source, evaluation=False):
     groups = data_source.get_samples(args.rollout_batch_size)
-    groups = asyncio.run(_collect(args, rollout_id, groups))
+    groups, metrics = asyncio.run(_collect(args, rollout_id, groups))
     if evaluation:
-        samples = [s for group in groups for s in group]
-        return RolloutFnEvalOutput(data={"tts": {"samples": samples, "rewards": [s.reward for s in samples]}})
-    return RolloutFnTrainOutput(samples=groups)
+        samples = [sample for group in groups for sample in group]
+        return RolloutFnEvalOutput(
+            data={getattr(args, "eval_dataset_name", "tts"): {"samples": samples, "rewards": [sample.reward for sample in samples]}},
+            metrics=metrics,
+        )
+    return RolloutFnTrainOutput(samples=groups, metrics=metrics)

@@ -2,6 +2,8 @@
 
 基于 **slime v0.3.2** 的 TTS RL 分支。推理使用单独维护的 **SGLang-Omni**，训练使用 **Megatron-LM**。
 当前接入 MOSS TTS Local 与 Higgs TTS 的离散多码本策略，提供 WER GRPO 和同模型多教师 MOPD。
+公共层已迁入多语言 WER、SIM/Judge 组合奖励、完整组重试、数据校验及独立评估。
+正式任务提交与服务管理见 [公共 TTS GRPO 入口](examples/tts_grpo/README.md)。
 
 这里保留 slime 的 `train.py → Ray → rollout / Megatron` 组织方式。模型自身的时序、码本、停止规则与参数映射放在
 `slime_plugins/models/`；公共框架负责 batch、DP 调度、CP、优化器、checkpoint、权重同步和日志。
@@ -24,7 +26,8 @@ loss 的每条样本分母在 CP 切分前计算，梯度通过 Megatron/Transfo
 train.py
 slime/
   ray/                         生命周期、GPU placement、同步训练迭代
-  rollout/                     Omni 生成、领域教师路由、WER
+  rollout/                     Omni 生成、领域教师路由、公共奖励、数据与重试
+  serving/tts_sim/              独立 WavLM/ECAPA 音色相似度服务
   backends/
     megatron_utils/             公共 batch / CP / loss / optimizer / checkpoint
     sglang_omni_utils/          分阶段 HTTP 控制与完整权重发布
@@ -34,6 +37,7 @@ slime_plugins/models/
   moss_tts_local/               config / data / model / Local decoder / weights / diagnostics
   higgs_tts/                    data / model / weights / diagnostics
 scripts/run-moss-tts-local.sh
+examples/tts_grpo/              参数化 Inspire Job、独立服务和奖励/评估配置
 ```
 
 删除了原始 SGLang engine/router、agent、critic、异步/部分 rollout、量化及 delta/disk 同步分支、
@@ -67,6 +71,8 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 NCCL 的两个设置要同时用于训练进程和 Omni 服务。Torch/CUDA/TE 由运行环境提供；
 `docker/Dockerfile` 接受 `BASE_IMAGE`，不会自动克隆或修改 Megatron、Omni。
+公共奖励新增 `aiohttp`、`pydantic`、`regex`、`zhconv`、`soundfile` 依赖，已在 requirements 声明。
+旧训练镜像需先准备这些依赖；独立 SIM 服务还需 `tts-sim` extra 及与 Torch 匹配的 torchaudio。
 
 ## 权重目录与一次性转换
 
@@ -105,7 +111,8 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc-per-node 1 tools/convert_hf
 
 ## MOSS Local：WER GRPO
 
-训练数据是 JSONL。`text` 同时用于合成与 WER 参考；参考音频和领域为可选字段。
+训练数据是 JSONL。`text` 用于合成，`target_text` 可独立指定 WER 参考，缺省使用 `text`。
+每条记录可指定 `language`、参考音频和领域；完整数据格式及预检见公共 TTS GRPO 入口。
 
 ```json
 {"text":"Please place the blue notebook beside the wooden box.","domain":"general"}
@@ -148,12 +155,14 @@ CUDA_VISIBLE_DEVICES=2,3 TRAIN_GPUS=2 \
 默认训练完整策略；`--train-scope audio` 冻结全局文本 embedding/backbone。
 
 GRPO 使用同 prompt 组内标准化奖励与逐动作 PPO 裁剪，比值来自真实行为 logprob。
-WER 奖励为 `1 - WER`，不裁掉大于 1 的 WER；ASR 服务失败会中止当前迭代。
-英文按词，`--wer-language zh` 明确使用中文字符级/CER 口径。
+WER 采用旧 Delay 项目的定义，奖励为 `1 - min(WER, 1)`，指标保留原始 WER。
+逐样本选择语言，中文/粤语包含繁简转换，字符语言按 grapheme 计算。
+暂时性服务故障有限重试并重新生成完整组，协议错误或重试预算耗尽会结束当前迭代。
 默认采样使用正温度、`top_p=1`、`top_k=-1`、无音频重复惩罚，保证训练与采样概率的定义一致。
 
 独立验证集通过 `--eval-data /shared/eval.jsonl --eval-interval 5` 配置。
-验证遍历该文件；MOPD 的验证也使用 WER，因此需要 ASR endpoint。
+也可用 `--eval-config` 配置多个命名数据集及各自采样参数，指标写为 `eval/<name>/...`。
+验证遍历数据集；MOPD 的验证使用独立奖励配置，默认 WER 时需要 ASR endpoint。
 
 ## 同模型多教师 MOPD
 
@@ -208,8 +217,8 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc-per-node 1 tools/export_tts
 ## 日志与验证边界
 
 公共层写 `metrics.jsonl`，可选 `--use-tensorboard --tb-log-dir ...` 和
-`--use-wandb --wandb-mode offline`。音频文件按 rollout/sample 编号保存，完整调试样本可用
-`--save-debug-rollout-data '/shared/run/rollout_{rollout_id}.pt'` 留存；它包含 ASR 转写和教师身份。
+`--use-wandb --wandb-mode offline`。音频文件按数据集 namespace、rollout、sample 和 attempt 的稳定身份保存，完整调试样本可用
+`--save-debug-rollout-data '/shared/run/rollout_{rollout_id}.pt'` 留存；它包含文本、奖励分项与教师身份。
 
 公共指标包含 WER、corpus WER、组内奖励标准差、零方差组比例、帧/动作数、截断率、loss、
 概率比值、裁剪比例、logprob 差、梯度范数和 LR。MOPD 另记录蒸馏优势与教师 logprob。

@@ -24,6 +24,14 @@ jobs:
           - test_tts_objectives.py
           - test_tts_protocols.py
           - test_tts_gpu_guard.py
+          - test_tts_reward_wer.py
+          - test_tts_reward_runtime.py
+          - test_tts_reward_judge.py
+          - test_tts_sim_service.py
+          - test_tts_inspire_serving.py
+          - test_tts_data_eval.py
+          - test_tts_rollout_services.py
+          - test_tts_launch.py
           - test_dp_schedule.py
           - test_cp_utils.py
           - test_loss_cp_invariance.py
@@ -38,9 +46,9 @@ jobs:
           cache: pip
       - name: Install CPU test environment
         run: |
-          python -m pip install 'torch==2.9.1' --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install 'torch==2.9.1' 'torchaudio==2.9.1' --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -r requirements.txt pytest
-          python -m pip install -e . --no-deps
+          python -m pip install -e '.[tts-sim]'
       - name: Run the registered test entry point
         env:
           PYTHONPATH: .

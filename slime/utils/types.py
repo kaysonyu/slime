@@ -35,6 +35,7 @@ class Sample:
     audio_path: str | None = None
     teacher_scores: torch.Tensor | None = None
     advantage: float | None = None
+    remove_sample: bool = False
     metadata: dict = field(default_factory=dict)
 
     class Status(Enum):

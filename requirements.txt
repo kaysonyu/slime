@@ -5,6 +5,12 @@ transformers==5.12.1
 ray[default]==2.56.0
 safetensors>=0.8.0
 httpx[http2]>=0.28,<1
+aiohttp>=3.9,<4
+pydantic>=2.7,<3
+regex>=2024.5.15
+zhconv>=1.4.3
+soundfile>=0.12
+typing_extensions>=4.7
 numpy>=1.26
 packaging
 psutil

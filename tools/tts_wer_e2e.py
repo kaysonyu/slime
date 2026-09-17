@@ -25,6 +25,8 @@ def main():
         parser.add_argument("--" + field, required=True)
     parser.add_argument("--codec")
     parser.add_argument("--asr-model")
+    parser.add_argument("--eval-config", help="Optional independent evaluation datasets for the bounded validation")
+    parser.add_argument("--reward-config", help="Optional composite reward configuration")
     parser.add_argument("--model-family", choices=["moss_tts_local", "higgs_tts"], default="moss_tts_local")
     parser.add_argument("--objective", choices=["grpo", "mopd"], default="grpo")
     parser.add_argument("--rollout-max-response-len", type=int, default=128)
@@ -164,7 +166,14 @@ def main():
             info = client.post("http://127.0.0.1:18410/model_info", json={"stages": ["tts_engine"]})
             info.raise_for_status()
             (output / "initial_model_info.json").write_text(json.dumps(info.json(), indent=2) + "\n")
-        train_env = {**base_env, "CUDA_VISIBLE_DEVICES": "3,4", "PYTHONPATH": args.megatron + ":" + str(snapshot)}
+        train_env = {
+            **base_env,
+            "CUDA_VISIBLE_DEVICES": "3,4",
+            "PYTHONPATH": args.megatron
+            + ":"
+            + str(snapshot)
+            + (":" + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else ""),
+        }
         common = [
             sys.executable,
             str(snapshot / "train.py"),
@@ -217,6 +226,10 @@ def main():
             common += ["--asr-endpoint", "http://127.0.0.1:18411/v1/audio/transcriptions", "--asr-model", "qwen3-asr"]
         else:
             common += ["--mopd-teachers", "domain_a=http://127.0.0.1:18412", "domain_b=http://127.0.0.1:18413"]
+        if args.eval_config:
+            common += ["--eval-config", args.eval_config, "--eval-interval", "1"]
+        if args.reward_config:
+            common += ["--reward-config", args.reward_config]
         for name in ("logprob_parity_tolerance", "logprob_parity_mean_tolerance"):
             value = getattr(args, name)
             if value is not None:

@@ -1,6 +1,5 @@
 """Rollout lifecycle and DP planning for native Omni trajectories."""
 
-import copy
 import itertools
 import math
 import time
@@ -14,6 +13,7 @@ from slime.observability.rollout_data_utils import load_debug_rollout_data, save
 from slime.observability.rollout_metrics import log_tts_rollout_data
 from slime.rollout.base_types import call_rollout_fn
 from slime.rollout.data_source import RolloutDataSource
+from slime.rollout.evaluation import evaluation_source
 from slime.utils.dp_schedule import build_dp_schedule
 from slime.utils.misc import Box, load_function
 
@@ -62,6 +62,7 @@ class RolloutManager:
 
     def set_weight_version(self, version):
         self.weight_version = str(version)
+        self.args.expected_weight_version = self.weight_version
 
     def generate(self, rollout_id):
         started = time.monotonic()
@@ -72,7 +73,12 @@ class RolloutManager:
             output = call_rollout_fn(self.generate_rollout, self.args, rollout_id, self.data_source, evaluation=False)
             samples = list(itertools.chain.from_iterable(output.samples))
             metrics = output.metrics or {}
-        if not samples or any(sample.trajectory is None for sample in samples):
+        if not samples or any(
+            sample.trajectory is None
+            or sample.remove_sample
+            or sample.status not in (sample.Status.COMPLETED, sample.Status.TRUNCATED)
+            for sample in samples
+        ):
             raise ValueError("A TTS rollout must return non-empty native trajectories")
         if self.weight_version is not None and not self.args.load_debug_rollout_data:
             if any(sample.trajectory.weight_version != self.weight_version for sample in samples):
@@ -140,15 +146,23 @@ class RolloutManager:
     def eval(self, rollout_id):
         if self.args.debug_train_only:
             return
-        eval_args = copy.copy(self.args)
-        eval_args.prompt_data = self.args.eval_data
-        eval_args.objective = "grpo"
-        eval_args.audio_output_dir = str(self.args.audio_output_dir) + "/eval"
-        eval_args.rollout_batch_size = len(RolloutDataSource(eval_args))
-        evaluation_source = RolloutDataSource(eval_args)
-        output = call_rollout_fn(self.eval_generate_rollout, eval_args, rollout_id, evaluation_source, evaluation=True)
-        for values in output.data.values():
-            log_tts_rollout_data(rollout_id, self.args, values["samples"], output.metrics or {}, 0, prefix="eval")
+        for dataset in self.args.eval_datasets:
+            eval_args, source = evaluation_source(self.args, dataset)
+            started = time.monotonic()
+            output = call_rollout_fn(self.eval_generate_rollout, eval_args, rollout_id, source, evaluation=True)
+            for name, values in output.data.items():
+                metrics = {
+                    f"eval/{name}/{key.removeprefix('rollout/')}": value
+                    for key, value in (output.metrics or {}).items()
+                }
+                log_tts_rollout_data(
+                    rollout_id,
+                    eval_args,
+                    values["samples"],
+                    metrics,
+                    time.monotonic() - started,
+                    prefix=f"eval/{name}",
+                )
 
     def save(self, rollout_id):
         self.data_source.metadata["teacher_versions"] = self.args.teacher_versions

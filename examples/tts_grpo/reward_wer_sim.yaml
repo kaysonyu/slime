@@ -1,0 +1,15 @@
+reward:
+  components:
+    - {name: wer, weight: 0.4}
+    - {name: reference_similarity, weight: 0.6}
+services:
+  wer:
+    protocol: qwen3_asr_chat_path
+    endpoint: ${TTS_ASR_URL}
+    model: qwen3-asr-1.7b
+    auth_token_env: INSPIRE_API_KEY
+    runtime: {timeout_seconds: 120, concurrency: 32, max_retries: 2}
+  timbre_sim:
+    endpoint: ${TTS_SIM_URL}
+    auth_token_env: INSPIRE_API_KEY
+    runtime: {timeout_seconds: 120, concurrency: 32, max_retries: 2}

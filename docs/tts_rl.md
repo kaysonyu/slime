@@ -54,10 +54,14 @@ are computed before CP slicing.
 
 GRPO uses action-level clipped ratios and prompt-group advantages. MOPD uses
 domain-routed frozen teachers on the exact student trajectory, with a detached
-teacher-minus-student logprob advantage. The first reward is `1 - WER`, with
-unclipped raw WER retained in metrics. ASR failures are errors; an empty actual
-generation receives the empty-transcript score. Chinese character tokenization
-is explicitly identified as CER-style evaluation.
+teacher-minus-student logprob advantage. The shared reward path now uses the
+Delay adapter's multilingual WER definition and bounded `1 - min(WER, 1)` reward,
+retaining raw WER in metrics. Chinese/Cantonese text is normalized to simplified
+Chinese, and character languages use grapheme tokens. Reward services have
+separate concurrency limits, bounded retries and complete-group recovery.
+An actual empty generation receives zero reward. See
+[shared speech GRPO](../examples/tts_grpo/README.md) for composite WER/SIM/Judge,
+data preflight, independent evaluation and Inspire deployment.
 
 ## Validation stages
 

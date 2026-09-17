@@ -23,9 +23,16 @@ def log_tts_rollout_data(rollout_id, args, samples, extra, elapsed, prefix="roll
     wers = [s.metadata["wer"] for s in samples if "wer" in s.metadata]
     if wers:
         values[f"{prefix}/wer"] = float(np.mean(wers))
-        errors = sum(s.metadata["errors"] for s in samples)
-        reference_tokens = sum(s.metadata["reference_tokens"] for s in samples)
-        values[f"{prefix}/corpus_wer"] = errors / reference_tokens
+        measured = [s for s in samples if "errors" in s.metadata]
+        errors = sum(s.metadata["errors"] for s in measured)
+        reference_tokens = sum(s.metadata["reference_tokens"] for s in measured)
+        if reference_tokens:
+            values[f"{prefix}/corpus_wer"] = errors / reference_tokens
+    components = sorted({key for sample in samples for key in sample.metadata.get("reward_components", {})})
+    for component in components:
+        scores = [sample.metadata["reward_components"][component] for sample in samples if component in sample.metadata.get("reward_components", {})]
+        values[f"{prefix}/reward/{component}"] = float(np.mean([score["reward"] for score in scores]))
+        values[f"{prefix}/reward/{component}/raw"] = float(np.mean([score["raw"] for score in scores]))
     groups = {}
     for sample in samples:
         groups.setdefault(sample.group_index, []).append(sample)

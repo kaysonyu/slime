@@ -101,8 +101,20 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
         group.add_argument("--n-samples-per-prompt", type=int, default=4)
         group.add_argument("--prompt-data", default=None)
         group.add_argument("--custom-rm-path", default=None)
+        group.add_argument("--group-rm", action="store_true")
+        group.add_argument("--reward-config", default=None)
+        group.add_argument("--reward-timeout", type=float, default=120)
+        group.add_argument("--reward-concurrency", type=int, default=8)
+        group.add_argument("--reward-max-retries", type=int, default=2)
+        group.add_argument("--rollout-group-max-retries", type=int, default=2)
+        group.add_argument("--max-recoverable-rollout-failures", type=int, default=32)
         group.add_argument("--reward-key", default=None)
         group.add_argument("--eval-data", default=None)
+        group.add_argument("--eval-config", default=None)
+        group.add_argument("--eval-prompt-data", nargs="+", default=None)
+        group.add_argument("--n-samples-per-eval-prompt", type=int, default=1)
+        group.add_argument("--eval-temperature", type=float, default=None)
+        group.add_argument("--eval-max-response-len", type=int, default=None)
         group.add_argument("--rollout-temperature", type=float, default=1.0)
         group.add_argument("--rollout-top-p", type=float, default=1.0)
         group.add_argument("--rollout-top-k", type=int, default=-1)
@@ -175,7 +187,9 @@ def parse_args(add_custom_arguments=None):
         group.add_argument("--mopd-advantage-clip", type=float, default=5)
         group.add_argument("--asr-endpoint", default=None)
         group.add_argument("--asr-model", default="qwen3-asr")
-        group.add_argument("--wer-language", choices=["en", "zh"], default="en")
+        group.add_argument("--wer-language", default="en", help="Default language for rows without language; en/zh or a canonical language name")
+        group.add_argument("--asr-protocol", choices=["openai_audio_transcriptions", "qwen3_asr_chat_path"], default="openai_audio_transcriptions")
+        group.add_argument("--asr-auth-token-env", default=None)
         group.add_argument("--train-scope", choices=["full", "audio"], default="full")
         group.add_argument("--local-chunk-size", type=int, default=256)
         group.add_argument("--metrics-jsonl", default=None)
@@ -267,8 +281,6 @@ def configure_tts_args(args):
         raise ValueError("num_rollout cannot be negative")
     if not preloaded_rollout(args) and args.num_rollout != 0 and not args.prompt_data:
         raise ValueError("Training requires --prompt-data")
-    if args.objective == "grpo" and not args.custom_rm_path and not preloaded_rollout(args) and not args.asr_endpoint:
-        raise ValueError("WER training requires --asr-endpoint")
     if args.calculate_per_token_loss:
         raise ValueError("TTS objectives use complete-sample normalization, not Megatron token-count normalization")
     if args.global_batch_size is None:
@@ -277,10 +289,26 @@ def configure_tts_args(args):
         args.eps_clip_high = args.eps_clip
     if args.num_rollout is None and args.num_epoch is None:
         raise ValueError("Specify --num-rollout or --num-epoch")
-    if args.eval_interval is not None and not args.eval_data:
-        raise ValueError("Evaluation requires a separate --eval-data JSONL file")
-    if args.eval_interval is not None and not args.custom_rm_path and not args.asr_endpoint:
-        raise ValueError("WER evaluation requires --asr-endpoint, including for MOPD")
+    from slime.utils.eval_config import resolve_eval_datasets
+    from slime.rollout.rm_hub.config import get_reward_config
+    from slime.rollout.rm_hub.language import resolve_language
+
+    resolve_language(args.wer_language)
+    args.eval_datasets = resolve_eval_datasets(args)
+    if args.eval_interval is not None and not args.eval_datasets:
+        raise ValueError("Evaluation requires --eval-data, --eval-config, or --eval-prompt-data")
+    for name in ("rollout_group_max_retries", "max_recoverable_rollout_failures"):
+        if getattr(args, name) < 0:
+            raise ValueError(f"{name} must be non-negative")
+    if args.custom_rm_path not in (None, "slime.rollout.rm_hub.wer.reward_func") and args.reward_config:
+        raise ValueError("Choose --custom-rm-path or --reward-config")
+    if args.group_rm and not args.custom_rm_path:
+        raise ValueError("--group-rm requires --custom-rm-path")
+    builtin_reward = args.custom_rm_path in (None, "slime.rollout.rm_hub.wer.reward_func")
+    if builtin_reward and not preloaded_rollout(args) and (
+        args.objective == "grpo" or any(not dataset.reward_config for dataset in args.eval_datasets)
+    ):
+        get_reward_config(args)
     if args.objective == "grpo" and args.n_samples_per_prompt < 2:
         raise ValueError("GRPO requires at least two samples per prompt")
     if args.objective == "mopd" and not args.mopd_teachers and not preloaded_rollout(args):
