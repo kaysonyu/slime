@@ -1,31 +1,7 @@
-# slime Documentation
+# Documentation
 
-We recommend new contributors start from writing documentation, which helps you quickly understand slime codebase.
-Most documentation files are located under the `docs/` folder.
+The upstream documentation site and its build pipeline have been removed from the TTS cleanup baseline.
+Historical guides remain available in [slime v0.3.2](https://github.com/THUDM/slime/tree/v0.3.2/docs).
 
-## Docs Workflow
-
-### Install Dependency
-
-```bash
-apt-get update && apt-get install -y pandoc parallel retry
-pip install -r requirements.txt
-```
-
-### Update Documentation
-
-You can update the documentation in the en and zh folders by adding Markdown or Jupyter Notebook files to the appropriate subdirectories. If you create new files, make sure to update index.rst (or any other relevant .rst files) accordingly.
-
-## Build and Render
-
-```bash
-# build english version
-bash ./build.sh en
-bash ./serve.sh en
-
-# build chinese version
-bash ./build.sh zh
-bash ./serve.sh zh
-```
-
-You can then visit `http://localhost:8000` to view the documentation.
+Current branch scope is described in the [repository README](../README.md).
+TTS-specific documentation is introduced with [the implementation PR](https://github.com/kaysonyu/slime/pull/3).
