@@ -179,6 +179,10 @@ settings.json
 
 wandb/
 outputs/
+examples/tts_grpo/endpoints.env
+examples/tts_grpo/reward-secret.env
+examples/tts_grpo/serving/.state/
+examples/tts_grpo/serving/config.local.toml
 local/
 train_rollout_diff_exp/results/
 **/rollout_data/

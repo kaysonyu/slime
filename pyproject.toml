@@ -37,6 +37,10 @@ ignore = [
     "E501", # Line too long # TODO handle it later
 ]
 
+# Keep the source annotation style of the vendored WavLM/ECAPA model.
+[tool.ruff.lint.per-file-ignores]
+"slime/serving/tts_sim/model.py" = ["UP006", "UP035", "UP045"]
+
 [tool.pytest.ini_options]
 # durations=0 will display all tests execution time, sorted in ascending order starting from from the slowest one.
 # -vv will also display tests with duration = 0.00s

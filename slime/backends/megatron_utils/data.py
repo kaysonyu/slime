@@ -1,152 +1,34 @@
+"""Microbatch iteration and common CP batching for native speech samples."""
+
 from collections.abc import Sequence
+from importlib import import_module
 
 import torch
-import torch.nn.functional as F
 from megatron.core import mpu
-from megatron.core.packed_seq_params import PackedSeqParams
+from megatron.training.global_vars import get_args
 
 from slime.utils import accelerator
 from slime.utils.types import RolloutBatch
+from .policy_batch import PolicyBatch, collate_policy_batch
 
-from .cp_utils import slice_with_cp
 
-
-def get_batch(
-    data_iterator: "DataIterator",
-    keys: Sequence[str],
-    pad_multiplier: int = 128,
-    allgather_cp: bool = False,
-) -> dict[str, torch.Tensor | PackedSeqParams | list[torch.Tensor] | None]:
-    """
-    Generate a CP-ready micro-batch with packed sequence parameters.
-
-    Steps:
-    - Fetch raw fields via iterator.
-    - Save original token tensors under "unconcat_tokens".
-    - Slice tokens into two chunks for Context Parallelism (CP), concatenate, and pad to a configurable multiple.
-    - Build cu_seqlens and `PackedSeqParams` with T-H-D layout (T: sequence length, H: attention heads, D: head dimension).
-
-    Args:
-        data_iterator: Iterator providing micro-batch data.
-        keys: List of keys to fetch from the iterator.
-        pad_multiplier: Multiplier for padding size calculation (default: 128).
-
-    Returns a dict including:
-    - "tokens": torch.LongTensor of shape [1, T_padded] on the current CUDA device
-    - "unconcat_tokens": list[torch.LongTensor] for the micro-batch before CP slicing/concat
-    - "packed_seq_params": PackedSeqParams with T-H-D settings (cu_seqlens on CUDA, dtype=int)
-    Plus any other requested keys forwarded from the iterator.
-    """
-
-    assert "tokens" in keys
-    batch = data_iterator.get_next(keys)
-
-    tokens = batch["tokens"]
-    # use 0 as the pad token id should be fine?
-    pad_token_id = 0
-    pad_size = mpu.get_tensor_model_parallel_world_size() * pad_multiplier
-
-    # for cp, we need all tokens to calculate logprob
-    batch["unconcat_tokens"] = tokens
-
-    cp_size = mpu.get_context_parallel_world_size()
-    cp_rank = mpu.get_context_parallel_rank()
-
+def get_batch(data_iterator, keys=None, pad_multiplier=128, allgather_cp=False) -> PolicyBatch:
+    args = get_args()
     if allgather_cp:
-        # DSA mode: concatenate all sequences first, then slice once with CP.
-        # We also pad the *global* concatenated stream to make per-rank chunks equal.
-        cu_seqlens_list: list[int] = [0]
-        for t in tokens:
-            cu_seqlens_list.append(cu_seqlens_list[-1] + t.size(0))
-
-        tokens = torch.cat(tokens, dim=0)
-
-        # Pad global stream so (1) divisible by cp_size (equal chunks),
-        # (2) divisible by pad_size (reduce fragmentation).
-        global_pad_size = cp_size * pad_size
-        pad = (global_pad_size - tokens.size(0) % global_pad_size) % global_pad_size
-        if pad != 0:
-            tokens = F.pad(tokens, (0, pad), value=pad_token_id)
-            cu_seqlens_list.append(cu_seqlens_list[-1] + pad)
-
-        cu_seqlens = torch.tensor(cu_seqlens_list, dtype=torch.int, device=accelerator.current_device())
-        tokens = tokens.chunk(cp_size, dim=0)[cp_rank]
-    else:
-        tokens = [slice_with_cp(t, pad_token_id) for t in tokens]
-
-        cu_seqlens = [0]
-        for t in tokens:
-            cu_seqlens.append(cu_seqlens[-1] + t.size(0))
-
-        tokens = torch.cat(tokens)
-
-        # Always pad to reduce memory fragmentation and maybe make the computation faster
-        pad = (pad_size - tokens.size(0) % pad_size) % pad_size
-        if pad != 0:
-            tokens = F.pad(tokens, (0, pad), value=pad_token_id)
-            cu_seqlens.append(cu_seqlens[-1] + pad)
-
-        # thd requires the cu_seqlens to be of the origin length
-        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int, device=accelerator.device()) * cp_size
-
-    max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-    packed_seq_params = PackedSeqParams(
-        cu_seqlens_q=cu_seqlens,
-        cu_seqlens_kv=cu_seqlens,
-        max_seqlen_q=max_seqlen,
-        max_seqlen_kv=max_seqlen,
-        qkv_format="thd",
-    )
-
-    tokens = tokens.unsqueeze(0)
-
-    batch["tokens"] = tokens
-    batch["packed_seq_params"] = packed_seq_params
-
-    # loss masks
-    loss_masks = []
-    for loss_mask, total_length, response_length in zip(
-        batch["loss_masks"],
-        batch["total_lengths"],
-        batch["response_lengths"],
-        strict=True,
-    ):
-        prompt_length = total_length - response_length
-        # Align mask to token stream positions (prompt_length-1 left pad, 1 right pad)
-        loss_mask = F.pad(loss_mask, (prompt_length - 1, 1), value=0)
-        if allgather_cp:
-            loss_masks.append(loss_mask)
-            continue
-        loss_mask = slice_with_cp(loss_mask, 0)
-        loss_masks.append(loss_mask)
-
-    if allgather_cp:
-        # DSA: concatenate first (same as tokens), pad globally (same pad as above), then slice once.
-        loss_masks = torch.cat(loss_masks, dim=0)
-        if pad != 0:
-            loss_masks = F.pad(loss_masks, (0, pad), value=0)
-        loss_masks = loss_masks.chunk(cp_size, dim=0)[cp_rank].unsqueeze(0)
-    else:
-        loss_masks = torch.cat(loss_masks)
-        loss_masks = F.pad(loss_masks, (0, pad), value=0).unsqueeze(0)
-
-    assert loss_masks.shape == tokens.shape, f"loss_masks.shape: {loss_masks.shape}, tokens.shape: {tokens.shape}"
-    batch["full_loss_masks"] = loss_masks
-
-    # Process multimodal training tensors if present
-    multimodal_train_inputs = batch.get("multimodal_train_inputs", None)
-    if multimodal_train_inputs is not None:
-        multimodal_data = {}  # key -> concatenated tensor
-        for mm_input_dict in multimodal_train_inputs:
-            if mm_input_dict is not None:
-                for key, mm_tensor in mm_input_dict.items():
-                    if key not in multimodal_data:
-                        multimodal_data[key] = mm_tensor
-                    else:
-                        multimodal_data[key] = torch.cat([multimodal_data[key], mm_tensor], dim=0)
-        batch["multimodal_train_inputs"] = multimodal_data
-
-    return batch
+        raise ValueError("Speech batches currently use the standard Megatron zigzag CP layout")
+    samples = data_iterator.get_next(["samples"])["samples"]
+    adapter = import_module(f"slime_plugins.models.{args.model_family}.data")
+    tensors, temperatures, pad_row, group_names = adapter.batch_inputs(samples, args.policy_config)
+    return collate_policy_batch(
+        samples,
+        tensors,
+        pad_row,
+        temperatures,
+        cp_size=mpu.get_context_parallel_world_size(),
+        cp_rank=mpu.get_context_parallel_rank(),
+        pad_multiple=pad_multiplier,
+        group_names=group_names,
+    ).to(accelerator.current_device())
 
 
 class DataIterator:

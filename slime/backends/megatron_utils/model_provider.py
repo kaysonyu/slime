@@ -1,302 +1,122 @@
-# Adapt from https://github.com/NVIDIA/Megatron-LM/blob/b1efb3c7126ef7615e8c333432d76e08038e17ff/pretrain_gpt.py
-import argparse
-import inspect
-import re
-from contextlib import nullcontext
-from typing import Literal
+"""Construct speech policies on the shared Megatron execution boundary."""
 
 import torch
-from megatron.core import tensor_parallel
-from megatron.core.models.gpt import GPTModel
-from megatron.core.models.gpt.gpt_layer_specs import (
-    get_gpt_decoder_block_spec,
-    get_gpt_layer_local_spec,
-    get_gpt_layer_with_transformer_engine_spec,
-)
-from megatron.core.transformer.spec_utils import import_module
-from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.models.common.language_module.language_module import LanguageModule
+from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transformer_engine_spec
 from megatron.training.arguments import core_transformer_config_from_args
 
-from slime.utils.misc import load_function
 
-_INDEXER_DIRECT_SUBMODULE_NAMES = frozenset(
-    {
-        "wq_b",
-        "wk",
-        "k_norm",
-        "weights_proj",
-        "index_kpool_compress_ape",
-        "index_kpool_compress_gate",
-    }
-)
+class SpeechPolicyModel(LanguageModule):
+    """Shared Megatron global-time execution boundary for discrete speech policies.
 
-
-def _is_indexer_parameter(name: str) -> bool:
-    """Return whether *name* belongs to a DSA indexer.
-
-    The GLM plugin exposes indexer projections directly under
-    ``self_attention``. Megatron's upstream DSA implementation instead nests
-    them under ``self_attention.core_attention.indexer``. Keep the ownership
-    check structural so similarly named non-indexer projections stay trainable.
+    Subclasses provide row embeddings and action heads. Packing, RoPE and CP use
+    the same Megatron implementation for every model family.
     """
 
-    parts = name.split(".")
-    for index, part in enumerate(parts):
-        if part != "self_attention" or index + 1 >= len(parts):
-            continue
-        attention_parts = parts[index + 1 :]
-        if attention_parts[0] in _INDEXER_DIRECT_SUBMODULE_NAMES:
-            return True
-        if "indexer" in attention_parts[:-1]:
-            return True
-    return False
+    def _initialize_backbone(self, config, spec, args, *, pre_process, post_process, pg_collection=None):
+        from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
+        from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEmbedding
+        from megatron.core.transformer.transformer_block import TransformerBlock
 
+        if not pre_process or not post_process:
+            raise ValueError("Speech pipeline stages are not enabled; use PP=1")
+        if config.sequence_parallel:
+            raise ValueError("Speech sequence-parallel head boundary is not enabled")
+        self.pre_process, self.post_process = pre_process, post_process
+        # No full-vocabulary text output head is part of the speech policy.
+        # Audio tying (Higgs) is owned by its model, not LanguageModule's text-head sharing.
+        self.share_embeddings_and_output_weights = False
+        self.text_embedding = LanguageModelEmbedding(
+            config,
+            args.padded_vocab_size,
+            args.max_position_embeddings,
+            position_embedding_type="rope",
+            tp_group=pg_collection.tp if pg_collection is not None else None,
+        )
+        self.decoder = TransformerBlock(
+            config=config, spec=spec, pre_process=True, post_process=True, pg_collection=pg_collection
+        )
+        self.rotary_pos_emb = RotaryEmbedding(
+            kv_channels=config.kv_channels,
+            rotary_percent=1.0,
+            rotary_interleaved=False,
+            rotary_base=args.rotary_base,
+            use_cpu_initialization=config.use_cpu_initialization,
+        )
 
-# Adapt from https://github.com/volcengine/verl/blob/c3b20575d2bc815fcccd84bddb4c0401fc4b632b/verl/models/llama/megatron/layers/parallel_linear.py#L82
-class LinearForLastLayer(torch.nn.Linear):
-    def __init__(
-        self,
-        input_size: int,
-        output_size: int,
-        *,
-        config: TransformerConfig,
-        bias: bool = True,
-    ) -> None:
-        super().__init__(in_features=input_size, out_features=output_size, bias=bias)
-        self.sequence_parallel = config.sequence_parallel
-        if self.sequence_parallel:
-            self.weight.sequence_parallel = True
-            if bias:
-                self.bias.sequence_parallel = True
+    def set_input_tensor(self, input_tensor):
+        if isinstance(input_tensor, list):
+            input_tensor = input_tensor[0]
+        self.decoder.set_input_tensor(input_tensor)
 
-        init_method_std = getattr(config, "init_method_std", None)
-        if init_method_std is None:
-            init_method_std = 0.02
-        self.weight.data.normal_(mean=0.0, std=init_method_std)
-        if bias:
-            self.bias.data.zero_()
+    def shared_embedding_or_output_weight(self):
+        return None
 
-    def forward(
-        self,
-        input_: torch.Tensor,
-        weight: torch.Tensor | None = None,
-        runtime_gather_output: bool | None = None,
-    ) -> tuple[torch.Tensor, None]:
-        logits = super().forward(input_)
-        logits = logits.float()
-        if self.sequence_parallel:
-            logits = tensor_parallel.gather_from_sequence_parallel_region(logits, tensor_parallel_output_grad=False)
-        return logits, None
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        from megatron.core.transformer.module import MegatronModule
 
+        # LanguageModule's implementation assumes a single text output_layer.
+        # Speech heads have separate vocabularies and their own tying rules.
+        return MegatronModule.sharded_state_dict(self, prefix, sharded_offsets, metadata)
 
-def _get_model_provider_func(
-    args: argparse.Namespace,
-    role: Literal["actor", "critic"] = "actor",
-):
-    # Support custom model provider path (similar to --custom-rm-path for reward models)
-    if getattr(args, "custom_model_provider_path", None):
+    def forward(self, batch):
+        from megatron.core.packed_seq_params import PackedSeqParams
 
-        def wrapped_model_provider(
-            pre_process: bool = True, post_process: bool = True, vp_stage: int | None = None
-        ) -> GPTModel:
-            custom_model_provider = load_function(args.custom_model_provider_path)
-            # Check if the custom provider supports vp_stage parameter
-            has_vp_stage = "vp_stage" in inspect.signature(custom_model_provider).parameters
-            if has_vp_stage:
-                model = custom_model_provider(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
-            else:
-                model = custom_model_provider(pre_process=pre_process, post_process=post_process)
-            # Apply critic output layer if needed
-            if post_process and role == "critic":
-                model.output_layer = LinearForLastLayer(
-                    input_size=model.config.hidden_size, output_size=1, config=model.config
-                )
-            return model
-
-        return wrapped_model_provider
-
-    def model_provider(pre_process: bool = True, post_process: bool = True, vp_stage: int | None = None) -> GPTModel:
-        """Builds the model.
-
-        If you set the use_legacy_models to True, it will return the legacy GPT model and if not the mcore GPT model.
-
-        Args:
-            pre_process (bool, optional): Set to true if you need to compute embedings. Defaults to True.
-            post_process (bool, optional): Set to true if you need to want to compute output logits/loss. Defaults to True.
-
-
-        Returns:
-            Union[GPTModel, megatron.legacy.model.GPTModel]: The returned model
-        """
-        use_te = args.transformer_impl == "transformer_engine"
-
-        # Experimental loading arguments from yaml
-        config: TransformerConfig = core_transformer_config_from_args(args)
-        # Older GLM Megatron forks consumed this flag from TransformerConfig.
-        # Preserve that contract for custom specs, while freeze_model_params()
-        # below provides the concrete implementation on current Megatron.
-        config.freeze_indexer = getattr(args, "freeze_indexer", False)
-
-        if args.spec is not None:
-            transformer_layer_spec = import_module(args.spec)
-            # Allow the spec to be a function so that user can use customized Megatron easier.
-            if callable(transformer_layer_spec):
-                result = transformer_layer_spec(args, config, vp_stage)
-                # If the result is itself a model provider (callable with pre_process param),
-                # delegate model construction to it directly (e.g. glm-omni VL model).
-                if callable(result) and "pre_process" in inspect.signature(result).parameters:
-                    model = result(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
-                    if post_process and role == "critic":
-                        model.output_layer = LinearForLastLayer(
-                            input_size=config.hidden_size, output_size=1, config=config
-                        )
-                    return model
-                transformer_layer_spec = result
-        else:
-            if args.num_experts:
-                # Define the decoder block spec
-                kwargs = {
-                    "use_transformer_engine": use_te,
-                }
-                if vp_stage is not None:
-                    kwargs["vp_stage"] = vp_stage
-                transformer_layer_spec = get_gpt_decoder_block_spec(config, **kwargs)
-            else:
-                # Define the decoder layer spec
-                if use_te:
-                    transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
-                        num_experts=args.num_experts,
-                        moe_grouped_gemm=args.moe_grouped_gemm,
-                        qk_layernorm=args.qk_layernorm,
-                        multi_latent_attention=args.multi_latent_attention,
-                        moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm,
-                    )
-                else:
-                    transformer_layer_spec = get_gpt_layer_local_spec(
-                        num_experts=args.num_experts,
-                        moe_grouped_gemm=args.moe_grouped_gemm,
-                        qk_layernorm=args.qk_layernorm,
-                        multi_latent_attention=args.multi_latent_attention,
-                        moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm,
-                    )
-
-        build_model_context = nullcontext
-        build_model_context_args = {}
-        if args.fp8_param_gather:
-            try:
-                from transformer_engine.pytorch import fp8_model_init
-
-                build_model_context = fp8_model_init
-                build_model_context_args["enabled"] = True
-
-                # Check if fp8_model_init supports preserve_high_precision_init_val
-                if "preserve_high_precision_init_val" in inspect.signature(fp8_model_init).parameters:
-                    build_model_context_args["preserve_high_precision_init_val"] = True
-            except Exception as e:
-                raise RuntimeError(
-                    "--fp8-param-gather requires `fp8_model_init` from TransformerEngine, but not found."
-                ) from e
-
-        kwargs = {
-            "config": config,
-            "transformer_layer_spec": transformer_layer_spec,
-            "vocab_size": args.padded_vocab_size,
-            "max_sequence_length": args.max_position_embeddings,
-            "pre_process": pre_process,
-            "post_process": post_process,
-            "fp16_lm_cross_entropy": args.fp16_lm_cross_entropy,
-            "parallel_output": True,
-            "share_embeddings_and_output_weights": not args.untie_embeddings_and_output_weights,
-            "position_embedding_type": args.position_embedding_type,
-            "rotary_percent": args.rotary_percent,
-            "rotary_base": args.rotary_base,
-            "rope_scaling": args.use_rope_scaling,
-        }
-
-        if vp_stage is not None:
-            kwargs["vp_stage"] = vp_stage
-
-        if args.mtp_num_layers:
-            from megatron.core.models.gpt.gpt_layer_specs import get_gpt_mtp_block_spec
-
-            mtp_kwargs = {
-                "use_transformer_engine": use_te,
-            }
-            if vp_stage is not None:
-                mtp_kwargs["vp_stage"] = vp_stage
-
-            mtp_block_spec = get_gpt_mtp_block_spec(config, transformer_layer_spec, **mtp_kwargs)
-            kwargs["mtp_block_spec"] = mtp_block_spec
-
-        with build_model_context(**build_model_context_args):
-            model = GPTModel(**kwargs)
-
-        if post_process and role == "critic":
-            model.output_layer = LinearForLastLayer(input_size=config.hidden_size, output_size=1, config=config)
-
-        return model
-
-    return model_provider
-
-
-def wrap_model_provider_with_freeze(original_provider, args):
-    def wrapped_provider(
-        pre_process=True,
-        post_process=True,
-        **kwargs,
-    ):
-        sig = inspect.signature(original_provider)
-        provider_kwargs = {
-            "pre_process": pre_process,
-            "post_process": post_process,
-        }
-        for key in ["vp_stage", "config", "pg_collection"]:
-            if key in sig.parameters:
-                provider_kwargs[key] = kwargs.get(key, None)
-
-        model = original_provider(**provider_kwargs)
-        freeze_model_params(model, args)
-
-        return model
-
-    return wrapped_provider
+        embedded = self._embed_rows(batch)
+        lengths = batch.cu_seqlens[1:] - batch.cu_seqlens[:-1]
+        packed = PackedSeqParams(
+            cu_seqlens_q=batch.cu_seqlens,
+            cu_seqlens_kv=batch.cu_seqlens,
+            max_seqlen_q=int(lengths.max()),
+            max_seqlen_kv=int(lengths.max()),
+            qkv_format="thd",
+        )
+        rotary_length = self.rotary_pos_emb.get_rotary_seq_len(None, self.decoder, embedded, self.config, packed)
+        hidden = self.decoder(
+            hidden_states=embedded,
+            attention_mask=None,
+            rotary_pos_emb=self.rotary_pos_emb(rotary_length, packed_seq=True),
+            packed_seq_params=packed,
+        )
+        selected = hidden[:, 0].index_select(0, batch.prediction_positions)
+        anchor = hidden.sum() * 0
+        if not len(selected):
+            # CP can assign only prompt/padding rows to a rank. Keep the
+            # replicated action parameters in the backward graph on that rank
+            # so DDP receives the same gradient-ready events everywhere.
+            for module in self.action_modules:
+                for parameter in module.parameters():
+                    if parameter.requires_grad:
+                        anchor = anchor + parameter.reshape(-1)[0] * 0
+            return hidden.new_empty(batch.targets.shape, dtype=torch.float32) + anchor
+        return self._score_actions(selected, batch) + anchor
 
 
 def get_model_provider_func(args, role="actor"):
-    return wrap_model_provider_with_freeze(_get_model_provider_func(args, role), args)
+    if role != "actor":
+        raise ValueError("TTS training has one policy; teachers are external frozen scorers")
 
+    def provider(pre_process=True, post_process=True, vp_stage=None, config=None, pg_collection=None):
+        config = config if config is not None else core_transformer_config_from_args(args)
+        spec = get_gpt_layer_with_transformer_engine_spec(qk_layernorm=True)
+        if args.model_family == "moss_tts_local":
+            from slime_plugins.models.moss_tts_local.model import MossLocalModel
 
-def freeze_model_params(model: GPTModel, args: argparse.Namespace):
-    if getattr(args, "only_train_params_name_list", None):
-        for name, param in model.named_parameters():
-            param.requires_grad = False
-            for pattern in args.only_train_params_name_list:
-                if re.search(pattern, name):
-                    param.requires_grad = True
-                    break
+            model_type = MossLocalModel
+        elif args.model_family == "higgs_tts":
+            from slime_plugins.models.higgs_tts.model import HiggsModel
 
-    if getattr(args, "freeze_params_name_list", None):
-        for name, param in model.named_parameters():
-            for pattern in args.freeze_params_name_list:
-                if re.search(pattern, name):
-                    param.requires_grad = False
-                    break
+            model_type = HiggsModel
+        else:
+            raise ValueError(f"Unsupported speech model {args.model_family}")
+        return model_type(
+            config,
+            spec,
+            args.policy_config,
+            args,
+            pre_process=pre_process,
+            post_process=post_process,
+            pg_collection=pg_collection,
+        )
 
-    if getattr(args, "freeze_indexer", False):
-        frozen_indexer_params = []
-        has_self_attention_params = False
-        for name, param in model.named_parameters():
-            has_self_attention_params |= "self_attention" in name.split(".")
-            if _is_indexer_parameter(name):
-                param.requires_grad = False
-                frozen_indexer_params.append(name)
-
-        if has_self_attention_params and not frozen_indexer_params:
-            raise RuntimeError(
-                "--freeze-indexer was requested, but this model chunk has self-attention "
-                "parameters and no recognized DSA indexer parameters."
-            )
-
-        # Some pipeline stages may legitimately own no indexer weights, so an
-        # empty local tuple is not itself an error.
-        model._slime_frozen_indexer_param_names = tuple(frozen_indexer_params)
+    return provider

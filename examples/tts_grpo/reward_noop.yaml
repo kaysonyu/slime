@@ -1,0 +1,3 @@
+reward:
+  components:
+    - {name: noop, weight: 1.0}

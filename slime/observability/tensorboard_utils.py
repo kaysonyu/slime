@@ -29,6 +29,11 @@ class _TensorboardAdapter(metaclass=SingletonMeta):
 
     def __init__(self, args):
         assert args.use_tensorboard, f"{args.use_tensorboard=}"
+        if SummaryWriter is None:
+            raise RuntimeError("--use-tensorboard requires the tensorboard package")
+        if getattr(args, "tb_log_dir", None):
+            self._writer = SummaryWriter(args.tb_log_dir)
+            return
         tb_project_name = args.tb_project_name
         tb_experiment_name = args.tb_experiment_name
         if tb_project_name is not None or os.environ.get("TENSORBOARD_DIR", None):

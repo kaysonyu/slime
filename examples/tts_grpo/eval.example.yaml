@@ -1,0 +1,15 @@
+eval:
+  defaults:
+    n_samples_per_eval_prompt: 1
+    temperature: 0.8
+    top_p: 1.0
+    top_k: -1
+    max_response_len: 512
+  datasets:
+    - name: chinese
+      path: /inspire/REPLACE_ME/eval_zh.jsonl
+      language: chinese
+    - name: english
+      path: /inspire/REPLACE_ME/eval_en.jsonl
+      language: english
+      n_samples_per_eval_prompt: 2

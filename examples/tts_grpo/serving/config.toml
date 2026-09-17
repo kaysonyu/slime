@@ -1,0 +1,88 @@
+# ASR, SIM, and Judge remain independent platform deployments. Repeated values
+# are intentional: changing one service must not silently change another one.
+
+[asr]
+# Inspire identity and scheduling.
+service_name = "tts-rm-asr-replace-me"
+workspace = "CQ-科研驾驶舱"
+project = "CQ项目"
+group = "科研驾驶舱"
+image = "docker.sii.shaipower.online/inspire-studio/vllm-openai:v0.26.0-audio"
+replicas = 1
+shm_gib = 200
+priority = 10
+custom_domain = ""
+registry_model = "qwen-asr"
+registry_version = "1"
+# ASR runtime and model assets.
+vllm_bin = "vllm"
+model_path = "/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/models/Qwen3-ASR-1.7B"
+generated_audio_root = "/inspire/REPLACE_ME/generated-audio-root"
+served_model_name = "qwen3-asr-1.7b"
+gpu_memory_utilization = 0.90
+max_model_len = 4096
+
+[asr.quota]
+gpus = 8
+cpus = 168
+memory_gib = 1800
+
+[sim]
+# Inspire identity and scheduling.
+service_name = "tts-rm-sim-replace-me"
+workspace = "CQ-科研驾驶舱"
+project = "CQ项目"
+group = "科研驾驶舱"
+image = "docker.sii.shaipower.online/inspire-studio/wavlm-ecapa-sim:trt10.16.1-cu12.9-20260803"
+replicas = 1
+shm_gib = 200
+priority = 10
+custom_domain = ""
+registry_model = "wavlm-ecapa-sim-seedtts"
+registry_version = "1"
+# SIM runtime, model assets, batching, and queue limits.
+checkpoint = "/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/models/wavlm-ecapa-sim-seedtts/wavlm_large_finetune.pth"
+reference_audio_roots = [
+    "/inspire/REPLACE_ME/reference-root-1",
+    "/inspire/REPLACE_ME/reference-root-2",
+]
+generated_audio_root = "/inspire/REPLACE_ME/generated-audio-root"
+per_device_batch = 16
+dynamic_delay_ms = 5.0
+max_items_per_request = 16
+audio_workers = 16
+max_queue_items = 8192
+max_inflight_requests = 4096
+reference_cache_items = 100000
+allow_tf32 = true
+
+[sim.quota]
+gpus = 8
+cpus = 168
+memory_gib = 1800
+
+[judge]
+# Inspire identity and scheduling.
+service_name = "tts-rm-judge-replace-me"
+workspace = "CQ-科研驾驶舱"
+project = "CQ项目"
+group = "科研驾驶舱"
+image = "docker.sii.shaipower.online/inspire-studio/vllm-openai:v0.26.0-audio"
+replicas = 1
+shm_gib = 200
+priority = 10
+custom_domain = ""
+registry_model = "qwen3-omni-thinker"
+registry_version = "1"
+# Judge runtime and model assets.
+vllm_bin = "vllm"
+model_path = "/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/models/AnyAudio-Judge-30B"
+generated_audio_root = "/inspire/REPLACE_ME/generated-audio-root"
+served_model_name = "qwen3-omni-30b-a3b-thinker"
+gpu_memory_utilization = 0.90
+max_model_len = 4096
+
+[judge.quota]
+gpus = 8
+cpus = 168
+memory_gib = 1800

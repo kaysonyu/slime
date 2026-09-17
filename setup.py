@@ -36,7 +36,7 @@ setup(
     packages=find_packages(include=["slime*", "slime_plugins*"]),
     include_package_data=True,
     install_requires=_fetch_requirements("requirements.txt"),
-    extras_require={},
+    extras_require={"tts-sim": ["torchaudio>=2.9", "fastapi>=0.115", "uvicorn>=0.30", "prometheus-client>=0.20"]},
     python_requires=">=3.10",
     classifiers=[
         "Programming Language :: Python :: 3.10",
