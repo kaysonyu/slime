@@ -63,7 +63,7 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False) -> Rollout
 - Adding custom sampling strategies
 - Integrating external tools or APIs during generation
 
-**Example**: See [examples/fully_async](../_examples_synced/fully_async/README.md)
+**Example**: See [examples/fully_async](https://github.com/THUDM/slime/tree/v0.3.2/examples/fully_async)
 
 ---
 

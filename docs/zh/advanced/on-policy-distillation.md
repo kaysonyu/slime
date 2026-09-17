@@ -91,31 +91,11 @@ $$
 
 ### SGLang 教师
 
-```bash
-# 1. 下载模型和数据
-hf download Qwen/Qwen3-32B --local-dir /root/Qwen3-32B
-hf download Qwen/Qwen3-8B --local-dir /root/Qwen3-8B
-hf download --repo-type dataset zhuzilin/dapo-math-17k --local-dir /root/dapo-math-17k
-
-# 2. 转换学生模型
-cd /root/slime
-source scripts/models/qwen3-8B.sh
-PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
-    ${MODEL_ARGS[@]} \
-    --hf-checkpoint /root/Qwen3-8B \
-    --save /root/Qwen3-8B_torch_dist
-
-# 3. 运行
-bash examples/on_policy_distillation/run-qwen3-8B-opd.sh
-```
+[历史模型示例（v0.3.2）](https://github.com/THUDM/slime/blob/v0.3.2/docs/zh/advanced/on-policy-distillation.md)
 
 ### Megatron 教师
 
-```bash
-# 1. 将学生和教师模型都转换为 Megatron 格式
-# 2. 运行
-bash examples/on_policy_distillation/run-qwen3-8B-opd-megatron.sh
-```
+[历史模型示例（v0.3.2）](https://github.com/THUDM/slime/blob/v0.3.2/docs/zh/advanced/on-policy-distillation.md)
 
 ## 初步结果
 

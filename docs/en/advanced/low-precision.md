@@ -71,13 +71,7 @@ slime also supports experimental FP8 training paths. We observed that FP8 traini
 
 4. Start an FP8 training example:
 
-```bash
-# Qwen3-4B FP8 training
-bash scripts/low_precision/run-qwen3-4b-fp8.sh
-
-# Qwen3-30B-A3B FP8 training (2 nodes)
-bash scripts/low_precision/run-qwen3-30b-a3b-fp8.sh
-```
+[Historical model recipe (v0.3.2)](https://github.com/THUDM/slime/blob/v0.3.2/docs/en/advanced/low-precision.md)
 
 ### Implementation Notes
 
@@ -126,18 +120,6 @@ RUNTIME_ENV_JSON="{
 
 3. Launch an example:
 
-```bash
-# Moonlight-16B-A3B INT4 training
-bash scripts/low_precision/run-moonlight-16B-A3B-int4.sh
-
-# Qwen3-30B-A3B INT4 training
-bash scripts/low_precision/run-qwen3-30B-A3B-int4.sh
-
-# Qwen3-235B-A22B INT4 training (8 nodes)
-bash scripts/low_precision/run-qwen3-235B-A22B-int4.sh
-
-# Kimi-k2-Thinking INT4 training (32 nodes)
-bash scripts/low_precision/run-kimi-k2-Thinking-int4.sh
-```
+[Historical model recipe (v0.3.2)](https://github.com/THUDM/slime/blob/v0.3.2/docs/en/advanced/low-precision.md)
 
 For multi-node environments, start the Ray service according to your cluster configuration.

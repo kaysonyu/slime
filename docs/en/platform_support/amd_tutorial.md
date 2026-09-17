@@ -80,16 +80,7 @@ Since slime uses Megatron, and Megatron does not support loading Hugging Face ch
 
 Use slime's built-in HuggingFace-to-Megatron loader for conversion:
 
-```bash
-cd slime/
-source scripts/models/qwen3-4B.sh
-MEGATRON_LM_PATH=$(pip list | grep megatron-core | awk '{print $NF}')
-PYTHONPATH=${MEGATRON_LM_PATH} python tools/convert_hf_to_torch_dist.py \
-    ${MODEL_ARGS[@]} \
-    --no-gradient-accumulation-fusion \
-    --hf-checkpoint /root/Qwen3-4B \
-    --save /root/Qwen3-4B_torch_dist
-```
+[Historical model recipe (v0.3.2)](https://github.com/THUDM/slime/blob/v0.3.2/docs/en/platform_support/amd_tutorial.md)
 
 Note: We implemented a dedicated AMD conversion script that forces a CPU-only conversion workflow using the Gloo backend to bypass hardware-specific issues. A GPU-based script for ROCm is currently in development.
 
@@ -99,14 +90,9 @@ Note: We implemented a dedicated AMD conversion script that forces a CPU-only co
 ### Example: Qwen3-4B
 
 We provide examples to use [Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B), please refer to:
-- [Example: Qwen3-4B Model](https://github.com/THUDM/slime/blob/main/scripts/run-qwen3-4B-amd.sh): Just run
+- [Example: Qwen3-4B Model](https://github.com/THUDM/slime/blob/v0.3.2/scripts/run-qwen3-4B-amd.sh): Just run
 
-```bash
-SLIME_DIR=/root \
-MODEL_DIR=/root \
-DATA_DIR=/root \
-bash scripts/run-qwen3-4B-amd.sh
-``` 
+[Historical model recipe (v0.3.2)](https://github.com/THUDM/slime/blob/v0.3.2/docs/en/platform_support/amd_tutorial.md)
 
 ⚠️ TODO: ROCM seems to not support `apex` yet. Thus, we need to disable gradient accumulation fusionby adding the `--no-gradient-accumulation-fusion` flag in the training script currently. We will continue investigating how to enable this.
 

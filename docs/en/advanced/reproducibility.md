@@ -28,26 +28,11 @@ We provide a fully deterministic GSM8K training script for Qwen2.5-0.5B.
 
 Use the following commands to initialize the training data and checkpoint:
 
-```bash
-# download
-hf download --repo-type dataset zhuzilin/gsm8k --local-dir /root/gsm8k
-hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir /root/Qwen2.5-0.5B-Instruct
-
-# convert ckpt
-cd slime/
-source scripts/models/qwen2.5-0.5B.sh
-PYTHONPATH=/root/Megatron-LM/ python \
-   tools/convert_hf_to_torch_dist.py \
-   ${MODEL_ARGS[@]} \
-   --hf-checkpoint /root/Qwen2.5-0.5B-Instruct \
-   --save /root/Qwen2.5-0.5B-Instruct_torch_dist/
-```
+[Historical model recipe (v0.3.2)](https://github.com/THUDM/slime/blob/v0.3.2/docs/en/advanced/reproducibility.md)
 
 Run training with:
 
-```bash
-bash scripts/run-qwen2.5-0.5B-reproducibility.sh
-```
+[Historical model recipe (v0.3.2)](https://github.com/THUDM/slime/blob/v0.3.2/docs/en/advanced/reproducibility.md)
 
 The wandb screenshots are recorded in [pull#370](https://github.com/THUDM/slime/pull/370).
 

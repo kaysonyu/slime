@@ -1,6 +1,10 @@
 slime Documentation
 ====================
 
+.. note::
+
+   This branch is a TTS cleanup baseline. Model plugins and model-specific recipes have been removed; the retained core still matches v0.3.2. TTS functionality will arrive in follow-up PRs.
+
 slime is an LLM post-training framework for RL scaling, providing two core capabilities:
 
 - High-Performance Training: Supports efficient training in various modes by connecting Megatron with SGLang;
@@ -18,21 +22,11 @@ Why This Design Matters
 - **SGLang-focused rollout**: slime chooses one rollout backend intentionally. This avoids flattening multiple inference engines into a lowest-common-denominator abstraction and lets RL workloads use SGLang-specific serving, routing, caching, disaggregation, and weight-sync behavior directly.
 - **Agentic workflows as data generation**: tool use, sandbox interaction, verifier rewards, environment feedback, multi-agent loops, and long-horizon agentic workflows plug into the same training / rollout / Data Buffer path instead of forking the training kernel.
 - **BF16 training with FP8 rollout**: large MoE recipes use Megatron BF16 training state with SGLang FP8 rollout/inference; long-context rollout can also use ``--sglang-kv-cache-dtype fp8_e4m3`` to increase effective KV cache capacity.
-- **Tested as RL infrastructure**: CPU correctness tests run automatically, while GPU e2e tests cover real Megatron + SGLang training/rollout paths, including dense/MoE recipes, async rollout, SGLang config, checkpointing, precision, and debug replay. See :doc:`developer_guide/ci`.
-
-Production Validation
----------------------
-
-Beyond the GLM family, slime also supports:
-
-- Qwen series (Qwen3.6, Qwen3.5, Qwen3Next, Qwen3MoE, Qwen3, Qwen2.5);
-- DeepSeek V3 series (DeepSeek V3, V3.1, DeepSeek R1);
-- Llama 3.
+- **Core validation**: CPU correctness tests run automatically. The generic GPU log-probability/entropy parity test remains label-gated. See :doc:`developer_guide/ci`.
 
 Start by Use Case
 -----------------
 
-- New to slime: :doc:`get_started/quick_start`
 - Configure training and rollout arguments: :doc:`get_started/usage`
 - Add custom generation, reward, or rollout functions: :doc:`get_started/customization`
 - Configure production SGLang rollout topology: :doc:`advanced/sglang-config`
@@ -47,27 +41,9 @@ Start by Use Case
    :maxdepth: 1
    :caption: Get Started
 
-   get_started/quick_start.md
    get_started/usage.md
    get_started/customization.md
    get_started/qa.md
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Dense
-
-   examples/qwen3-4B.md
-   examples/glm4-9B.md
-
-.. toctree::
-   :maxdepth: 1
-   :caption: MoE
-
-   examples/glm4.7-30B-A3B.md
-   examples/qwen3-30B-A3B.md
-   examples/glm5.2-744B-A40B.md
-   examples/glm4.7-355B-A32B.md
-   examples/deepseek-r1.md
 
 .. toctree::
    :maxdepth: 1
@@ -84,14 +60,6 @@ Start by Use Case
    advanced/delta-weight-sync.md
    advanced/sglang-config.md
    advanced/megatron-config.md
-   advanced/arch-support-beyond-megatron.md
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Other Usage
-
-   examples/qwen3-4b-base-openhermes.md
-   _examples_synced/fully_async/README.md
 
 .. toctree::
    :maxdepth: 1

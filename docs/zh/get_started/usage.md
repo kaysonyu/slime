@@ -77,7 +77,7 @@ MODEL_ARGS=(
 )
 ```
 
-我们在 [scripts/models](../../../scripts/models) 提供了常用模型的配置，可以直接复用。如果你也在使用 megatron 进行 pretrain/sft 的话，可以直接复用 pretrain/sft 中的模型配置。
+我们在 [scripts/models](https://github.com/THUDM/slime/tree/v0.3.2/scripts/models) 提供了常用模型的配置，可以直接复用。如果你也在使用 megatron 进行 pretrain/sft 的话，可以直接复用 pretrain/sft 中的模型配置。
 
 注意：
 

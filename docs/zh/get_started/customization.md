@@ -63,7 +63,7 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False) -> Rollout
 - 添加自定义采样策略
 - 在生成过程中集成外部工具或 API
 
-**示例**: 参见 [examples/fully_async](../_examples_synced/fully_async/README.md)
+**示例**: 参见 [examples/fully_async](https://github.com/THUDM/slime/tree/v0.3.2/examples/fully_async)
 
 ---
 

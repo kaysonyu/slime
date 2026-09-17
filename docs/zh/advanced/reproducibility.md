@@ -27,26 +27,11 @@ Here we provide the script to do RL training on Qwen2.5 0.5B model and GSM8K dat
 
 For data and checkpoint preparation, please run:
 
-```bash
-# download
-hf download --repo-type dataset zhuzilin/gsm8k --local-dir /root/gsm8k
-hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir /root/Qwen2.5-0.5B-Instruct
-
-# convert ckpt
-cd slime/
-source scripts/models/qwen2.5-0.5B.sh
-PYTHONPATH=/root/Megatron-LM/ python \
-   tools/convert_hf_to_torch_dist.py \
-   ${MODEL_ARGS[@]} \
-   --hf-checkpoint /root/Qwen2.5-0.5B-Instruct \
-   --save /root/Qwen2.5-0.5B-Instruct_torch_dist/
-```
+[历史模型示例（v0.3.2）](https://github.com/THUDM/slime/blob/v0.3.2/docs/zh/advanced/reproducibility.md)
 
 And to run training,
 
-```bash
-bash scripts/run-qwen2.5-0.5B-reproducibility.sh
-```
+[历史模型示例（v0.3.2）](https://github.com/THUDM/slime/blob/v0.3.2/docs/zh/advanced/reproducibility.md)
 
 For screen shots of the wandb, please refer to [pull#370](https://github.com/THUDM/slime/pull/370).
 

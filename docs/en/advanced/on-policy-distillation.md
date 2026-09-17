@@ -91,31 +91,11 @@ Complete example scripts are provided in `examples/on_policy_distillation/`:
 
 ### SGLang Teacher
 
-```bash
-# 1. Download models and data
-hf download Qwen/Qwen3-32B --local-dir /root/Qwen3-32B
-hf download Qwen/Qwen3-8B --local-dir /root/Qwen3-8B
-hf download --repo-type dataset zhuzilin/dapo-math-17k --local-dir /root/dapo-math-17k
-
-# 2. Convert student model
-cd /root/slime
-source scripts/models/qwen3-8B.sh
-PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
-    ${MODEL_ARGS[@]} \
-    --hf-checkpoint /root/Qwen3-8B \
-    --save /root/Qwen3-8B_torch_dist
-
-# 3. Run
-bash examples/on_policy_distillation/run-qwen3-8B-opd.sh
-```
+[Historical model recipe (v0.3.2)](https://github.com/THUDM/slime/blob/v0.3.2/docs/en/advanced/on-policy-distillation.md)
 
 ### Megatron Teacher
 
-```bash
-# 1. Convert both student and teacher models to Megatron format
-# 2. Run
-bash examples/on_policy_distillation/run-qwen3-8B-opd-megatron.sh
-```
+[Historical model recipe (v0.3.2)](https://github.com/THUDM/slime/blob/v0.3.2/docs/en/advanced/on-policy-distillation.md)
 
 ## Preliminary Results
 

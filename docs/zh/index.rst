@@ -1,6 +1,10 @@
 slime 文档
 ====================
 
+.. note::
+
+   当前分支是 TTS 精简基线，已移除模型插件和模型专用示例，保留的训练核心仍与 v0.3.2 一致。TTS 功能将在后续 PR 中加入。
+
 slime 是一个面向 RL Scaling 的 LLM 后训练框架，提供两大核心能力：
 
 - 高性能训练：通过连接 Megatron 与 SGLang，支持多种模式下的高效训练；
@@ -18,21 +22,11 @@ slime 的设计目标，是让这两大能力彼此强化，同时避免把系�
 - **专注 SGLang rollout**：slime 有意选择单一 rollout backend，避免为了同时兼容多个 inference engine 而被迫抽象成 lowest-common-denominator 的公共能力子集，从而可以直接发挥 SGLang-specific 的 serving、routing、caching、disaggregation 和 weight-sync 能力。
 - **Agentic workflow 就是数据生成**：tool use、sandbox interaction、verifier reward、environment feedback、multi-agent loop 和 long-horizon agentic workflow 都接入同一条 training / rollout / Data Buffer 路径，而不是 fork training kernel。
 - **BF16 训练 + FP8 rollout**：大规模 MoE recipe 使用 Megatron BF16 training state 搭配 SGLang FP8 rollout/inference；long-context rollout 还可以通过 ``--sglang-kv-cache-dtype fp8_e4m3`` 提升有效 KV cache 容量。
-- **作为 RL 基础设施来测试**：CPU correctness tests 默认运行，GPU e2e tests 覆盖真实 Megatron + SGLang training/rollout 路径，包括 dense/MoE recipe、async rollout、SGLang config、checkpoint、precision 和 debug replay。详见 :doc:`developer_guide/ci`。
-
-生产验证
---------
-
-除 GLM 系列之外，slime 还支持：
-
-- Qwen 系列 (Qwen3.6, Qwen3.5, Qwen3Next, Qwen3MoE, Qwen3, Qwen2.5)；
-- DeepSeek V3 系列 (DeepSeek V3, V3.1, DeepSeek R1)；
-- Llama 3。
+- **核心验证**：CPU correctness tests 默认运行，通用 GPU log-probability/entropy 数值测试仍由 label 触发。详见 :doc:`developer_guide/ci`。
 
 按使用场景开始
 --------------
 
-- 第一次使用 slime：:doc:`get_started/quick_start`
 - 配置 training 和 rollout 参数：:doc:`get_started/usage`
 - 添加 custom generation、reward 或 rollout function：:doc:`get_started/customization`
 - 配置生产级 SGLang rollout topology：:doc:`advanced/sglang-config`
@@ -47,27 +41,9 @@ slime 的设计目标，是让这两大能力彼此强化，同时避免把系�
    :maxdepth: 1
    :caption: 开始使用
 
-   get_started/quick_start.md
    get_started/usage.md
    get_started/customization.md
    get_started/qa.md
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Dense
-
-   examples/qwen3-4B.md
-   examples/glm4-9B.md
-
-.. toctree::
-   :maxdepth: 1
-   :caption: MoE
-
-   examples/glm4.7-30B-A3B.md
-   examples/qwen3-30B-A3B.md
-   examples/glm5.2-744B-A40B.md
-   examples/glm4.7-355B-A32B.md
-   examples/deepseek-r1.md
 
 .. toctree::
    :maxdepth: 1
@@ -84,14 +60,6 @@ slime 的设计目标，是让这两大能力彼此强化，同时避免把系�
    advanced/delta-weight-sync.md
    advanced/sglang-config.md
    advanced/megatron-config.md
-   advanced/arch-support-beyond-megatron.md
-
-.. toctree::
-   :maxdepth: 1
-   :caption: 其他用法
-
-   examples/qwen3-4b-base-openhermes.md
-   _examples_synced/fully_async/README.md
 
 .. toctree::
    :maxdepth: 1

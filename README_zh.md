@@ -1,5 +1,7 @@
 # slime
 
+> 当前分支是面向 TTS RL 的精简基线，已移除模型专用插件、配置和示例；TTS 功能将在后续 PR 中加入。历史模型示例保留在 [上游 v0.3.2](https://github.com/THUDM/slime/tree/v0.3.2)。
+
 [English](./README.md)
 
 [![Documentation](https://img.shields.io/badge/docs-latest-brightgreen.svg?style=flat)](https://thudm.github.io/slime/)
@@ -96,7 +98,7 @@ slime 被当作 RL 基础设施来开发，因为“脚本能跑起来”远远�
 
 有关环境配置、数据准备、训练启动和关键代码分析的完整快速开始指南，请参考：
 
-- [快速开始指南](./docs/zh/get_started/quick_start.md)
+- [快速开始指南](https://github.com/THUDM/slime/blob/v0.3.2/docs/zh/get_started/quick_start.md)
 
 我们还提供了一些未在快速开始中覆盖的使用示例，请查看 [examples](examples/)。
 
