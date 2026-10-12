@@ -498,9 +498,18 @@ def test_unsupported_control_operations_are_explicit(omni_args, method, args):
         getattr(engine, method)(*args)
 
 
-def test_launch_uses_reserved_gpu_layout_strict_port_and_clean_child_allocator(omni_args, admin_server, monkeypatch):
+@pytest.mark.parametrize("stages_mapping", [False, True])
+def test_launch_uses_reserved_gpu_layout_strict_port_and_clean_child_allocator(
+    omni_args, admin_server, monkeypatch, stages_mapping
+):
     from slime.backends.sglang_utils import omni_engine
 
+    if stages_mapping:
+        with open(omni_args.omni_config) as stream:
+            config = yaml.safe_load(stream)
+        config["stages"] = {"tts_engine": {"engine": {"max_total_tokens": 65536}}}
+        with open(omni_args.omni_config, "w") as stream:
+            yaml.safe_dump(config, stream)
     omni_args.omni_admin_key = "test-admin-key"
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     monkeypatch.setenv("PYTORCH_ALLOC_CONF", "expandable_segments:True")
@@ -551,7 +560,8 @@ def test_launch_uses_reserved_gpu_layout_strict_port_and_clean_child_allocator(o
 
 
 @pytest.mark.parametrize("invalid", ["disabled_rl", "tp", "gpu_outside_replica", "wrong_pipeline"])
-def test_invalid_pipeline_config_is_rejected_before_launch(omni_args, monkeypatch, invalid):
+@pytest.mark.parametrize("stages_mapping", [False, True])
+def test_invalid_pipeline_config_is_rejected_before_launch(omni_args, monkeypatch, invalid, stages_mapping):
     from slime.backends.sglang_utils import omni_engine
 
     with open(omni_args.omni_config) as stream:
@@ -564,6 +574,8 @@ def test_invalid_pipeline_config_is_rejected_before_launch(omni_args, monkeypatc
         config["stages"][0]["gpu"] = 1
     else:
         config["config_cls"] = "UnrelatedPipelineConfig"
+    if stages_mapping:
+        config["stages"] = {"tts_engine": config["stages"][0]}
     with open(omni_args.omni_config, "w") as stream:
         yaml.safe_dump(config, stream)
     monkeypatch.setattr(

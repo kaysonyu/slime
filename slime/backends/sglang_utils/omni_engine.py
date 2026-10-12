@@ -154,7 +154,12 @@ class OmniEngine(RayActor):
             raise ValueError("Student Omni pipeline config must set enable_rl: true")
         if pipeline.get("config_cls") == "MossTTSPrismScorePipelineConfig":
             self.memory_stages = (OMNI_AR_STAGE,)
-        for stage in pipeline.get("stages", []):
+        stages = pipeline.get("stages", [])
+        if isinstance(stages, dict):
+            stages = list(stages.values())
+        if not isinstance(stages, list) or any(not isinstance(stage, dict) for stage in stages):
+            raise ValueError("Omni stages must contain stage configuration mappings")
+        for stage in stages:
             if stage.get("tp_size", 1) != 1:
                 raise ValueError("Prism Omni RL currently supports AR TP=1 only")
             stage_devices = stage.get("gpu", 0)
