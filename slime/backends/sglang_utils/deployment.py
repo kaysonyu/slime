@@ -175,7 +175,8 @@ async def lifespan(application):
         yield
 
 app.router.lifespan_context = lifespan
-uvicorn.run(app, host=configuration['host'], port=configuration['port'], workers=1)
+# Match Omni workers: rollout CPU processing can outlive Uvicorn's short idle default.
+uvicorn.run(app, host=configuration['host'], port=configuration['port'], workers=1, timeout_keep_alive=120)
 """
 
 
