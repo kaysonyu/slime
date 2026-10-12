@@ -1,5 +1,40 @@
 # Prism 首轮工程验收
 
+## 单环境 editable 镜像验收（2026-10-12）
+
+`slime-ttsrl:editable-v1` 已从新镜像在一张 H200 上完成原 `train.py` 的两轮共卡
+GRPO，并从完整 checkpoint 恢复继续第三轮。镜像 digest 为
+`sha256:008ecc97fd306fc13c351d38a0e46ea2592a0ece0a8e8ba3102a0a06a712cd6c`，
+单层压缩大小 15,629,682,043 bytes。Ray、learner、Omni 均使用
+`/opt/venvs/core/bin/python`，训练进程实际记录 NumPy 2.3.5、Transformers 5.12.1。
+
+三份共享源码使用 editable 安装，隔离模式 Python 的 import 路径与安装元数据均已检查；
+对三份源码分别修改临时模块并启动新进程，确认两次修改无需重新安装即可生效。
+临时模块随后移除。验收代码为 slime `4909f8121d6af1ae0495f306f799929b35e347f0`、
+Omni `a25fe84ec01476799fbb637a8d1e4b5765dc9204`、Megatron
+`3f49de20de81c1ad5dfc10efa0f7d0c8098f1ce4`；目录与镜像使用方式见
+[INSPIRE.md](../../INSPIRE.md)。
+
+| 阶段 | Optimizer / scheduler | 学生发布版本 | 梯度范数 | Tensor buckets | WAV |
+| --- | --- | --- | --- | --- | --- |
+| 首次初始化、两轮训练 | `[0,0]` → `[2,2]`；0 → 8 | 1、2、3 | 11.9749088、10.7919912 | 204 | 8 |
+| 完整恢复、第三轮训练 | `[2,2]` → `[3,3]`；8 → 12 | 3、4 | 9.9911604 | 136 | 4 |
+
+各阶段最终 checkpoint 均检查 optimizer 张量及进度；恢复阶段明确从新进程读取原 optimizer、
+scheduler。真实 CUDA IPC 探针逐元素一致。CPU 回归为 slime 263 passed、4 skipped，
+Omni 175 passed。每轮仍为四条八帧轨迹和 ±1 工程奖励，验证工程闭环，不评价语音质量提升。
+
+NumPy 2 兼容包含 backend 入口的 `np.product = np.prod` 别名及移除初始化的 NumPy 1.x
+硬限制。第一次镜像实跑发现该旧断言，修复后使用同一镜像重新完成验收；失败记录保留在
+QB 验收根目录的 `image-editable-v1-001/`，完整成功报告与训练产物位于
+`image-editable-v1-002/verification.json` 及其 `fresh/`、`resume/` 子目录。
+镜像记录的是依赖环境及初始构建源码，后续 editable 兼容修复以本节验收 SHA 为准。
+
+另将 PyAV 固定为 16.1.0，修复基底 PyAV 19 移除 `metadata_errors` 导致的 M4A 时长
+探测失败。补齐 slime 声明的缺失依赖，保留 Torch/CUDA/TE 等既有版本；基底的依赖
+元数据冲突仍单独记录，未将 `pip check` 声称为通过。构建、清理和依赖审计记录在
+`/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-builds/prism-editable-v1-20261012-1801/`。
+
 ## Checkpoint 驻留优化对照（2026-10-12）
 
 在同一作业、同一张 H200 上，从 `colocate-006/resume/checkpoint/iter_0000002`

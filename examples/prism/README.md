@@ -17,18 +17,23 @@ MOPD 的 RVQ 和 stop 都使用学生实际选择动作的 logprob，不使用�
 
 ## 解释器与资产
 
-需要两个可独立选择的 Python 环境：
+训练与 Omni 的 Python 入口通过以下变量选择，依赖兼容时使用同一个环境：
 
 - `TRAIN_PYTHON`：当前 slime、Ray、PyTorch、Megatron Core/training、Transformer Engine、FlashAttention 和对应训练依赖。
 - `OMNI_PYTHON`：当前 SGLang-Omni、Prism pipeline 和 Omni Python router。由 Ray actor 用这个解释器启动完整 pipeline。
+
+本项目的 Inspire 镜像 `slime-ttsrl:editable-v1` 将 slime、Megatron-LM 和 SGLang-Omni
+editable 安装在同一 `/opt/venvs/core` 环境中。使用该镜像时执行
+`source /opt/slime-ttsrl/env.sh`，两个入口都会指向 `/opt/venvs/core/bin/python`。
+固定镜像、源码目录和依赖版本见 [INSPIRE.md](../../INSPIRE.md)。
 
 训练与 Omni 的 NCCL、CUDA 和 PyTorch 组合需要能够互相传输 GPU tensor。所有 Ray 节点均须可读取模型、pipeline YAML、数据和音频引用。若 Megatron 未安装到训练环境，可用 `MEGATRON_ROOT` 指定其源码目录；脚本将其加入训练 workers 的 `PYTHONPATH`。
 
 新运行需要：
 
 ```bash
-export TRAIN_PYTHON=/path/to/training-env/bin/python
-export OMNI_PYTHON=/path/to/omni-env/bin/python
+export TRAIN_PYTHON=/path/to/runtime/bin/python
+export OMNI_PYTHON=${TRAIN_PYTHON}
 export HF_CHECKPOINT=/assets/prism-student-hf
 export PRISM_PRETRAINED_CHECKPOINT=/assets/prism-native-dcp
 export CODEC_MODEL=/assets/moss-audio-tokenizer-v2
