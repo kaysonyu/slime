@@ -148,9 +148,9 @@ def _next_actor():
 class _ShardedHTTPTransport(httpx.AsyncBaseTransport):
     """Reduce asyncio CPU stalls from httpcore's per-request connection scans.
 
-    Split this client's connection budget across pools of at most 128
+    Split this client's connection budget across pools of at most 32
     connections, so each synchronous scan touches a small pool. The pools
-    operate concurrently: 128 is a per-pool limit, not a client-wide request
+    operate concurrently: 32 is a per-pool limit, not a client-wide request
     limit. Their connection limits sum to max_connections; requests assigned
     to a full pool wait for a connection there.
 
@@ -161,7 +161,7 @@ class _ShardedHTTPTransport(httpx.AsyncBaseTransport):
     """
 
     def __init__(self, max_connections: int):
-        count = max(1, (max_connections + 127) // 128)
+        count = max(1, (max_connections + 31) // 32)
         size, remainder = divmod(max(1, max_connections), count)
         tls = ssl.create_default_context()
         self._transports = [

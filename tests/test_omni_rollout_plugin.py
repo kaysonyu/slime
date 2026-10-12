@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
-import io
 import importlib
+import io
 import json
 import math
 import os
@@ -165,6 +165,29 @@ def test_trace_keeps_time_axis_and_exact_terminal_stop(frames, finish):
     restored = Sample.from_dict(item.to_dict())
     assert restored.response_length == frames
     torch.testing.assert_close(restored.multimodal_train_inputs["policy_stop_mask"], mm["policy_stop_mask"])
+
+
+def test_trace_and_teacher_request_keep_independent_exact_snapshots():
+    response, item = output(), sample()
+    plugin.parse_rollout(response, item, geometry())
+    snapshot = copy.deepcopy(item.metadata["omni_rollout"])
+    request = plugin.teacher_request(item)
+    expected = dict(
+        version=1,
+        sample_id="2:7:request-1",
+        **{name: copy.deepcopy(snapshot["replay_inputs"][name]) for name in plugin.REPLAY_FIELDS},
+        codes=copy.deepcopy(snapshot["action_streams"][0]["actions"]),
+        finish_reason="stop",
+        temperature=1.0,
+    )
+    assert request == expected
+    assert plugin.teacher_request_hash(request) == plugin.teacher_request_hash(expected)
+    response["meta_info"]["omni_rollout"]["replay_inputs"]["prompt_rows"][0][0] = 17
+    response["meta_info"]["omni_rollout"]["action_streams"][0]["actions"][0][0] = 6
+    assert item.metadata["omni_rollout"] == snapshot
+    request["prompt_rows"][0][0] = 20
+    request["codes"][0][0] = 7
+    assert item.metadata["omni_rollout"] == snapshot
 
 
 @pytest.mark.parametrize(

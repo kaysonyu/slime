@@ -14,6 +14,7 @@ import io
 import json
 import math
 import os
+import pickle
 import uuid
 import wave
 from dataclasses import dataclass
@@ -57,8 +58,8 @@ def _tensor(value, shape, dtype, name):
         if any(not isinstance(row, list) or len(row) != shape[1] for row in value):
             raise ValueError(f"{name} has invalid row widths")
         flat = [item for row in value for item in row]
-    expected = bool if dtype == torch.bool else int if dtype == torch.long else (int, float)
-    if any(type(item) not in (expected if isinstance(expected, tuple) else (expected,)) for item in flat):
+    expected = (bool,) if dtype == torch.bool else (int,) if dtype == torch.long else (int, float)
+    if any(type(item) not in expected for item in flat):
         raise ValueError(f"{name} has invalid scalar types")
     result = torch.tensor(value, dtype=dtype)
     if shape[0] == 0 and value == []:
@@ -68,6 +69,12 @@ def _tensor(value, shape, dtype, name):
     if dtype.is_floating_point and not torch.isfinite(result).all():
         raise ValueError(f"{name} contains nonfinite scores")
     return result
+
+
+def _copy_wire_data(value):
+    """Snapshot decoded protocol containers without Python's per-element deepcopy dispatch."""
+    # Only deserialize bytes produced locally from the already decoded payload.
+    return pickle.loads(pickle.dumps(value, protocol=5))
 
 
 @dataclass(frozen=True)
@@ -433,7 +440,7 @@ def parse_rollout(response, sample, config, *, max_frames=None, expected_weight_
     prompt, source = _prompt(sample)
     sample.metadata = dict(sample.metadata or {})
     sample.metadata.update(
-        omni_rollout=copy.deepcopy(trace),
+        omni_rollout=_copy_wire_data(trace),
         omni_frames=f,
         omni_prompt_rows=p,
         omni_finish_reason=finish,
@@ -567,13 +574,15 @@ def _load_teacher_config(value):
 def teacher_request(sample):
     trace = sample.metadata["omni_rollout"]
     sample_id = f"{sample.group_index}:{sample.index}:{trace['request_id']}"
-    return dict(
-        version=1,
-        sample_id=sample_id,
-        **{name: copy.deepcopy(trace["replay_inputs"][name]) for name in REPLAY_FIELDS},
-        codes=copy.deepcopy(trace["action_streams"][0]["actions"]),
-        finish_reason=trace["finish_reason"],
-        temperature=1.0,
+    return _copy_wire_data(
+        dict(
+            version=1,
+            sample_id=sample_id,
+            **{name: trace["replay_inputs"][name] for name in REPLAY_FIELDS},
+            codes=trace["action_streams"][0]["actions"],
+            finish_reason=trace["finish_reason"],
+            temperature=1.0,
+        )
     )
 
 
