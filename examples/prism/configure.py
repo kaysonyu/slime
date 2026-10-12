@@ -102,6 +102,7 @@ def main():
         help="After explicitly inspecting the teacher endpoint, bind it to a frozen named slime deployment",
     )
     parser.add_argument("--teacher-auth-token-env", help="Environment variable read by all configured teacher clients")
+    parser.add_argument("--reward-auth-token-env", help="Environment variable read by all configured reward clients")
     parser.add_argument("--reward", action="append", nargs=3, default=[], metavar=("NAME", "ENDPOINT", "WEIGHT"))
     parser.add_argument("--audio-transport", choices=["path", "upload"], default="path")
     args = parser.parse_args()
@@ -126,13 +127,16 @@ def main():
     if models and not domains:
         raise ValueError("Specify explicit --domain mappings for multi-domain OPD")
     services, weights = {}, {}
+    reward_token = os.environ.get(args.reward_auth_token_env) if args.reward_auth_token_env else None
+    if args.reward_auth_token_env and not reward_token:
+        raise ValueError(f"Reward token environment {args.reward_auth_token_env!r} is missing")
     for name, endpoint, weight in args.reward:
         if name not in {"wer", "sim", "judge_clap"} or name in services:
             raise ValueError(f"Unknown or duplicate reward {name!r}")
         weight = float(weight)
         if not math.isfinite(weight) or weight <= 0:
             raise ValueError("Enabled reward weights must be finite and positive")
-        info = request_json(endpoint, "/info")
+        info = request_json(endpoint, "/info", token=reward_token)
         identity = info.get("identity", {})
         if (
             info.get("protocol") != PROTOCOL
@@ -147,6 +151,8 @@ def main():
             "audio_transport": args.audio_transport,
             "max_inflight": 2 if name == "judge_clap" else 4,
         }
+        if args.reward_auth_token_env:
+            services[name]["auth_token_env"] = args.reward_auth_token_env
         weights[name] = weight
     args.output.mkdir(parents=True, exist_ok=True)
     write_config(

@@ -18,6 +18,38 @@ from slime_plugins import tts_reward  # noqa: E402
 NUM_GPUS = 0
 
 
+def test_authenticated_service_sends_token_to_identity_and_scoring(monkeypatch):
+    monkeypatch.setenv("TEST_REWARD_TOKEN", "test-secret")
+    observed = []
+    identity = {"fingerprint": "fixed"}
+
+    async def get(url, **kwargs):
+        observed.append((url, kwargs))
+        return {"protocol": tts_reward.PROTOCOL, "identity": identity}
+
+    async def post(url, payload, **kwargs):
+        observed.append((url, kwargs))
+        return {"protocol": tts_reward.PROTOCOL, "identity": identity, "request_id": "one", "result": {"text": "hi"}}
+
+    monkeypatch.setattr(tts_reward, "get", get)
+    monkeypatch.setattr(tts_reward, "post", post)
+    client = tts_reward._Service(
+        {"endpoint": "https://reward.example", "expected_fingerprint": "fixed", "auth_token_env": "TEST_REWARD_TOKEN"}
+    )
+    asyncio.run(client.evaluate("score", {"request_id": "one"}))
+    assert [url for url, _ in observed] == ["https://reward.example/info", "https://reward.example/score"]
+    assert all(kwargs["headers"] == {"Authorization": "Bearer test-secret"} for _, kwargs in observed)
+
+
+@pytest.mark.parametrize("name", ["", "not a name", 42, "MISSING_REWARD_TOKEN"])
+def test_reward_auth_configuration_fails_before_http(monkeypatch, name):
+    monkeypatch.delenv("MISSING_REWARD_TOKEN", raising=False)
+    with pytest.raises(ValueError):
+        tts_reward._Service(
+            {"endpoint": "https://reward.example", "expected_fingerprint": "fixed", "auth_token_env": name}
+        )
+
+
 def config(**weights):
     return {
         "services": {name: {"endpoint": f"http://{name}/prefix", "expected_fingerprint": name} for name in weights},

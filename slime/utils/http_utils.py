@@ -364,8 +364,8 @@ async def post(url, payload, max_retries=60, headers=None, timeout=None, score_c
     )
 
 
-async def get(url, *, timeout=None):
-    response = await _http_client.get(url, timeout=timeout)
+async def get(url, *, timeout=None, headers=None):
+    response = await _http_client.get(url, timeout=timeout, headers=headers)
     try:
         response.raise_for_status()
         content = await response.aread()

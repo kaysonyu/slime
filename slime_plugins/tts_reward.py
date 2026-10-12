@@ -22,6 +22,7 @@ import base64
 import hashlib
 import json
 import math
+import os
 import re
 import unicodedata
 import uuid
@@ -217,6 +218,7 @@ class _Service:
             "max_inflight",
             "audio_transport",
             "max_audio_bytes",
+            "auth_token_env",
         }
         if unknown:
             raise ValueError(f"unknown reward service options: {sorted(unknown)}")
@@ -236,6 +238,15 @@ class _Service:
         self.fingerprint = options.get("expected_fingerprint")
         if not isinstance(self.fingerprint, str) or not self.fingerprint.strip():
             raise ValueError("reward service requires expected_fingerprint")
+        auth_env = options.get("auth_token_env")
+        self._request_auth = {}
+        if auth_env is not None:
+            if not isinstance(auth_env, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", auth_env):
+                raise ValueError("auth_token_env must be an environment variable name")
+            token = os.environ.get(auth_env)
+            if not token or not token.strip():
+                raise ValueError(f"Reward token environment {auth_env!r} is missing")
+            self._request_auth = {"headers": {"Authorization": f"Bearer {token}"}}
         self.timeout = _finite(options.get("timeout_s", 120), "timeout_s")
         if self.timeout <= 0:
             raise ValueError("timeout_s must be positive")
@@ -263,7 +274,9 @@ class _Service:
     async def info(self):
         async with self._identity_lock:
             if self._identity is None:
-                body = await asyncio.wait_for(get(self.url("info"), timeout=self.timeout), self.timeout)
+                body = await asyncio.wait_for(
+                    get(self.url("info"), timeout=self.timeout, **self._request_auth), self.timeout
+                )
                 if not isinstance(body, dict) or body.get("protocol") != PROTOCOL:
                     raise ScoringError("incompatible scoring service protocol")
                 identity = body.get("identity")
@@ -286,7 +299,9 @@ class _Service:
         async def run():
             async with self._slots:
                 identity = await self.info()
-                body = await post(self.url(route), request, max_retries=self.attempts, timeout=self.timeout)
+                body = await post(
+                    self.url(route), request, max_retries=self.attempts, timeout=self.timeout, **self._request_auth
+                )
                 if not isinstance(body, dict) or body.get("protocol") != PROTOCOL:
                     raise ScoringError("malformed scoring response protocol")
                 if body.get("request_id") != request["request_id"]:
