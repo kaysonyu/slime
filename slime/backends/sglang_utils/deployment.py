@@ -155,20 +155,53 @@ def start_rollout_servers(args, pg) -> tuple[dict[str, Any], list[Any]]:
 
 
 OMNI_ROUTER_PROGRAM = """
+import asyncio
 import json
 import sys
 from contextlib import asynccontextmanager
+import httpx
 import uvicorn
 from sglang_omni_router.python.app import create_app
 from sglang_omni_router.python.config import RouterConfig
 
 configuration, disabled = json.loads(sys.argv[1])
-app = create_app(RouterConfig(**configuration))
+connections_per_worker = configuration.pop("connections_per_worker", 128)
+router_config = RouterConfig(**configuration)
+
+class WorkerTransport(httpx.AsyncBaseTransport):
+    def __init__(self):
+        self.pools = {}
+
+    async def handle_async_request(self, request):
+        origin = (request.url.scheme, request.url.host, request.url.port)
+        if origin not in self.pools:
+            self.pools[origin] = httpx.AsyncHTTPTransport(
+                trust_env=False,
+                limits=httpx.Limits(
+                    max_connections=connections_per_worker,
+                    max_keepalive_connections=connections_per_worker,
+                ),
+            )
+        return await self.pools[origin].handle_async_request(request)
+
+    async def aclose(self):
+        await asyncio.gather(*(pool.aclose() for pool in self.pools.values()))
+
+# Keep response relaying from repeatedly scanning every replica's connections.
+client = httpx.AsyncClient(
+    transport=WorkerTransport(), timeout=httpx.Timeout(router_config.request_timeout_secs), trust_env=False
+)
+health_client = httpx.AsyncClient(
+    timeout=httpx.Timeout(router_config.health_check_timeout_secs),
+    limits=httpx.Limits(max_connections=max(1, len(router_config.workers))),
+    trust_env=False,
+)
+app = create_app(router_config, client=client, health_client=health_client)
 original_lifespan = app.router.lifespan_context
 
 @asynccontextmanager
 async def lifespan(application):
-    async with original_lifespan(application):
+    async with client, health_client, original_lifespan(application):
         if disabled:
             for worker in application.state.workers:
                 worker.set_disabled(True)
@@ -242,6 +275,7 @@ def start_omni_rollout_servers(args, pg) -> tuple[dict[str, Any], list[Any]]:
                 "workers": workers,
                 "policy": args.omni_router_policy,
                 "request_timeout_secs": args.sglang_router_request_timeout_secs,
+                "connections_per_worker": max(8, 2 * args.sglang_server_concurrency),
             }
             process = multiprocessing.Process(
                 target=launch_omni_router,

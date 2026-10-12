@@ -131,6 +131,7 @@ class _Harness:
             sglang_router_ip=None,
             sglang_router_port=3001,
             sglang_router_request_timeout_secs=30,
+            sglang_server_concurrency=4,
             omni_router_policy="round_robin",
             omni_python="/python/omni",
             omni_admin_key="test-admin-key",
