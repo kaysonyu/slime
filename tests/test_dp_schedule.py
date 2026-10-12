@@ -14,6 +14,29 @@ from slime.utils.dp_schedule import build_dp_schedule
 NUM_GPUS = 0
 
 
+@pytest.mark.parametrize("dp_size", [16, 32, 64])
+@pytest.mark.parametrize("vpp_size,mb_group", [(1, 1), (2, 2)])
+def test_flops_balance_includes_final_dp_and_vpp_alignment(dp_size, vpp_size, mb_group):
+    lengths = [500] * (32 * dp_size)
+    args = make_args(use_dynamic_batch_size=True, max_tokens_per_gpu=20480, balance_by_flops=True, balance_data=True)
+    parallel = make_tp(dp_size=dp_size, vpp_size=vpp_size, microbatch_group_size_per_vp_stage=mb_group)
+    partitions, indices, microbatches, _ = build_dp_schedule(
+        args, parallel, lengths, global_batch_size=len(lengths), rollout_indices=list(range(len(lengths)))
+    )
+    assert microbatches == [mb_group]
+    loads = [sum(lengths[partitions[rank][i]] for i in pack) for rank in range(dp_size) for pack in indices[rank]]
+    assert min(loads) == max(loads) == 16000 // mb_group
+    assert_invariants(
+        partitions,
+        indices,
+        microbatches,
+        dp_size=dp_size,
+        expected_global_sample_indices=range(len(lengths)),
+        total_lengths=lengths,
+        max_per_bin=20480,
+    )
+
+
 def make_args(
     *,
     micro_batch_size=1,
