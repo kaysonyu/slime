@@ -338,23 +338,18 @@ def _short_candidate(result):
     return {"reason": "too_short", "num_samples": counts[0], "min_samples": counts[1], "sample_rate": counts[2]}
 
 
-class _Rewards:
-    def __init__(self, config):
-        if not isinstance(config, Mapping) or set(config) != {"services", "weights"}:
-            raise ValueError("omni_reward_config requires services and weights mappings")
-        weights, services = config["weights"], config["services"]
-        if not isinstance(weights, Mapping) or not isinstance(services, Mapping):
-            raise ValueError("reward services and weights must be mappings")
-        if set(weights) - {"wer", "sim", "judge_clap"}:
-            raise ValueError("supported reward components are wer, sim, and judge_clap")
-        self.weights = {name: _finite(value, f"{name} weight") for name, value in weights.items()}
-        if any(value < 0 for value in self.weights.values()) or not any(value > 0 for value in self.weights.values()):
-            raise ValueError("reward weights must be nonnegative with at least one positive component")
-        self.weights = {name: weight for name, weight in self.weights.items() if weight > 0}
-        missing = set(self.weights) - set(services)
-        if missing:
-            raise ValueError(f"missing reward services: {sorted(missing)}")
-        self.services = {name: _Service(services[name]) for name in self.weights}
+class RewardScorer:
+    """Score selected components while sharing frozen clients and reference caches.
+
+    Component selection is independent of objective coefficients. Clients are
+    initialized only when selected, before the first scoring await.
+    """
+
+    def __init__(self, services):
+        if not isinstance(services, Mapping):
+            raise ValueError("reward services must be a mapping")
+        self._service_options = dict(services)
+        self.services = {}
         self._reference_vectors = OrderedDict()
 
     async def wer(self, audio_path, language, expected, request_id):
@@ -499,7 +494,19 @@ class _Rewards:
             request_id=request_id,
         )
 
-    async def score(self, sample):
+    async def score_components(self, sample, component_names):
+        """Return complete component records without choosing an aggregate reward."""
+        names = tuple(component_names)
+        if not names or any(not isinstance(name, str) or name not in {"wer", "sim", "judge_clap"} for name in names):
+            raise ValueError("select nonempty reward components from wer, sim, and judge_clap")
+        if len(set(names)) != len(names):
+            raise ValueError("selected reward components must be unique")
+        missing = set(names) - self._service_options.keys()
+        if missing:
+            raise ValueError(f"missing reward services: {sorted(missing)}")
+        for name in names:
+            if name not in self.services:
+                self.services[name] = _Service(self._service_options[name])
         metadata = sample.metadata
         if not isinstance(metadata, dict) or not isinstance(metadata.get("omni_prompt"), Mapping):
             raise ValueError("TTS rewards require sample.metadata.omni_prompt")
@@ -512,7 +519,7 @@ class _Rewards:
         if isinstance(frames, bool) or not isinstance(frames, int) or frames < 0:
             raise ValueError("TTS rewards require nonnegative integer metadata.omni_frames")
         inputs = {}
-        if "wer" in self.weights:
+        if "wer" in names:
             target, language = prompt.get("transcript_target"), prompt.get("language")
             if not isinstance(target, str) or not isinstance(language, str) or not language.strip():
                 raise ValueError("WER requires transcript_target and nonempty language")
@@ -520,9 +527,9 @@ class _Rewards:
             if not expected:
                 raise ValueError("WER transcript_target has no tokens after normalization")
             inputs["wer"] = (language, expected)
-        if "sim" in self.weights:
+        if "sim" in names:
             inputs["sim"] = (_reference(prompt, must_exist=frames > 0),)
-        if "judge_clap" in self.weights:
+        if "judge_clap" in names:
             inputs["judge_clap"] = (instruction_queries(prompt.get("global_instruction")),)
         if frames == 0:
             components = {
@@ -533,7 +540,7 @@ class _Rewards:
                     "identity": None,
                     "details": {"reason": "zero_frame"},
                 }
-                for name in self.weights
+                for name in names
             }
         else:
             audio_path = metadata.get("omni_audio_path")
@@ -543,7 +550,6 @@ class _Rewards:
             if not audio_path.is_file():
                 raise ValueError("TTS candidate audio must be a regular file")
             request_id = uuid.uuid4().hex
-            names = list(self.weights)
             outcomes = await asyncio.gather(
                 *(getattr(self, name)(audio_path, *inputs[name], request_id + "-" + name) for name in names),
                 return_exceptions=True,
@@ -565,7 +571,34 @@ class _Rewards:
                     "errors": {name: type(error).__name__ for name, error in failures},
                 }
                 raise failures[0][1]
+        return components
+
+
+class _Rewards(RewardScorer):
+    """Retain the original weighted-sum hook and configuration contract."""
+
+    def __init__(self, config):
+        if not isinstance(config, Mapping) or set(config) != {"services", "weights"}:
+            raise ValueError("omni_reward_config requires services and weights mappings")
+        weights, services = config["weights"], config["services"]
+        if not isinstance(weights, Mapping) or not isinstance(services, Mapping):
+            raise ValueError("reward services and weights must be mappings")
+        if set(weights) - {"wer", "sim", "judge_clap"}:
+            raise ValueError("supported reward components are wer, sim, and judge_clap")
+        self.weights = {name: _finite(value, f"{name} weight") for name, value in weights.items()}
+        if any(value < 0 for value in self.weights.values()) or not any(value > 0 for value in self.weights.values()):
+            raise ValueError("reward weights must be nonnegative with at least one positive component")
+        self.weights = {name: weight for name, weight in self.weights.items() if weight > 0}
+        missing = set(self.weights) - set(services)
+        if missing:
+            raise ValueError(f"missing reward services: {sorted(missing)}")
+        super().__init__({name: services[name] for name in self.weights})
+        self.services = {name: _Service(services[name]) for name in self.weights}
+
+    async def score(self, sample):
+        components = await self.score_components(sample, self.weights)
         total = math.fsum(self.weights[name] * component["transformed"] for name, component in components.items())
+        metadata = sample.metadata
         metadata["omni_reward"] = {
             "status": "success",
             "total": total,

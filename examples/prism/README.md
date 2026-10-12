@@ -162,7 +162,7 @@ bash examples/prism/run-grpo.sh \
   --custom-rm-path examples.prism.rewards.reward
 ```
 
-`base` 只评分 WER/CER，`voiceclone` 评分 WER/CER 与 SIM，`instruction` 评分 WER/CER 与全局 JudgeCLAP。每个类别沿用 `REWARD_CONFIG` 中对应分量的系数直接求和，只调用自己需要的服务；同一 prompt group 的候选使用相同类别，组优势仍按原 GRPO 处理。类别独立于 `domain` 和 Prism `task_type`，缺失或未知类别会报错。默认奖励入口继续接受原有未填写类别的数据。
+`base`、`voiceclone`、`instruction` 分别在 `examples/prism/rewards/` 的独立文件中组合 WER/CER、SIM 和全局 JudgeCLAP，保留原加权和语义。修改类别文件即可改变公式。`voiceclone_gated` 提供非线性示例：原始 WER/CER 达到文件中的阈值后取 SIM，否则为零。每个类别只调用自己需要的服务；同一 prompt group 的候选使用相同类别，组优势仍按原 GRPO 处理。类别独立于 `domain` 和 Prism `task_type`，缺失或未知类别会报错。默认奖励入口继续接受原有未填写类别的数据。
 
 完整配置、输入约束及记录方式见 [REWARD_CATEGORIES.md](REWARD_CATEGORIES.md)，数据模板见 [category-prompts.example.jsonl](category-prompts.example.jsonl)。
 

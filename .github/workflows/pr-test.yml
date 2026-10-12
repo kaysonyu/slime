@@ -984,7 +984,15 @@ jobs:
             },
             {
               "num_gpus": 0,
+              "test_file": "test_tts_reward_plugin.py"
+            },
+            {
+              "num_gpus": 0,
               "test_file": "test_prism_reward_categories.py"
+            },
+            {
+              "num_gpus": 0,
+              "test_file": "test_prism_reward_composition.py"
             },
             {
               "num_gpus": 0,
