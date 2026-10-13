@@ -7,6 +7,7 @@ weights real actions for the objective; it never changes response_lengths.
 import math
 from argparse import Namespace
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import torch
 
@@ -79,6 +80,21 @@ class PolicyActionView:
     entropy: list[torch.Tensor] | None
     weights: list[torch.Tensor]
     sample_masks: list[torch.Tensor]
+    code_counts: list[int]
+
+    def split_metrics(self, values: torch.Tensor, name: str) -> dict[str, torch.Tensor]:
+        """Detached sums of per-sample RVQ/stop means, before DP reduction.
+
+        The reporter divides diagnostics by active sample counts; pg_loss keeps
+        the global-batch denominator so its two components reconstruct the loss.
+        """
+        chunks = values.detach().split([weight.numel() for weight in self.weights])
+        totals = {kind: values.new_zeros(()) for kind in ("rvq", "stop")}
+        for chunk, count, enabled in zip(chunks, self.code_counts, self.sample_masks, strict=True):
+            for kind, part in (("rvq", chunk[:count]), ("stop", chunk[count:])):
+                if part.numel():
+                    totals[kind] = totals[kind] + part.mean() * enabled
+        return {f"{kind}/{name}": total for kind, total in totals.items()}
 
     def reduce(self, values: torch.Tensor) -> torch.Tensor:
         """Sum sample means: mean(RVQ) + stop_weight * mean(stop)."""
@@ -129,7 +145,9 @@ def build_policy_action_view(args: Namespace, batch: dict, scores: dict) -> Poli
     sample_masks = mm.get("policy_sample_mask", scalars.new_ones(count))
     if sample_masks.shape != (count,) or bool(((sample_masks != 0) & (sample_masks != 1)).any()):
         raise ValueError("policy_sample_mask must contain one binary value per trajectory")
-    view = PolicyActionView([], [], [], [] if has_rollout else None, [] if args.use_opd else None, [] if has_entropy else None, [], [])
+    view = PolicyActionView(
+        [], [], [], [] if has_rollout else None, [] if args.use_opd else None, [] if has_entropy else None, [], [], []
+    )
     offset = 0
     for i, rows in enumerate(batch["total_lengths"]):
         code = scores["policy_code_logprobs"][i]
@@ -166,17 +184,70 @@ def build_policy_action_view(args: Namespace, batch: dict, scores: dict) -> Poli
         if view.teacher is not None:
             view.teacher.append(_select_frozen_scores(mm, "teacher", section, code_mask, stop_mask))
         if view.entropy is not None:
-            view.entropy.append(torch.cat((scores["policy_code_entropy"][i][code_mask], scores["policy_stop_entropy"][i][stop_mask])))
+            view.entropy.append(
+                torch.cat((scores["policy_code_entropy"][i][code_mask], scores["policy_stop_entropy"][i][stop_mask]))
+            )
         code_weight = selected_code.new_full(selected_code.shape, 1 / max(selected_code.numel(), 1))
-        stop_weight = selected_stop.new_full(selected_stop.shape, getattr(args, "policy_stop_loss_weight", 1.0) / selected_stop.numel())
+        stop_weight = selected_stop.new_full(
+            selected_stop.shape, getattr(args, "policy_stop_loss_weight", 1.0) / selected_stop.numel()
+        )
         view.weights.append(torch.cat((code_weight, stop_weight)) * enabled)
         view.sample_masks.append(enabled)
+        view.code_counts.append(selected_code.numel())
         offset += rows
     return view
 
 
+def grouped_opd_metrics(args: Namespace, rollout_data: dict) -> dict[str, tuple[float, float]]:
+    """Group the actual frozen training/teacher scores without another forward.
+
+    Each value is (sum of sample means, active sample count), so missing domains
+    on a DP rank never become zero-valued samples. No per-sample device sync.
+    """
+    if not args.use_opd:
+        return {}
+    source = "rollout" if args.use_rollout_logprobs else "old"
+    inputs = rollout_data["multimodal_train_inputs"]
+    domains = rollout_data.get("policy_domains", [None] * len(inputs))
+    teachers = rollout_data.get("policy_teachers", [None] * len(inputs))
+    totals = {}
+    counts = {}
+    for mm, domain, teacher, frame_mask in zip(inputs, domains, teachers, rollout_data["loss_masks"], strict=True):
+        if domain is None and teacher is None:
+            continue
+        reference = mm[f"policy_{source}_stop_logprobs"]
+        enabled = mm.get("policy_sample_mask", reference.new_ones(1)).reshape(()).to(reference)
+        if frame_mask.numel():
+            enabled = enabled * frame_mask.any()
+        for name, kind in (("rvq", "code"), ("stop", "stop")):
+            mask = mm[f"policy_{kind}_mask"]
+            old = mm[f"policy_{source}_{kind}_logprobs"][mask].detach()
+            if old.numel() == 0:
+                continue
+            teacher_scores = mm[f"policy_teacher_{kind}_logprobs"][mask].detach()
+            value = (old - teacher_scores).mean() * enabled
+            for field, label in (("domain", domain), ("teacher", teacher)):
+                if label is None:
+                    continue
+                key = f"prism/{field}/{quote(str(label), safe='')}/{name}/opd_logratio_mean"
+                totals[key] = totals.get(key, 0) + value
+                counts[key] = counts.get(key, 0) + enabled
+    if not totals:
+        return {}
+    keys = sorted(totals)
+    values = (
+        torch.stack([torch.stack((totals[key], counts[key].to(totals[key].dtype))) for key in keys]).cpu().tolist()
+    )
+    return {key: (total, count) for key, (total, count) in zip(keys, values, strict=True) if count > 0}
+
+
 def store_old_action_scores(rollout_data: dict, scores: dict, prefix: str = "old") -> None:
     """Persist frozen per-row scores in the existing multimodal payload."""
-    for mm, code, stop in zip(rollout_data["multimodal_train_inputs"], scores["policy_code_logprobs"], scores["policy_stop_logprobs"], strict=True):
+    for mm, code, stop in zip(
+        rollout_data["multimodal_train_inputs"],
+        scores["policy_code_logprobs"],
+        scores["policy_stop_logprobs"],
+        strict=True,
+    ):
         mm[f"policy_{prefix}_code_logprobs"] = code.detach().clone()
         mm[f"policy_{prefix}_stop_logprobs"] = stop.detach().clone()

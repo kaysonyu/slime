@@ -1,0 +1,2 @@
+{"script":"你好，欢迎来到今天的节目。","metadata":{"id":"mopd-zh-0001","domain":"chinese","omni_prompt":{"task_type":"TTS","show_language":false,"language":"zh","transcript_target":"你好，欢迎来到今天的节目。"}}}
+{"script":"Welcome to today's programme.","metadata":{"id":"mopd-en-0002","domain":"english","omni_prompt":{"task_type":"TTS","show_language":false,"language":"en","transcript_target":"Welcome to today's programme."}}}

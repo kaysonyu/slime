@@ -119,7 +119,7 @@ class _TorchMemoryProfiler(_BaseMemoryProfiler):
             )
             traceback.print_stack()
             memory_module._dump_snapshot(str(self._path_dump))
-            print_memory("when oom")
+            print_memory("when oom", level=logging.ERROR)
 
         attach_oom_observer = getattr(torch._C, "_cuda_attach_out_of_memory_observer", None)
         if attach_oom_observer is not None:

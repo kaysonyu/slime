@@ -1,0 +1,2 @@
+{"script":"你好，请慢慢说出这句话。","metadata":{"id":"instruction-zh-0001","domain":"chinese","omni_prompt":{"task_type":"Instruction","show_language":false,"language":"zh","transcript_target":"你好，请慢慢说出这句话。","global_instruction":{"Speed":"slow","Gender":"female"}}}}
+{"script":"Please read this sentence slowly.","metadata":{"id":"instruction-en-0002","domain":"english","omni_prompt":{"task_type":"Instruction","show_language":false,"language":"en","transcript_target":"Please read this sentence slowly.","global_instruction":{"Speed":"slow","Gender":"male"}}}}

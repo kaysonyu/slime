@@ -1,0 +1,20 @@
+eval:
+  defaults:
+    input_key: script
+    metadata_key: metadata
+    apply_chat_template: false
+    n_samples_per_eval_prompt: 1
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    max_response_len: 512
+  datasets:
+    - name: content
+      path: /data/eval/content.jsonl
+      custom_rm_path: examples.prism.rewards.base.reward
+    - name: voiceclone
+      path: /data/eval/voiceclone.jsonl
+      custom_rm_path: examples.prism.rewards.voiceclone.reward
+    - name: instruction
+      path: /data/eval/instruction.jsonl
+      custom_rm_path: examples.prism.rewards.instruction.reward

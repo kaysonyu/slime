@@ -178,13 +178,40 @@ def test_native_opd_is_applied_to_selected_stop_and_code(monkeypatch):
 
 def test_packed_and_microbatch_gradients_are_equal():
     args = arguments(policy_stop_loss_weight=1.4)
-    samples = [sample(advantage=0.4), sample(rows=4, frames=2, terminal=False, advantage=-1.2), sample(rows=3, frames=0, advantage=0.9)]
+    samples = [
+        sample(advantage=0.4),
+        sample(rows=4, frames=2, terminal=False, advantage=-1.2),
+        sample(rows=3, frames=0, advantage=0.9),
+    ]
     packed, _ = run_policy(args, samples, padding=4)
     separate = sum(run_policy(args, [s])[0] for s in samples)
     torch.testing.assert_close(packed, separate)
     targets = [s["output"] for s in samples]
     for pgrad, sgrad in zip(torch.autograd.grad(packed, targets), torch.autograd.grad(separate, targets), strict=True):
         torch.testing.assert_close(pgrad, sgrad)
+
+
+@pytest.mark.parametrize("use_opd", [False, True])
+def test_split_metrics_preserve_objective_gradients_and_component_denominators(use_opd):
+    args = arguments(use_opd=use_opd, policy_stop_loss_weight=0.3)
+    samples = [sample(frames=2), sample(rows=3, frames=0), sample(rows=6, frames=3)]
+    for s in samples:
+        for kind in ("code", "stop"):
+            s["mm"][f"policy_teacher_{kind}_logprobs"] = s["mm"][f"policy_old_{kind}_logprobs"] - 0.2
+    value, metrics = run_policy(args, samples)
+    reference = independent_reference(args, samples)
+    torch.testing.assert_close(value, reference)
+    targets = [s["output"] for s in samples]
+    for actual, expected in zip(
+        torch.autograd.grad(value, targets), torch.autograd.grad(reference, targets), strict=True
+    ):
+        torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(metrics["pg_loss"], metrics["rvq/pg_loss"] + 0.3 * metrics["stop/pg_loss"])
+    assert metrics["rvq/active_ratio"] == 2 and metrics["stop/active_ratio"] == 3
+    for key, metric in metrics.items():
+        assert not metric.requires_grad, key
+        separate = sum(run_policy(args, [s])[1][key] for s in samples)
+        torch.testing.assert_close(metric, separate)
 
 
 def test_prism_extractor_integrates_with_native_policy_loss(monkeypatch):
@@ -264,7 +291,16 @@ def test_missing_teacher_or_frozen_old_fails():
         run_policy(arguments(), [s])
 
 
-@pytest.mark.parametrize("config", [dict(use_tis=True), dict(advantage_estimator="gspo"), dict(normalize_advantages=True), dict(kl_coef=0.1), dict(context_parallel_size=2)])
+@pytest.mark.parametrize(
+    "config",
+    [
+        dict(use_tis=True),
+        dict(advantage_estimator="gspo"),
+        dict(normalize_advantages=True),
+        dict(kl_coef=0.1),
+        dict(context_parallel_size=2),
+    ],
+)
 def test_unadapted_token_features_fail_explicitly(config):
     with pytest.raises(ValueError):
         validate_action_policy_args(arguments(**config))
@@ -339,3 +375,7 @@ def test_sample_max_logprob_error_averages_trajectory_maxima_with_stop_and_remov
     torch.testing.assert_close(packed[metric] / len(samples), micro_sum / len(samples))
     torch.testing.assert_close(run_policy(args, [samples[1]])[1][metric], torch.tensor(0.3))
     torch.testing.assert_close(run_policy(args, [samples[2]])[1][metric], torch.tensor(0.0))
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__]))

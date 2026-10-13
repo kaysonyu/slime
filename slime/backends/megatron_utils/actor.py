@@ -701,6 +701,12 @@ class MegatronTrainRayActor(TrainRayActor):
             print_memory("before update_weights")
             self.weight_updater.update_weights()
             print_memory("after update_weights")
+        if dist.get_rank() == 0:
+            logger.info(
+                "Published policy version=%s to %d rollout replicas",
+                self.weight_updater.weight_version,
+                len(rollout_engines),
+            )
 
         if reconnect_rollout_engines:
             self.sleep()

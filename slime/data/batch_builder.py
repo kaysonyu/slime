@@ -441,6 +441,11 @@ class BatchBuilder:
                 if inputs is not None and "policy_code_mask" in inputs:
                     inputs["policy_sample_mask"] = torch.tensor([not sample.remove_sample], dtype=torch.bool)
             train_data["multimodal_train_inputs"] = [sample.multimodal_train_inputs for sample in samples]
+            if any(
+                inputs is not None and "policy_code_mask" in inputs for inputs in train_data["multimodal_train_inputs"]
+            ):
+                train_data["policy_domains"] = [(sample.metadata or {}).get("domain") for sample in samples]
+                train_data["policy_teachers"] = [(sample.metadata or {}).get("omni_teacher_key") for sample in samples]
 
         if samples[0].teacher_log_probs is not None:
             train_data["teacher_log_probs"] = [sample.teacher_log_probs for sample in samples]
@@ -490,6 +495,8 @@ class BatchBuilder:
             "source_names",
             "prompt",
             "teacher_log_probs",
+            "policy_domains",
+            "policy_teachers",
         ]
         if transport == "straw":
             from straw.protocol import digest

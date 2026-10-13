@@ -58,6 +58,18 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             )
             parser.add_argument("--omni-audio-dir", help="Shared directory for generated reward audio.")
             parser.add_argument(
+                "--omni-eval-return-audio",
+                action=argparse.BooleanOptionalAction,
+                default=None,
+                help="Override waveform generation only during Omni evaluation; otherwise inherit training.",
+            )
+            parser.add_argument(
+                "--omni-eval-teacher-scoring",
+                action=argparse.BooleanOptionalAction,
+                default=True,
+                help="Run the teacher sample hook during evaluation; disable for independent audio quality eval.",
+            )
+            parser.add_argument(
                 "--omni-teacher-config", help="YAML/JSON domain-to-frozen-teacher bindings for the Omni sample hook."
             )
             parser.add_argument(

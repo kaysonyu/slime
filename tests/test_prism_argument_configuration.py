@@ -36,6 +36,17 @@ def _slime_cli_provider():
     return namespace["get_slime_extra_args_provider"]()
 
 
+def test_omni_eval_overrides_have_compatible_defaults_and_explicit_switches():
+    parser = _slime_cli_provider()(argparse.ArgumentParser())
+    required = ["--rollout-batch-size", "1"]
+    defaults = parser.parse_args(required)
+    assert defaults.omni_eval_return_audio is None
+    assert defaults.omni_eval_teacher_scoring is True
+    explicit = parser.parse_args([*required, "--omni-eval-return-audio", "--no-omni-eval-teacher-scoring"])
+    assert explicit.omni_eval_return_audio is True
+    assert explicit.omni_eval_teacher_scoring is False
+
+
 def _load_backend(monkeypatch, argv, validate=None):
     """Stub only missing MCore entry points; keep real Prism and transformers."""
     training = ModuleType("megatron.training.arguments")

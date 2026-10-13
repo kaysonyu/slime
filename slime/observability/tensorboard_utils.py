@@ -1,3 +1,4 @@
+import atexit
 import datetime
 import logging
 import os
@@ -29,22 +30,30 @@ class _TensorboardAdapter(metaclass=SingletonMeta):
 
     def __init__(self, args):
         assert args.use_tensorboard, f"{args.use_tensorboard=}"
+        if SummaryWriter is None:
+            raise ImportError("--use-tensorboard requires the tensorboard package in the training environment")
         tb_project_name = args.tb_project_name
         tb_experiment_name = args.tb_experiment_name
-        if tb_project_name is not None or os.environ.get("TENSORBOARD_DIR", None):
+        directory = getattr(args, "tensorboard_dir", None)
+        if directory or tb_project_name is not None or os.environ.get("TENSORBOARD_DIR", None):
             if tb_project_name is not None and tb_experiment_name is None:
                 tb_experiment_name = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            self._initialize(tb_project_name, tb_experiment_name)
+            self._initialize(tb_project_name, tb_experiment_name, directory)
         else:
             raise ValueError("tb_project_name and tb_experiment_name, or TENSORBOARD_DIR are required")
 
-    def _initialize(self, tb_project_name, tb_experiment_name):
+    def _initialize(self, tb_project_name, tb_experiment_name, directory=None):
         """Actual initialization logic"""
         # Get tensorboard directory from environment variable or use default path
-        tensorboard_dir = os.environ.get("TENSORBOARD_DIR", f"tensorboard_log/{tb_project_name}/{tb_experiment_name}")
+        # CLI configuration travels to both learner and rollout Ray actors,
+        # including workers on clusters started before the driver environment.
+        tensorboard_dir = directory or os.environ.get(
+            "TENSORBOARD_DIR", f"tensorboard_log/{tb_project_name}/{tb_experiment_name}"
+        )
         os.makedirs(tensorboard_dir, exist_ok=True)
         logger.info(f"Saving tensorboard log to {tensorboard_dir}.")
         self._writer = SummaryWriter(tensorboard_dir)
+        atexit.register(self.finish)
 
     def log(self, data, step):
         """Log data to tensorboard
@@ -55,6 +64,8 @@ class _TensorboardAdapter(metaclass=SingletonMeta):
         """
         for key in data:
             self._writer.add_scalar(key, data[key], step)
+        # Ray may terminate an actor without running its Python exit handlers.
+        self._writer.flush()
 
     def finish(self):
         """Close the tensorboard writer"""

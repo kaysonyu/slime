@@ -1,4 +1,5 @@
 import logging
+import os
 
 import wandb
 
@@ -8,20 +9,40 @@ from slime.observability.tensorboard_utils import _TensorboardAdapter
 _LOGGER_CONFIGURED = False
 
 
+class _CheckpointMetadataLogFilter(logging.Filter):
+    """Show a repeated checkpoint compatibility notice once per process."""
+
+    def __init__(self):
+        super().__init__()
+        self.seen = set()
+
+    def filter(self, record):
+        if record.levelno >= logging.ERROR or logging.getLogger(record.name).isEnabledFor(logging.DEBUG):
+            return True
+        message = record.getMessage()
+        if not message.startswith("make_tp_sharded_tensor_for_checkpoint received extra kwargs:"):
+            return True
+        if message in self.seen:
+            return False
+        self.seen.add(message)
+        return True
+
+
 # ref: SGLang
 def configure_logger(prefix: str = ""):
     global _LOGGER_CONFIGURED
     if _LOGGER_CONFIGURED:
         return
 
-    _LOGGER_CONFIGURED = True
-
     logging.basicConfig(
-        level=logging.INFO,
+        level=os.environ.get("SLIME_LOG_LEVEL", "INFO").upper(),
         format=f"[%(asctime)s{prefix}] %(filename)s:%(lineno)d - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         force=True,
     )
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(_CheckpointMetadataLogFilter())
+    _LOGGER_CONFIGURED = True
 
 
 def init_tracking(args, primary: bool = True, **kwargs):

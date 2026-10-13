@@ -96,7 +96,8 @@ async def reward(args, sample, **kwargs):
 每行填写 `metadata.reward_category`，其他 Prism 输入沿用已有协议：
 
 - `base`：需要 `transcript_target` 和 `language`，不需要 SIM 参考或 JudgeCLAP 属性。
-- `voiceclone`：还需要有效的音色参考。示例显式填写 Full VoiceClone 的完整参考属性映射。
+- `voiceclone`：还需要有效的音色参考。示例填写 `references.audio1`，由 Full VoiceClone
+  任务推导音色参考，不必填写逐音频 ID 或 `reference_targets`。
 - `instruction`：还需要可被 JudgeCLAP 评分的全局属性指令；该类别不会调用 SIM。
 
 这些输入会严格验证，技术故障继续抛错。合法零帧 stop 的所选奖励分量均记录为明确的

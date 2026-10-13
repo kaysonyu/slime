@@ -1,0 +1,2 @@
+{"script":"你好，欢迎来到今天的节目。","metadata":{"id":"voiceclone-zh-0001","domain":"chinese","omni_prompt":{"task_type":"Full VoiceClone","show_language":false,"language":"zh","transcript_target":"你好，欢迎来到今天的节目。","references":{"audio1":"/assets/reference-zh.wav"}}}}
+{"script":"Welcome to today's programme.","metadata":{"id":"voiceclone-en-0002","domain":"english","omni_prompt":{"task_type":"Full VoiceClone","show_language":false,"language":"en","transcript_target":"Welcome to today's programme.","references":{"audio1":"/assets/reference-en.wav"}}}}

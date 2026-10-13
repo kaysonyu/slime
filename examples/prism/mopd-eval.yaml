@@ -1,0 +1,5 @@
+# Training remains selected-action OPD without waveform synthesis.
+omni_return_audio: false
+# Eval datasets select independent audio rewards through --eval-config.
+omni_eval_return_audio: true
+omni_eval_teacher_scoring: false

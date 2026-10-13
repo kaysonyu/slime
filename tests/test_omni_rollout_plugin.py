@@ -237,6 +237,59 @@ def test_prompt_payload_uses_structured_business_fields_not_tokenization():
 
 
 @pytest.mark.parametrize(
+    "task,references",
+    [
+        ("TTS", {}),
+        ("Full VoiceClone", {"audio1": "/shared/speaker.wav"}),
+        ("Attribute Clone Triplet", {"audio2": "/shared/style.wav", "audio1": "/shared/speaker.wav"}),
+    ],
+)
+def test_reference_slots_preserve_legacy_wire_order_and_reward_mapping(task, references):
+    from pathlib import Path
+
+    from slime_plugins import tts_reward
+
+    item = sample()
+    item.metadata.pop("reference_targets")
+    item.metadata.update(task_type=task, references=references)
+    original = copy.deepcopy(item.metadata)
+    legacy = copy.deepcopy(item)
+    legacy.metadata["references"] = [{"id": slot, "uri": references[slot]} for slot in sorted(references)]
+    args = types.SimpleNamespace()
+    payload = plugin.build_generate_payload(args, item, {"max_new_tokens": 12})
+    assert payload == plugin.build_generate_payload(args, legacy, {"max_new_tokens": 12})
+    assert item.metadata == original
+
+    plugin.parse_rollout(output(), item, geometry())
+    assert item.metadata["omni_prompt"]["references"] == legacy.metadata["references"]
+    if references:
+        assert tts_reward._reference(item.metadata["omni_prompt"], must_exist=False) == (
+            "audio1",
+            Path("/shared/speaker.wav"),
+        )
+
+
+@pytest.mark.parametrize(
+    "references",
+    [
+        {"audio2": "/shared/style.wav"},
+        {"audio0": "/shared/speaker.wav"},
+        {"audio1": "/shared/speaker.wav", "audio3": "/shared/style.wav"},
+        {"speaker": "/shared/speaker.wav"},
+        {"audio1": ""},
+        {"audio1": "  "},
+        {"audio1": None},
+        {"audio1": {"uri": "/shared/speaker.wav"}},
+    ],
+)
+def test_reference_slots_reject_missing_positions_and_invalid_uris(references):
+    item = sample()
+    item.metadata["references"] = references
+    with pytest.raises(ValueError, match="Prism references"):
+        plugin.build_generate_payload(types.SimpleNamespace(), item, {"max_new_tokens": 12})
+
+
+@pytest.mark.parametrize(
     "params,expected", [({"seed": 0}, 0), ({"sampling_seed": 321}, 321), ({"seed": 321, "sampling_seed": 321}, 321)]
 )
 def test_seed_aliases_keep_the_public_nonnegative_integer(params, expected):
@@ -331,6 +384,14 @@ def test_original_deterministic_eval_forwards_sampling_seed_to_omni(monkeypatch)
     monkeypatch.setattr(rollout, "generate_and_rm", capture_generate)
     result = asyncio.run(rollout.eval_rollout_single_dataset(args, 0, config))
     assert [item.metadata["forwarded_seed"] for item in result[config.name]["samples"]] == [321, 322]
+    items = result[config.name]["samples"]
+    assert [item.metadata["eval_sample_index"] for item in items] == [0, 1]
+    assert all(item.metadata["eval_prompt_index"] == 0 for item in items)
+    assert all(item.metadata["eval_dataset_name"] == config.name for item in items)
+    event = items[0].metadata["eval_run_id"]
+    assert all(item.metadata["eval_run_id"] == event for item in items)
+    repeated = asyncio.run(rollout.eval_rollout_single_dataset(args, 0, config))
+    assert repeated[config.name]["samples"][0].metadata["eval_run_id"] != event
 
 
 def teacher_binding():
@@ -739,5 +800,25 @@ def test_generate_uses_router_and_preserves_sample_identity(monkeypatch, tmp_pat
     assert calls[0][0] == "http://python-router/prism/generate"
     assert item.index == 7 and item.group_index == 2
     assert item.metadata["omni_audio_path"].endswith(".wav")
+    assert item.metadata["omni_audio_seconds"] == pytest.approx(32 / 24000)
     assert item.metadata["omni_prompt"]["transcript_target"] == "你好"
     assert plugin.generate.abort_mode == "request"
+
+
+@pytest.mark.parametrize("override,expected", [(None, False), (True, True), (False, False)])
+def test_eval_audio_override_does_not_change_training(override, expected):
+    args = types.SimpleNamespace(omni_return_audio=False, omni_eval_return_audio=override)
+    assert (
+        plugin.build_generate_payload(args, sample(), {"max_new_tokens": 12}, evaluation=True)["return_audio"]
+        is expected
+    )
+    assert plugin.build_generate_payload(args, sample(), {"max_new_tokens": 12})["return_audio"] is False
+    assert args.omni_return_audio is False
+
+
+def test_eval_teacher_hook_can_skip_without_changing_training():
+    args = types.SimpleNamespace(omni_eval_teacher_scoring=False, omni_teacher_config={"models": {}, "by_domain": {}})
+    item = sample()
+    assert asyncio.run(plugin.score_teacher(args, item, evaluation=True)) is item
+    with pytest.raises(ValueError, match="Unmapped"):
+        asyncio.run(plugin.score_teacher(args, item, evaluation=False))

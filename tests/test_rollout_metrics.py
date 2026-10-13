@@ -5,11 +5,73 @@ import numpy as np
 import pytest
 import torch
 
-from slime.observability.rollout_metrics import _compute_top_p_kept_vocab_metrics
+from slime.observability.rollout_metrics import (
+    _compute_top_p_kept_vocab_metrics,
+    _compute_zero_std_metrics,
+    compute_metrics_from_samples,
+    compute_perf_metrics_from_samples,
+)
 from slime.utils.misc import decode_int32_meta_array
 from slime.utils.types import Sample
 
 NUM_GPUS = 0
+
+
+@pytest.mark.parametrize("prism", [False, True])
+def test_prism_units_and_unavailable_text_diagnostics(prism):
+    args = Namespace(
+        model_name="moss_tts_prism" if prism else "qwen",
+        advantage_estimator="grpo",
+        use_opd=True,
+        sglang_speculative_algorithm=None,
+        log_reward_category=None,
+    )
+    samples = [Sample(response_length=0, reward=0, group_index=0), Sample(response_length=4, reward=0, group_index=1)]
+    args.reward_key = None
+    metrics = compute_metrics_from_samples(args, samples)
+    assert metrics["response_len/mean"] == 2
+    if prism:
+        assert metrics["audio_frames/mean"] == 2
+        assert metrics["zero_frame_ratio"] == 0.5
+        assert not any(key.startswith("zero_std/") for key in metrics)
+    assert ("repetition_frac" in metrics) is not prism
+    assert ("prefix_cache_hit_rate" in metrics) is not prism
+
+
+def test_prism_rollout_throughput_uses_frames_and_measured_audio_duration():
+    args = Namespace(model_name="moss_tts_prism", rollout_num_gpus=2)
+    samples = [
+        Sample(response_length=4, metadata={"omni_audio_seconds": 1.0}),
+        Sample(response_length=8, metadata={"omni_audio_seconds": 2.0}),
+    ]
+    metrics = compute_perf_metrics_from_samples(args, samples, rollout_time=2)
+    assert metrics["rollout_audio_frames_per_gpu_sec"] == metrics["tokens_per_gpu_per_sec"] == 3
+    assert metrics["rollout_samples_per_sec"] == 1
+    assert metrics["rollout_audio_seconds_per_sec"] == 1.5
+    samples[0].metadata["omni_audio_seconds"] = None
+    assert "rollout_audio_seconds_per_sec" not in compute_perf_metrics_from_samples(args, samples, 2)
+
+
+def test_prism_eval_zero_std_uses_prompt_identity_and_ignores_singletons():
+    args = Namespace(model_name="moss_tts_prism", advantage_estimator="grpo", reward_key=None)
+    samples = [Sample(reward=1.0, metadata={"eval_prompt_index": i}) for i in range(3)]
+    assert _compute_zero_std_metrics(args, samples) == {}
+    samples.append(Sample(reward=1.0, metadata={"eval_prompt_index": 0}))
+    assert _compute_zero_std_metrics(args, samples) == {"zero_std/count_1.0": 1}
+
+
+def test_prism_generated_frames_do_not_disappear_when_training_masks_are_zero():
+    args = Namespace(
+        model_name="moss_tts_prism",
+        advantage_estimator="grpo",
+        use_opd=True,
+        sglang_speculative_algorithm=None,
+        log_reward_category=None,
+    )
+    metrics = compute_metrics_from_samples(args, [Sample(response_length=4, loss_mask=[0, 0, 0, 0])])
+    assert metrics["audio_frames/mean"] == 4
+    assert metrics["response_len/mean"] == 0  # Preserve the legacy effective-length view.
+    assert metrics["zero_frame_ratio"] == 0
 
 
 def _make_args():

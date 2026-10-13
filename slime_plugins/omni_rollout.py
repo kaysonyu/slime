@@ -177,13 +177,21 @@ def _prompt(sample):
     if instruction is not None and not isinstance(instruction, str):
         raise ValueError("global_instruction must be a JSON object or string")
     references = source.get("references", [])
+    if isinstance(references, dict):
+        if set(references) - {"audio1", "audio2"} or ("audio2" in references and "audio1" not in references):
+            raise ValueError("Prism references slots must start at audio1 and may include audio2")
+        if any(not isinstance(uri, str) or not uri.strip() for uri in references.values()):
+            raise ValueError("Prism references slot values must be nonempty URI strings")
+        # The revision 6 processor numbers references by list position. Keep
+        # Omni's wire format and the reward/archive inputs independent of JSON key order.
+        references = [{"id": slot, "uri": references[slot]} for slot in ("audio1", "audio2") if slot in references]
     if not isinstance(references, list) or any(
         not isinstance(reference, dict)
         or not reference.get("id")
         or not (reference.get("uri") or reference.get("codes_uri"))
         for reference in references
     ):
-        raise ValueError("references require explicit id and uri/codes_uri")
+        raise ValueError("references require audio1/audio2 URI slots or a list with explicit id and uri/codes_uri")
     control = source.get("tokens_control", False)
     if type(control) is not bool:
         raise ValueError("tokens_control must be Boolean")
@@ -205,7 +213,7 @@ def _prompt(sample):
     return prompt, source
 
 
-def build_generate_payload(args, sample, sampling_params):
+def build_generate_payload(args, sample, sampling_params, *, evaluation=False):
     """Send the structured task to Omni; its processor owns prompt rendering."""
     if getattr(args, "partial_rollout", False) or sample.response_length:
         raise ValueError("Prism baseline supports complete single-turn requests only")
@@ -235,6 +243,12 @@ def build_generate_payload(args, sample, sampling_params):
     if seed is not None or sampling_seed is not None:
         params["seed"] = seed if seed is not None else sampling_seed
     model = getattr(args, "omni_model_name", "prism")
+    return_audio = getattr(args, "omni_return_audio", True)
+    eval_audio = getattr(args, "omni_eval_return_audio", None)
+    if evaluation and eval_audio is not None:
+        if type(eval_audio) is not bool:
+            raise ValueError("omni_eval_return_audio must be Boolean or None")
+        return_audio = eval_audio
     return dict(
         model=model,
         prompt=prompt,
@@ -242,7 +256,7 @@ def build_generate_payload(args, sample, sampling_params):
         stream=False,
         return_logprob=True,
         return_omni_rollout=True,
-        return_audio=getattr(args, "omni_return_audio", True),
+        return_audio=return_audio,
         response_format="wav",
         metadata={"sample_index": sample.index, "group_index": sample.group_index},
     )
@@ -485,10 +499,12 @@ async def _request(args, url, payload, *, headers=None):
 
 def _write_audio(response, args, sample, config, required):
     audio = response.get("audio")
+    sample.metadata["omni_audio_seconds"] = None
     if sample.response_length == 0:
         if audio is not None:
             raise ValueError("A zero-frame sampled stop must not return waveform")
         sample.metadata["omni_audio_path"] = None
+        sample.metadata["omni_audio_seconds"] = 0.0
         return
     if not required:
         if audio is not None:
@@ -525,8 +541,10 @@ def _write_audio(response, args, sample, config, required):
         expected_bytes = source.getnframes() * source.getnchannels() * source.getsampwidth()
         if len(source.readframes(source.getnframes())) != expected_bytes:
             raise ValueError("Omni WAV payload is truncated")
+        duration = source.getnframes() / source.getframerate()
     output.write_bytes(data)
     sample.metadata["omni_audio_path"] = str(output)
+    sample.metadata["omni_audio_seconds"] = duration
 
 
 async def generate(args, sample, sampling_params, *, evaluation=False):
@@ -534,7 +552,7 @@ async def generate(args, sample, sampling_params, *, evaluation=False):
 
     if sample.status not in (Sample.Status.PENDING, Sample.Status.ABORTED):
         raise ValueError(f"Prism generation requires a pending sample, got {sample.status}")
-    payload = build_generate_payload(args, sample, sampling_params)
+    payload = build_generate_payload(args, sample, sampling_params, evaluation=evaluation)
     config = _config(str(args.hf_checkpoint))
     headers = None
     if sample.session_id and getattr(args, "router_policy", None) == "consistent_hashing":
@@ -739,8 +757,14 @@ async def _teacher_endpoint(args, sample, binding):
     raise ValueError(f"Omni teacher deployment {deployment!r} has no reachable running workers")
 
 
-async def score_teacher(args, sample, **kwargs):
+async def score_teacher(args, sample, *, evaluation=False, **kwargs):
     """Per-sample hook: route an explicit domain to one frozen Prism teacher."""
+    if evaluation:
+        score_during_eval = getattr(args, "omni_eval_teacher_scoring", True)
+        if type(score_during_eval) is not bool:
+            raise ValueError("omni_eval_teacher_scoring must be Boolean")
+        if not score_during_eval:
+            return sample
     if not getattr(args, "omni_teacher_config", None):
         return sample
     config = _load_teacher_config(args.omni_teacher_config)
