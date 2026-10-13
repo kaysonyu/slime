@@ -440,7 +440,9 @@ def test_plugin_initializer_reads_generic_source_and_pin_without_rl_progress(mon
     core.dist_checkpointing = checkpointing
     monkeypatch.setitem(sys.modules, "megatron.core", core)
     monkeypatch.setattr(prism, "_require_megatron", lambda: None)
-    monkeypatch.setattr(prism, "_align_native_shards", lambda value, metadata, layers: value)
+    from slime_plugins.models import prism_checkpoint
+
+    monkeypatch.setattr(prism_checkpoint, "_align_native_shards", lambda value, metadata, layers: value)
     model = SimpleNamespace(
         prism_spec=SimpleNamespace(
             dtype="bfloat16",

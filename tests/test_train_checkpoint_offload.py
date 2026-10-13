@@ -239,3 +239,84 @@ def test_driver_keeps_only_last_trained_role_for_checkpoint(
         assert "pause" not in events and "resume" not in events
     assert events.index(("rollout_save", 1)) < len(events) - 1
     assert events[-1] == "publish"
+
+
+def test_joint_checkpoint_rejects_incomplete_or_corrupted_dataset_restore(tmp_path, monkeypatch):
+    import torch
+    from slime.data.checkpoint import resolve_checkpoint, save_checkpoint
+    from slime.data.data_source import RolloutDataSource
+
+    args = SimpleNamespace(
+        save=str(tmp_path),
+        load=None,
+        rollout_data_transport="object-store",
+        checkpoint_joint_commit=True,
+        debug_train_only=False,
+        debug_rollout_only=False,
+        release_train=False,
+        num_rollout=100,
+        use_critic=False,
+        no_save_rng=False,
+        no_save_optim=False,
+        ckpt_step=None,
+        start_rollout_id=None,
+        finetune=False,
+        rollout_shuffle=False,
+    )
+    source = RolloutDataSource.__new__(RolloutDataSource)
+    source.args, source.dataset = args, None
+    source.consumers, source._restored_consumers, source.metadata = {}, {}, {}
+    source.epoch_id, source.sample_offset = 1, 17
+    source.sample_index, source.sample_group_index = 99, 99
+
+    def save_model(step, *, force_sync):
+        assert force_sync
+        directory = tmp_path / f"iter_{step:07d}"
+        directory.mkdir()
+        torch.save({"weight": torch.ones(2), "step": step}, directory / "model.pt")
+        (tmp_path / "latest_checkpointed_iteration.txt").write_text(str(step))
+
+    actor = SimpleNamespace(args=args, save_model=save_model)
+    manager = SimpleNamespace(
+        save=SimpleNamespace(remote=source.save), get_weight_version=SimpleNamespace(remote=lambda: "4")
+    )
+    monkeypatch.setattr("ray.get", lambda value: value)
+    save_checkpoint(args, 3, actor, None, manager, actor_trains=True)
+    args.load = str(tmp_path)
+    restored, _ = resolve_checkpoint(args)
+    assert (restored.ckpt_step, restored.start_rollout_id, restored.update_weight_start_version) == (3, 4, 4)
+    source.sample_offset = 0
+    source.load(3)
+    assert source.sample_offset == 17
+
+    def failed_save(step):
+        raise OSError("injected data checkpoint failure")
+
+    manager.save.remote = failed_save
+    with pytest.raises(OSError, match="injected"):
+        save_checkpoint(args, 4, actor, None, manager, actor_trains=True)
+    restored, _ = resolve_checkpoint(args)
+    assert restored.ckpt_step == 3
+    args.ckpt_step = 4
+    with pytest.raises(ValueError, match="complete"):
+        resolve_checkpoint(args)
+    args.ckpt_step = None
+    data_file = tmp_path / "rollout/global_dataset_state_dict_3.pt"
+    content = bytearray(data_file.read_bytes())
+    content[-1] ^= 1
+    data_file.write_bytes(content)
+    with pytest.raises(ValueError, match="changed"):
+        resolve_checkpoint(args)
+    with pytest.raises(FileNotFoundError, match="exact resume"):
+        source.load(4)
+    args.finetune = True
+    source.load(4)
+
+
+def test_dataset_resume_rejects_changed_input_identity():
+    from slime.data.data_source import RolloutDataSource
+
+    source = RolloutDataSource.__new__(RolloutDataSource)
+    source.dataset_identity = {"sha256": "new"}
+    with pytest.raises(ValueError, match="Dataset contents"):
+        source.load_state_dict({"dataset_identity": {"sha256": "old"}, "sample_offset": 5})

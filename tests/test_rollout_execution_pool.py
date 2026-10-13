@@ -209,6 +209,8 @@ def test_stop_prevents_queued_groups_from_starting():
         pool.metrics = {}
         pool.rollout_id = 0
         pool.next_worker = 0
+        pool.available = asyncio.Queue()
+        pool.available.put_nowait(0)
         first = asyncio.create_task(pool.generate(group(), {}))
         await entered.wait()
         queued = asyncio.create_task(pool.generate(group(2), {}))
@@ -219,5 +221,95 @@ def test_stop_prevents_queued_groups_from_starting():
         assert dispatched == [0]
         assert not pool.pending
         await pool.stop()  # A second drain is harmless.
+
+    asyncio.run(run())
+
+
+def test_native_observer_records_teacher_failure_without_replacing_reward(monkeypatch, worker_args, tmp_path):
+    import json
+    from pathlib import Path
+    from test_omni_rollout_plugin import geometry, output, teacher_binding
+    from slime_plugins import omni_rollout
+    from slime_plugins.prism import artifacts, teacher
+
+    worker_args.rollout_sample_observer_path = ["observer"]
+    worker_args.prism_artifact_dir = str(tmp_path / "attempt")
+    worker_args.omni_audio_dir = str(tmp_path / "audio")
+    worker_args.omni_return_audio = False
+    worker_args.prism_reward_function_path = "original.reward"
+    worker_args.prompt_data = "fixture"
+    worker_args.omni_teacher_max_attempts = 1
+    worker_args.omni_teacher_config = {"models": {"a": teacher_binding()}, "by_domain": {"chinese": "a"}}
+
+    async def generate(args, sample, sampling_params, **kwargs):
+        sample.metadata.update(
+            task_type="Full VoiceClone",
+            show_language=False,
+            domain="chinese",
+            references=[],
+            transcript_target="hello",
+            language="zh",
+            reference_targets={},
+        )
+        return omni_rollout.parse_rollout(output(), sample, geometry())
+
+    async def failed_request(*args, **kwargs):
+        raise TimeoutError("injected teacher failure")
+
+    generate.abort_mode = "request"
+    monkeypatch.setattr(sglang_rollout, "load_function", lambda path: generate)
+    monkeypatch.setattr(
+        sample_hooks,
+        "load_function",
+        lambda path: {"teacher": teacher.score_teacher, "observer": artifacts.observe}[path],
+    )
+    monkeypatch.setattr(teacher, "_request", failed_request)
+
+    async def run():
+        worker = execution_pool.GroupWorker(worker_args, 2)
+        await worker.start(0)
+        items = group()
+        with pytest.raises(TimeoutError, match="injected"):
+            await worker.generate(0, items, {})
+        await worker.stop()
+        for item in items:
+            assert item.custom_rm_path is None
+            row = json.loads(Path(item.metadata["prism_artifact"]["record_path"]).read_text())
+            assert row["reward_status"] in {"error", "cancelled"}
+            assert row["failure_stage"] == "sample_hooks"
+            assert row["teacher"]["status"] in {"error", "cancelled"}
+        await teacher.close_teacher_clients(worker.args)
+
+    asyncio.run(run())
+
+
+def test_available_dispatch_uses_a_free_worker_while_another_is_busy():
+    async def run():
+        release = asyncio.Event()
+        received = []
+
+        async def slow(rollout, items, parameters):
+            received.append((0, items[0].index))
+            await release.wait()
+            return items
+
+        async def fast(rollout, items, parameters):
+            received.append((1, items[0].index))
+            return items
+
+        pool = execution_pool.RolloutExecutionPool.__new__(execution_pool.RolloutExecutionPool)
+        pool.workers = [SimpleNamespace(generate_serialized=SimpleNamespace(remote=fn)) for fn in (slow, fast)]
+        pool.available = asyncio.Queue()
+        for index in (0, 1):
+            pool.available.put_nowait(index)
+        pool.pending, pool.running, pool.rollout_id = set(), True, 0
+        first = asyncio.create_task(pool.generate(group(0), {}))
+        await asyncio.sleep(0)
+        await pool.generate(group(2), {})
+        await pool.generate(group(4), {})
+        assert received == [(0, 0), (1, 2), (1, 4)]
+        release.set()
+        await first
+        assert pool.available.qsize() == 2
 
     asyncio.run(run())

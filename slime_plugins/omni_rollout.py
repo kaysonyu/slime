@@ -6,152 +6,66 @@ selected actions are multimodal tensors; no RL objective lives in this module.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import copy
-import hashlib
 import io
 import json
-import math
 import os
-import pickle
 import uuid
 import wave
-from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
 
 import torch
 
-from slime.utils.http_utils import _wrap_ipv6, get, post
 from slime.utils.misc import load_function
 from slime.utils.types import Sample
-
-# mossLite.models.MossTTSPrism.run_policy: PrismItemKind / PrismAudioRole.
-TEXT, AUDIO = 0, 1
-NONE, REFERENCE, TARGET = 0, 1, 2
-LAYOUT = "moss_prism_typed_v1"
-LOGPROB_SEMANTICS = "temperature_scaled_full_vocab_v1"
-STOP_SEMANTICS = "pre_frame_bernoulli_v1"
-REPLAY_FIELDS = (
-    "layout",
-    "prompt_rows",
-    "item_kind",
-    "audio_role",
-    "successor_audio_mask",
-    "successor_audio_codes",
-    "target_history_retention_mask",
+from slime_plugins.prism.http import _request
+from slime_plugins.prism.protocol import (
+    AUDIO,
+    LAYOUT,
+    LOGPROB_SEMANTICS,
+    NONE,
+    REFERENCE,
+    REPLAY_FIELDS,
+    STOP_SEMANTICS,
+    TARGET,
+    TEXT,
+    PrismConfig,
+    _config,
+    _copy_wire_data,
+    _integer,
+    _tensor,
+)
+from slime_plugins.prism.teacher import (
+    _teacher_endpoint,
+    attach_teacher_scores,
+    score_teacher,
+    teacher_request,
+    teacher_request_hash,
 )
 
-
-def _integer(value, name, *, minimum=0):
-    if type(value) is not int or value < minimum:
-        raise ValueError(f"{name} must be an integer >= {minimum}")
-    return value
-
-
-def _tensor(value, shape, dtype, name):
-    if not isinstance(value, list):
-        raise ValueError(f"{name} must be a JSON array")
-    flat = value
-    if len(shape) == 2:
-        if any(not isinstance(row, list) or len(row) != shape[1] for row in value):
-            raise ValueError(f"{name} has invalid row widths")
-        flat = [item for row in value for item in row]
-    expected = (bool,) if dtype == torch.bool else (int,) if dtype == torch.long else (int, float)
-    if any(type(item) not in expected for item in flat):
-        raise ValueError(f"{name} has invalid scalar types")
-    result = torch.tensor(value, dtype=dtype)
-    if shape[0] == 0 and value == []:
-        result = result.reshape(shape)
-    if tuple(result.shape) != tuple(shape):
-        raise ValueError(f"{name} shape {tuple(result.shape)} != {shape}")
-    if dtype.is_floating_point and not torch.isfinite(result).all():
-        raise ValueError(f"{name} contains nonfinite scores")
-    return result
-
-
-def _copy_wire_data(value):
-    """Snapshot decoded protocol containers without Python's per-element deepcopy dispatch."""
-    # Only deserialize bytes produced locally from the already decoded payload.
-    return pickle.loads(pickle.dumps(value, protocol=5))
-
-
-@dataclass(frozen=True)
-class PrismConfig:
-    n_vq: int
-    speech_vocab_size: int
-    text_vocab_size: int
-    text_pad_idx: int
-    pad_token_id: int
-    audio_start_token_id: int
-    sample_rate: int
-    context_length: int
-    input_rvq_channels: tuple[int, ...]
-    identity: dict[str, Any]
-    tokenizer_sha256: dict[str, str] | None = None
-
-    def replay_geometry(self):
-        return {
-            name: list(value) if isinstance(value, tuple) else value
-            for name, value in vars(self).items()
-            if name not in ("identity", "tokenizer_sha256")
-        }
-
-    @classmethod
-    def from_path(cls, checkpoint):
-        root = Path(checkpoint)
-        raw = (root / "config.json").read_bytes()
-        config = json.loads(raw)
-        if config.get("model_type") != "moss_tts_prism":
-            raise ValueError("Omni rollout requires a moss_tts_prism inference artifact")
-        language = config["language_config"]
-        depth = _integer(config["n_vq"], "n_vq", minimum=1)
-        channels = config["prism_input_rvq_channels"]
-        if (
-            not isinstance(channels, list)
-            or not channels
-            or channels != sorted(set(channels))
-            or any(type(channel) is not int or not 1 <= channel <= depth for channel in channels)
-        ):
-            raise ValueError("prism_input_rvq_channels must be a sorted one-based channel subset")
-        identity = {
-            "policy_family": "moss_tts_prism",
-            "architecture": "MOSS-TTS-Prism",
-            "config_sha256": hashlib.sha256(raw).hexdigest(),
-            "n_vq": depth,
-            "audio_vocab_size": config["speech_vocab_size"],
-            "sample_rate": config["sampling_rate"],
-            "stop_semantics": "pre_frame_threshold_v1",
-        }
-        for key, filename in (
-            ("modeling_sha256", "modeling_moss_tts.py"),
-            ("processor_sha256", "processing_moss_tts.py"),
-            ("prompt_protocol_sha256", "prompt_protocol.py"),
-        ):
-            identity[key] = hashlib.sha256((root / filename).read_bytes()).hexdigest()
-        return cls(
-            depth,
-            _integer(config["speech_vocab_size"], "speech_vocab_size", minimum=1),
-            _integer(language["vocab_size"], "vocab_size", minimum=1),
-            _integer(config["text_pad_idx"], "text_pad_idx"),
-            _integer(config["pad_token_id"], "pad_token_id"),
-            _integer(config["audio_start_token_id"], "audio_start_token_id"),
-            _integer(config["sampling_rate"], "sampling_rate", minimum=1),
-            _integer(language["max_position_embeddings"], "max_position_embeddings", minimum=1),
-            tuple(channels),
-            identity,
-            {
-                filename: hashlib.sha256((root / filename).read_bytes()).hexdigest()
-                for filename in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json")
-            },
-        )
-
-
-@lru_cache(maxsize=8)
-def _config(checkpoint):
-    return PrismConfig.from_path(checkpoint)
+__all__ = [
+    "PrismConfig",
+    "TEXT",
+    "AUDIO",
+    "NONE",
+    "REFERENCE",
+    "TARGET",
+    "LAYOUT",
+    "LOGPROB_SEMANTICS",
+    "STOP_SEMANTICS",
+    "REPLAY_FIELDS",
+    "parse_rollout",
+    "build_generate_payload",
+    "generate",
+    "finalize_sample",
+    "teacher_request",
+    "teacher_request_hash",
+    "attach_teacher_scores",
+    "score_teacher",
+    "_teacher_endpoint",
+]
 
 
 def _prompt(sample):
@@ -471,33 +385,6 @@ def parse_rollout(response, sample, config, *, max_frames=None, expected_weight_
     return sample
 
 
-async def _request(args, url, payload, *, headers=None):
-    """Drain a locally owned HTTP task on cancellation, within a fixed bound.
-
-    Draining the client is not a claim that the server stopped its GPU request.
-    Generation/teacher POST is not known to be idempotent, so use one attempt.
-    """
-    timeout = float(getattr(args, "omni_request_timeout_s", 600.0))
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("omni_request_timeout_s must be finite and positive")
-    drain = float(getattr(args, "omni_cancel_drain_timeout_s", min(timeout, 30.0)))
-    if not math.isfinite(drain) or drain <= 0:
-        raise ValueError("omni_cancel_drain_timeout_s must be finite and positive")
-    task = asyncio.create_task(post(url, payload, max_retries=1, headers=headers, timeout=timeout))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=drain)
-        except Exception:
-            task.cancel()
-            # asyncio.wait does not wait indefinitely for a transport/remote
-            # actor that ignores cancellation. Consume its eventual exception.
-            await asyncio.wait({task}, timeout=min(drain, 1.0))
-            task.add_done_callback(lambda finished: None if finished.cancelled() else finished.exception())
-        raise
-
-
 @lru_cache(maxsize=4096)
 def _audio_directory(path, allowed_root=None):
     directory = Path(path).resolve()
@@ -590,232 +477,16 @@ async def generate(args, sample, sampling_params, *, evaluation=False):
 generate.abort_mode = "request"
 
 
-def _load_teacher_config(value):
-    if isinstance(value, dict):
-        return value
-    if not isinstance(value, str) or not value:
-        raise ValueError("omni_teacher_config must be a JSON/YAML path or object")
-    if value.lstrip().startswith("{"):
-        return json.loads(value)
-    content = Path(value).read_text()
-    if Path(value).suffix.lower() == ".json":
-        return json.loads(content)
-    import yaml
-
-    return yaml.safe_load(content)
-
-
-def teacher_request(sample):
-    trace = sample.metadata["omni_rollout"]
-    sample_id = f"{sample.group_index}:{sample.index}:{trace['request_id']}"
-    return _copy_wire_data(
-        dict(
-            version=1,
-            sample_id=sample_id,
-            **{name: trace["replay_inputs"][name] for name in REPLAY_FIELDS},
-            codes=trace["action_streams"][0]["actions"],
-            finish_reason=trace["finish_reason"],
-            temperature=1.0,
-        )
-    )
-
-
-def teacher_request_hash(request):
-    normalized = {key: value for key, value in request.items() if key != "sample_id"}
-    normalized["temperature"] = float(normalized["temperature"])
-    return hashlib.sha256(json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-
-def attach_teacher_scores(sample, request, result, binding):
-    """Convert teacher Bernoulli probabilities into the student's sampled action scores."""
-    identity = binding.get("model_identity")
-    student = sample.metadata["omni_rollout"]["model_identity"]
-    if not isinstance(identity, dict) or {k: v for k, v in identity.items() if k != "config_sha256"} != {
-        k: v for k, v in student.items() if k != "config_sha256"
-    }:
-        raise ValueError("Prism teacher binding has incompatible replay identity")
-    if identity.get("config_sha256") != student.get("config_sha256"):
-        checkpoint = binding.get("checkpoint") or binding.get("model_path")
-        if not checkpoint:
-            raise ValueError("A different-config teacher requires local checkpoint assets for replay compatibility")
-        teacher_config = _config(str(checkpoint))
-        if (
-            teacher_config.identity != identity
-            or teacher_config.replay_geometry() != sample.metadata.get("omni_replay_geometry")
-            or not sample.metadata.get("omni_tokenizer_sha256")
-            or teacher_config.tokenizer_sha256 != sample.metadata["omni_tokenizer_sha256"]
-        ):
-            raise ValueError("Prism teacher checkpoint has incompatible geometry, special tokens or tokenizer")
-    checksum = binding.get("weight_sha256")
-    if not isinstance(checksum, str) or len(checksum) != 64 or any(c not in "0123456789abcdef" for c in checksum):
-        raise ValueError("Prism teacher requires a pinned weight_sha256")
-    if type(result.get("version")) is not int or type(result.get("temperature")) not in (int, float):
-        raise ValueError("Prism teacher response version or temperature has invalid scalar types")
-    expected = dict(
-        version=1,
-        sample_id=request["sample_id"],
-        input_sha256=teacher_request_hash(request),
-        temperature=1.0,
-        finish_reason=request["finish_reason"],
-        model_identity=identity,
-        teacher_weight_sha256=checksum,
-        logprob_semantics=LOGPROB_SEMANTICS,
-        stop_semantics="pre_frame_threshold_v1",
-    )
-    if any(result.get(key) != value for key, value in expected.items()):
-        raise ValueError("Prism teacher response identity, input hash, checksum or semantics differs")
-    if not isinstance(result.get("weight_version"), str) or not result["weight_version"]:
-        raise ValueError("Prism teacher weight version is missing")
-    f, q = sample.response_length, student["n_vq"]
-    stops = f + int(request["finish_reason"] == "stop")
-    scores = _tensor(result.get("code_logprobs"), (f, q), torch.float32, "teacher code logprobs")
-    probabilities = _tensor(result.get("stop_probabilities"), (stops,), torch.float64, "teacher stop probabilities")
-    if (scores > 1e-5).any() or ((probabilities < 0) | (probabilities > 1)).any():
-        raise ValueError("Teacher selected scores are invalid or stop probabilities are outside [0, 1]")
-    mm = sample.multimodal_train_inputs
-    actions = mm["policy_stop_actions"][mm["policy_stop_mask"]]
-    selected = torch.where(actions.bool(), probabilities.log(), torch.log1p(-probabilities)).float()
-    if not torch.isfinite(selected).all():
-        raise ValueError("Selected teacher stop action has zero probability; the scorer must return stable logprobs")
-    code_result = torch.zeros_like(mm["policy_rollout_code_logprobs"])
-    stop_result = torch.zeros_like(mm["policy_rollout_stop_logprobs"])
-    code_result[mm["policy_code_mask"].any(-1)] = scores
-    stop_result[mm["policy_stop_mask"]] = selected
-    mm["policy_teacher_code_logprobs"] = code_result
-    mm["policy_teacher_stop_logprobs"] = stop_result
-    sample.teacher_log_probs = scores.sum(-1).tolist()
-    sample.metadata["omni_teacher_identity"] = copy.deepcopy(identity)
-    sample.metadata["omni_teacher_weight_sha256"] = checksum
-    sample.metadata["omni_teacher_weight_version"] = result["weight_version"]
-    return sample
-
-
-def _validate_frozen_deployment(args, deployment):
-    """Reject trainable named models before discovering any teacher worker."""
-    if not isinstance(deployment, str) or not deployment:
-        raise ValueError("Prism teacher deployment must be a nonempty model name")
-    if deployment == getattr(args, "omni_model_name", "student"):
-        raise ValueError("A Prism teacher deployment cannot be the student model")
-    configuration = getattr(args, "sglang_config", None)
-    if configuration is None:
-        # External/pre-resolved deployments may expose only their router map.
-        # Pinned response identity and checksum remain mandatory below.
+def finalize_sample(args, sample):
+    if not getattr(args, "omni_compact_replay", False) or "omni_rollout" not in (sample.metadata or {}):
         return
-    if isinstance(configuration, (str, Path)):
-        from slime.backends.sglang_utils.sglang_config import SglangConfig
-
-        configuration = SglangConfig.from_yaml(str(configuration))
-    models = getattr(configuration, "models", None)
-    if models is None:
-        raise ValueError("Prism teacher requires a model-aware sglang_config")
-    matches = [model for model in models if model.name == deployment]
-    if len(matches) != 1:
-        raise ValueError(f"Prism teacher deployment {deployment!r} must name one configured model")
-    model = matches[0]
-    if model.update_weights is None:
-        model.resolve(args)
-    if model.update_weights is not False:
-        raise ValueError(f"Prism teacher deployment {deployment!r} must have update_weights=false")
+    trace = sample.metadata["omni_rollout"]
+    sample.metadata["omni_rollout"] = {
+        key: value
+        for key, value in trace.items()
+        if key not in {"replay_inputs", "action_streams", "auxiliary_streams"}
+    }
+    sample.metadata["omni_replay_compact"] = True
 
 
-async def _teacher_endpoint(args, sample, binding):
-    """Discover a named teacher's live worker; the router has no score API."""
-    selected = [name for name in ("endpoint", "deployment") if binding.get(name) is not None]
-    if len(selected) != 1:
-        raise ValueError("Prism teacher binding must specify exactly one of endpoint or deployment")
-    if selected[0] == "endpoint":
-        endpoint = binding["endpoint"]
-        if not isinstance(endpoint, str) or not endpoint.startswith(("http://", "https://")):
-            raise ValueError("Prism teacher endpoint must be HTTP(S)")
-        return endpoint.rstrip("/")
-    deployment = binding["deployment"]
-    _validate_frozen_deployment(args, deployment)
-    routers = getattr(args, "sglang_model_routers", None) or {}
-    if deployment not in routers:
-        raise ValueError(f"Prism teacher deployment {deployment!r} has no registered router")
-    address = routers[deployment]
-    if not isinstance(address, (tuple, list)) or len(address) != 2:
-        raise ValueError("Named Omni model router must provide its (host, port)")
-    host, port = address
-    port = _integer(port, "teacher router port", minimum=1)
-    timeout = float(getattr(args, "rollout_health_check_timeout", 10.0))
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("Teacher health timeout must be finite and positive")
-    router = f"http://{_wrap_ipv6(str(host))}:{port}"
-    body = await asyncio.wait_for(get(router + "/workers", timeout=timeout), timeout=timeout)
-    if not isinstance(body, dict) or not isinstance(body.get("workers"), list):
-        raise ValueError("Omni teacher router /workers returned an invalid worker list")
-    workers = sorted(
-        {
-            worker["url"].rstrip("/")
-            for worker in body["workers"]
-            if isinstance(worker, dict)
-            and worker.get("health_state") == "healthy"
-            and worker.get("routable") is True
-            and worker.get("disabled") is False
-            and worker.get("model") in (None, deployment)
-            and isinstance(worker.get("url"), str)
-            and worker["url"].startswith(("http://", "https://"))
-        }
-    )
-    if not workers:
-        raise ValueError(f"Omni teacher deployment {deployment!r} has no healthy routable workers")
-    digest = hashlib.sha256(json.dumps([sample.group_index, sample.index]).encode()).digest()
-    start = int.from_bytes(digest[:8], "little") % len(workers)
-    for offset in range(len(workers)):
-        worker = workers[(start + offset) % len(workers)]
-        try:
-            health = await asyncio.wait_for(get(worker + "/health", timeout=timeout), timeout=timeout)
-        except Exception:
-            continue
-        if isinstance(health, dict) and health.get("running") is True:
-            return worker
-    raise ValueError(f"Omni teacher deployment {deployment!r} has no reachable running workers")
-
-
-async def score_teacher(args, sample, *, evaluation=False, **kwargs):
-    """Per-sample hook: route an explicit domain to one frozen Prism teacher."""
-    if evaluation:
-        score_during_eval = getattr(args, "omni_eval_teacher_scoring", True)
-        if type(score_during_eval) is not bool:
-            raise ValueError("omni_eval_teacher_scoring must be Boolean")
-        if not score_during_eval:
-            return sample
-    if not getattr(args, "omni_teacher_config", None):
-        return sample
-    config = _load_teacher_config(args.omni_teacher_config)
-    models, routes = config.get("models", {}), config.get("by_domain", {})
-    domain = sample.metadata.get("domain")
-    key = config.get("default_teacher") if domain is None else routes.get(domain)
-    if key not in models:
-        raise ValueError(f"Unmapped Prism teacher domain {domain!r}")
-    binding = models[key]
-    if not isinstance(binding, dict):
-        raise ValueError("Prism teacher binding must be an object")
-    endpoint = await _teacher_endpoint(args, sample, binding)
-    token_name = binding.get("auth_token_env")
-    token = os.environ.get(token_name) if token_name else None
-    if token_name and not token:
-        raise ValueError(f"Teacher authentication environment {token_name!r} is missing")
-    request = teacher_request(sample)
-    response = await _request(
-        args,
-        endpoint + "/score_actions",
-        {"samples": [request]},
-        headers={"Authorization": f"Bearer {token}"} if token else None,
-    )
-    if (
-        not isinstance(response, dict)
-        or type(response.get("version")) is not int
-        or response["version"] != 1
-        or not isinstance(response.get("results"), list)
-        or len(response["results"]) != 1
-        or not isinstance(response["results"][0], dict)
-    ):
-        raise ValueError("Prism teacher response version or result count differs")
-    attach_teacher_scores(sample, request, response["results"][0], binding)
-    sample.metadata["omni_teacher_key"] = key
-    sample.metadata["omni_teacher_endpoint"] = endpoint
-    if "deployment" in binding:
-        sample.metadata["omni_teacher_deployment"] = binding["deployment"]
-    return sample
+generate.finalize = finalize_sample

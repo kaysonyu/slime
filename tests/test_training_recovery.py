@@ -805,6 +805,7 @@ def test_driver_preserves_training_or_cleanup_failure_and_finishes_tracking(args
     monkeypatch.setitem(sys.modules, "slime.utils.arguments", SimpleNamespace(parse_args=None))
     main = runpy.run_path(str(Path(__file__).resolve().parents[1] / "train.py"))["main"]
     startup = Mock()
+    startup.args = args
     startup.close.side_effect = RuntimeError("cleanup failure")
     finish = Mock(side_effect=ValueError("tracking failure"))
     monkeypatch.setitem(main.__globals__, "init_tracking", Mock())

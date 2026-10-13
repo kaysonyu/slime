@@ -72,6 +72,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--omni-teacher-config", help="YAML/JSON domain-to-frozen-teacher bindings for the Omni sample hook."
             )
+            parser.add_argument("--omni-teacher-batch-size", type=int, default=8)
+            parser.add_argument("--omni-teacher-batch-wait-ms", type=float, default=2.0)
+            parser.add_argument("--omni-teacher-max-inflight", type=int, default=4)
+            parser.add_argument("--omni-teacher-max-attempts", type=int, default=2)
+            parser.add_argument("--omni-teacher-request-timeout-s", type=float, default=120.0)
+            parser.add_argument("--omni-compact-replay", action=argparse.BooleanOptionalAction, default=False)
             parser.add_argument(
                 "--omni-reward-config", help="YAML/JSON WER, SIM and instruction reward service configuration."
             )
@@ -577,6 +583,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "May be repeated. Hooks may be sync or async and have signature "
                     "hook(args, sample, *, rollout_id=None, evaluation=False) -> Sample | None."
                 ),
+            )
+            parser.add_argument(
+                "--rollout-sample-observer-path",
+                action="append",
+                default=[],
+                help="Observe generated/completed/failed sample events without replacing reward functions.",
             )
             parser.add_argument(
                 "--custom-rollout-log-function-path",
@@ -1645,7 +1657,26 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             Add custom Megatron plugins arguments.
             This is a placeholder for any additional arguments that might be needed.
             """
-            # Custom arguments can be added here
+            parser.add_argument(
+                "--checkpoint-joint-commit",
+                action="store_true",
+                default=False,
+                help="Commit Megatron and built-in dataset checkpoints together before allowing resume.",
+            )
+            parser.add_argument(
+                "--resolved-config-path",
+                default=None,
+                help="Write the fully resolved, redacted driver arguments as JSON.",
+            )
+            parser.add_argument(
+                "--phase-trace-path", default=None, help="Append native driver phase timings as JSONL."
+            )
+            parser.add_argument(
+                "--resident-cleanup-interval",
+                type=int,
+                default=1,
+                help="Steps between full GC/allocator cleanup while training weights remain resident.",
+            )
             parser.add_argument(
                 "--custom-megatron-init-path",
                 type=str,

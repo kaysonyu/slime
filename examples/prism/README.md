@@ -521,3 +521,54 @@ JSON
 `0.05` 是这里显式选定的 BF16 数值容差示例；结果会分别报告 RVQ 与 stop 的最大和平均误差。该工程检查使用一个明确的非零 advantage 来验证反向和权重更新，不调用实际 reward model，也不替代完整 prompt group 的 GRPO 或 domain 教师训练验收。独立脚本直接使用 engine 控制方法，没有执行 Ray placement；实际训练的资源生命周期仍由 `train.py` 管理。
 
 `--mode static` 可单独检查 HF artifact、pipeline、router 和真实 rollout 协议，省去两个 hook 及 native checkpoint。这个模式不发布 learner 权重，结果会明确记录这一点。原始 `/generate` JSON、typed replay、更新前后分数和清理状态均写入结果目录。
+
+### Runtime boundaries and reproducible cluster runs
+
+Prism's installed runtime lives in `slime_plugins.prism`. The old
+`examples.prism.artifacts`, `experiment`, and `hooks` paths remain compatibility
+entry points. Sample observers receive `generated`, `completed`, and `failed`
+events; they do not replace the configured reward callable. Candidate indexes
+are flushed in batches and drained at the rollout boundary. Teacher failures
+retain their stage and status in candidate records.
+
+The frozen teacher client loads each configuration once per process. Its
+`--omni-teacher-batch-size` (default 8), `--omni-teacher-batch-wait-ms` (2 ms),
+`--omni-teacher-max-inflight` (4 per execution worker), and
+`--omni-teacher-max-attempts` (2) bound request aggregation and transient retries.
+Only fixed-action scoring retries transport errors and HTTP 429/502/503/504;
+identity and input-hash mismatches remain fatal. Teacher endpoints may return
+`stop_logprobs` for both binary actions; these preserve finite selected scores
+even when the accompanying compatibility probabilities round to zero or one.
+
+The launcher enables `--omni-compact-replay`: training tensors retain the exact
+replay inputs and actions, while completed samples discard duplicate wire lists.
+The teacher request can still be reconstructed from those tensors. Pass
+`--no-omni-compact-replay` when a custom postprocessing hook needs the original
+wire trace. The native archive does not require that duplicate trace.
+
+Prism examples enable `--checkpoint-joint-commit`. A checkpoint is resumable only
+after its model and dataset cursor are committed together. An interrupted later
+save cannot supersede the last complete commit. Dataset state is required for
+ordinary resume; use Megatron's explicit `--finetune` mode to load a model and
+start a new dataset run. New cursor snapshots verify the dataset content hash
+and sampling configuration. The existing straw commit format is unchanged.
+
+`logs/phases.jsonl` records explicit driver phase boundaries using a monotonic
+clock; `config/resolved-args.json` records the final redacted arguments. The
+`RESIDENT_CLEANUP_INTERVAL` environment variable controls full GC and allocator
+cleanup while the learner remains resident. Its conservative default is 1;
+measure peak memory and checkpoint/resume behavior before increasing it.
+
+A pinned multi-node GPU Job can run
+`python /absolute/slime/slime_plugins/prism/cluster.py /shared/configs/run.json`.
+Use `--dry-run` to validate the manifest without allocating GPU work. The JSON
+requires `source`, `source_commit`, `omni_source`, `omni_source_commit`,
+`auth_token_file`, `hf_checkpoint`, `pretrained_checkpoint`, `prompt_data`,
+`student_config`, `output`, `ready_file`, `nodes`, and `mode`, plus
+`teacher_config` for MoPD or `reward_config` for GRPO. Source and asset paths are
+shared absolute paths. Optional fields include `batch`, `rollouts`, `seed`,
+`concurrency`, `save_interval`, `load_checkpoint`, `extra_args`, `python`, and
+`omni_python`. `dependencies` can pin additional repositories by path and commit.
+The job records per-node GPU samples, validates GPU collectives and TensorBoard
+storage, and starts the ordinary Prism launcher on the Ray head. A fresh output
+path is required for every attempt.

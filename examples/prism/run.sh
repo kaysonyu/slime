@@ -181,6 +181,11 @@ TASK_ARGS=(
   --adam-beta2 0.98
   --save "${TASK_OUTPUT_DIR}"
   --save-interval "${SAVE_INTERVAL:-10}"
+  --checkpoint-joint-commit
+  --omni-compact-replay
+  --resolved-config-path "${TASK_ROUND_DIR}/config/resolved-args.json"
+  --phase-trace-path "${PHASE_TRACE_PATH:-${TASK_ROUND_DIR}/logs/phases.jsonl}"
+  --resident-cleanup-interval "${RESIDENT_CLEANUP_INTERVAL:-1}"
 )
 
 if [[ ${TASK_COLOCATE} == 1 ]]; then
@@ -239,7 +244,7 @@ else
     --opd-kl-coef "${OPD_KL_COEF:-1}"
     --rollout-sample-hook-path slime_plugins.omni_rollout.score_teacher
     --omni-teacher-config "${TEACHER_CONFIG}"
-    --custom-rm-path examples.prism.hooks.zero_reward
+    --custom-rm-path slime_plugins.prism.hooks.zero_reward
   )
   # MOPD can reuse frozen audio scorers for eval without changing its training reward.
   if [[ -n ${REWARD_CONFIG:-} ]]; then
@@ -251,7 +256,7 @@ fi
 # Keep actual Omni scores for diagnostics; no --use-rollout-logprobs means
 # Megatron recomputes and freezes old selected scores before optimization.
 if [[ ${PRISM_DRY_RUN:-0} == 1 ]]; then
-  "${TASK_TRAIN_PYTHON}" -m examples.prism.experiment \
+  "${TASK_TRAIN_PYTHON}" -m slime_plugins.prism.experiment \
     --run-dir "${TASK_ROUND_DIR}" --run-name "${TASK_RUN_NAME}" \
     --job-tag "${TASK_JOB_TAG}" --running-round "${TASK_RUNNING_ROUND}" --dry-run \
     -- "${TASK_TRAIN_PYTHON}" "${TASK_REPO_ROOT}/train.py" "${TASK_ARGS[@]}" "$@"
@@ -259,7 +264,7 @@ if [[ ${PRISM_DRY_RUN:-0} == 1 ]]; then
 fi
 TASK_COMMAND_FILE=$(mktemp)
 trap 'rm -f -- "${TASK_COMMAND_FILE}"' EXIT
-"${TASK_TRAIN_PYTHON}" -m examples.prism.experiment \
+"${TASK_TRAIN_PYTHON}" -m slime_plugins.prism.experiment \
   --run-dir "${TASK_ROUND_DIR}" --run-name "${TASK_RUN_NAME}" \
   --job-tag "${TASK_JOB_TAG}" --running-round "${TASK_RUNNING_ROUND}" \
   --command-file "${TASK_COMMAND_FILE}" \

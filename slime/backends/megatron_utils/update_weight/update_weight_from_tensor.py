@@ -1,3 +1,5 @@
+import hashlib
+import json
 from argparse import Namespace
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
@@ -87,6 +89,7 @@ class UpdateWeightFromTensor:
             tuple(tuple(bucket) for bucket in param_info_buckets) if param_info_buckets is not None else None
         )
         self._non_expert_param_info_buckets: list[list[ParamInfo]] | None = None
+        self._omni_publication_manifest = None
 
         self._ipc_gather_group = None
         self._ipc_gather_src = None
@@ -315,11 +318,30 @@ class UpdateWeightFromTensor:
         param_info_buckets = (
             self._non_expert_param_info_buckets if self._expert_transfer_plan else self._full_param_info_buckets
         )
-        for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(
-            megatron_local_weights,
-            param_info_buckets=param_info_buckets,
+        publication = None
+        if getattr(self.args, "rollout_backend", "sglang") == "sglang-omni" and not self._expert_transfer_plan:
+            if self._omni_publication_manifest is None:
+                manifest = [
+                    [(info.name, list(info.shape), str(info.dtype)) for info in bucket]
+                    for bucket in param_info_buckets
+                ]
+                self._omni_publication_manifest = {
+                    "manifest_sha256": hashlib.sha256(
+                        json.dumps(manifest, separators=(",", ":")).encode()
+                    ).hexdigest(),
+                    "bucket_count": len(manifest),
+                }
+            publication = self._omni_publication_manifest
+        for bucket_index, hf_named_tensors in enumerate(
+            self._hf_weight_iterator.get_hf_weight_chunks(
+                megatron_local_weights,
+                param_info_buckets=param_info_buckets,
+            )
         ):
-            refs, long_lived_tensors = self._send_hf_params(hf_named_tensors)
+            refs, long_lived_tensors = self._send_hf_params(
+                hf_named_tensors,
+                publication={**publication, "bucket_index": bucket_index} if publication is not None else None,
+            )
             ray.get(refs)
             # Free GPU tensors so the caching allocator can reuse the blocks,
             # then release CUDA IPC cache entries whose consumers (sglang engines)
@@ -349,7 +371,7 @@ class UpdateWeightFromTensor:
             ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
 
-    def _send_hf_params(self, hf_named_tensors) -> tuple[list[ObjectRef], Any]:
+    def _send_hf_params(self, hf_named_tensors, *, publication=None) -> tuple[list[ObjectRef], Any]:
         all_refs = []
 
         refs_colocated, long_lived_tensors = _send_to_colocated_engine(
@@ -358,6 +380,7 @@ class UpdateWeightFromTensor:
             ipc_gather_src=self._ipc_gather_src,
             ipc_gather_group=self._ipc_gather_group,
             weight_version=self.weight_version,
+            publication=publication,
         )
         all_refs.extend(refs_colocated)
 
@@ -382,6 +405,7 @@ def _send_to_colocated_engine(
     ipc_gather_src,
     ipc_gather_group,
     weight_version,
+    publication=None,
 ) -> tuple[list[ObjectRef], Any]:
     # Placeholder ranks (GPU slots reserved but no engine) have no gather group.
     # gather_object is only collective among group members, so we skip entirely.
@@ -419,6 +443,8 @@ def _send_to_colocated_engine(
     refs = []
     if dist.get_rank() == ipc_gather_src:
         num_buckets = max(len(tensors) for tensors in serialized_named_tensors)
+        if publication is not None and num_buckets != 1:
+            raise ValueError("Omni publication manifests require a mixed-dtype flattened bucket")
         empty_serialized_tensor = None
         for i in range(num_buckets):
             serialized_tensors_for_dtype = []
@@ -438,6 +464,8 @@ def _send_to_colocated_engine(
                 "load_format": "flattened_bucket",
                 "weight_version": str(weight_version),
             }
+            if publication is not None:
+                kwargs["publication"] = publication
             refs.append(ipc_engine.update_weights_from_tensor.remote(**kwargs))
 
     return refs, long_live_tensors

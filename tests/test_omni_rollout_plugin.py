@@ -20,6 +20,8 @@ import torch
 
 from slime.utils.types import Sample
 from slime_plugins import omni_rollout as plugin
+from slime_plugins.prism import http as prism_http
+from slime_plugins.prism import teacher as teacher_plugin
 
 NUM_GPUS = 0
 
@@ -429,9 +431,9 @@ def test_cross_config_teacher_requires_verified_replay_assets(monkeypatch):
         plugin.attach_teacher_scores(item, request, result, binding)
     binding["checkpoint"] = "teacher-fixture"
     teacher_config = replace(student_config, identity=binding["model_identity"])
-    monkeypatch.setattr(plugin, "_config", lambda path: teacher_config)
+    monkeypatch.setattr(teacher_plugin, "_config", lambda path: teacher_config)
     assert plugin.attach_teacher_scores(item, request, result, binding) is item
-    monkeypatch.setattr(plugin, "_config", lambda path: replace(teacher_config, audio_start_token_id=5))
+    monkeypatch.setattr(teacher_plugin, "_config", lambda path: replace(teacher_config, audio_start_token_id=5))
     with pytest.raises(ValueError, match="incompatible geometry"):
         plugin.attach_teacher_scores(item, request, result, binding)
 
@@ -506,6 +508,31 @@ def test_teacher_endpoint_probability_is_conditioned_on_the_sampled_action(posit
         assert torch.isfinite(selected).all()
 
 
+@pytest.mark.parametrize("logits", [[0.0, 20.0], [200.0, 0.0]])
+def test_teacher_stable_stop_scores_survive_probability_saturation(logits):
+    item = plugin.parse_rollout(output(frames=1), sample(), geometry())
+    request, binding = plugin.teacher_request(item), teacher_binding()
+    result = teacher_output(request, binding)
+    scores = torch.tensor([logits, logits]).log_softmax(-1)
+    result["stop_probabilities"] = scores[:, 1].exp().tolist()
+    result["stop_logprobs"] = scores.tolist()
+    plugin.attach_teacher_scores(item, request, result, binding)
+    inputs = item.multimodal_train_inputs
+    selected = inputs["policy_teacher_stop_logprobs"][inputs["policy_stop_mask"]]
+    torch.testing.assert_close(selected, scores[torch.arange(2), torch.tensor([0, 1])])
+    assert torch.isfinite(selected).all()
+
+
+@pytest.mark.parametrize("scores", [[[0.0, 0.0]] * 2, [[-1.0, -1.0]] * 2])
+def test_teacher_stable_stop_scores_require_a_normalized_distribution(scores):
+    item = plugin.parse_rollout(output(frames=1), sample(), geometry())
+    request, binding = plugin.teacher_request(item), teacher_binding()
+    result = teacher_output(request, binding)
+    result["stop_logprobs"] = scores
+    with pytest.raises(ValueError, match="normalized"):
+        plugin.attach_teacher_scores(item, request, result, binding)
+
+
 def test_real_hf_artifact_protocol_from_environment():
     """Repeat with PRISM_HF_TEST_ARTIFACT=<HF directory>; no weights are loaded."""
     checkpoint = os.environ.get("PRISM_HF_TEST_ARTIFACT")
@@ -551,7 +578,7 @@ def test_teacher_domain_hook_reuses_score_endpoint_and_rejects_unmapped_domain(m
         calls.append((url, kwargs))
         return {"version": 1, "results": [teacher_output(payload["samples"][0], binding)]}
 
-    monkeypatch.setattr(plugin, "post", fake_post)
+    monkeypatch.setattr(prism_http, "post", fake_post)
     assert asyncio.run(plugin.score_teacher(args, item)) is item
     assert calls[0][0] == "http://teacher/score_actions" and calls[0][1]["max_retries"] == 1
     assert item.metadata["omni_teacher_key"] == "a"
@@ -609,8 +636,8 @@ def test_named_teacher_discovers_live_workers_then_scores_directly(monkeypatch):
         posts.append(url)
         return {"version": 1, "results": [teacher_output(payload["samples"][0], binding)]}
 
-    monkeypatch.setattr(plugin, "get", fake_get)
-    monkeypatch.setattr(plugin, "post", fake_post)
+    monkeypatch.setattr(teacher_plugin, "get", fake_get)
+    monkeypatch.setattr(prism_http, "post", fake_post)
     for _ in range(2):
         item = plugin.parse_rollout(output(), sample(), geometry())
         asyncio.run(plugin.score_teacher(args, item))
@@ -630,7 +657,9 @@ def test_named_teacher_discovers_live_workers_then_scores_directly(monkeypatch):
     ],
 )
 def test_teacher_binding_requires_one_valid_endpoint_or_deployment(monkeypatch, binding):
-    monkeypatch.setattr(plugin, "get", lambda *args, **kwargs: pytest.fail("Invalid binding made an HTTP request"))
+    monkeypatch.setattr(
+        teacher_plugin, "get", lambda *args, **kwargs: pytest.fail("Invalid binding made an HTTP request")
+    )
     with pytest.raises(ValueError):
         asyncio.run(plugin._teacher_endpoint(named_teacher_args(binding), sample(), binding))
 
@@ -654,7 +683,9 @@ def test_named_teacher_rejects_student_or_unconfigured_models_before_http(monkey
         configuration.models = []
     else:
         args.sglang_model_routers = {}
-    monkeypatch.setattr(plugin, "get", lambda *args, **kwargs: pytest.fail("Invalid role made an HTTP request"))
+    monkeypatch.setattr(
+        teacher_plugin, "get", lambda *args, **kwargs: pytest.fail("Invalid role made an HTTP request")
+    )
     with pytest.raises(ValueError):
         asyncio.run(plugin._teacher_endpoint(args, sample(), binding))
 
@@ -668,7 +699,7 @@ def test_named_teacher_resolves_explicit_frozen_model_from_yaml(monkeypatch, tmp
     async def fake_get(url, **kwargs):
         return {"workers": [worker()]} if url.endswith("/workers") else {"running": True}
 
-    monkeypatch.setattr(plugin, "get", fake_get)
+    monkeypatch.setattr(teacher_plugin, "get", fake_get)
     assert asyncio.run(plugin._teacher_endpoint(args, sample(), binding)) == "http://worker-a"
 
 
@@ -681,7 +712,7 @@ def test_named_teacher_rejects_router_workers_that_are_not_healthy_and_routable(
         assert url.endswith("/workers")
         return {"workers": workers}
 
-    monkeypatch.setattr(plugin, "get", fake_get)
+    monkeypatch.setattr(teacher_plugin, "get", fake_get)
     binding = named_teacher_binding()
     with pytest.raises(ValueError, match="no healthy routable"):
         asyncio.run(plugin._teacher_endpoint(named_teacher_args(binding), sample(), binding))
@@ -697,7 +728,7 @@ def test_named_teacher_probes_registration_health_and_uses_another_live_replica(
         # Make the first selected registered worker stale, then accept the other.
         return {"running": len(probes) > 1}
 
-    monkeypatch.setattr(plugin, "get", fake_get)
+    monkeypatch.setattr(teacher_plugin, "get", fake_get)
     binding = named_teacher_binding()
     selected = asyncio.run(plugin._teacher_endpoint(named_teacher_args(binding), sample(), binding))
     assert len(probes) == 2 and selected + "/health" == probes[-1]
@@ -719,8 +750,8 @@ def test_named_teacher_keeps_frozen_identity_and_weight_pins_strict(monkeypatch,
             result["teacher_weight_sha256"] = "b" * 64
         return {"version": 1, "results": [result]}
 
-    monkeypatch.setattr(plugin, "get", fake_get)
-    monkeypatch.setattr(plugin, "post", fake_post)
+    monkeypatch.setattr(teacher_plugin, "get", fake_get)
+    monkeypatch.setattr(prism_http, "post", fake_post)
     item = plugin.parse_rollout(output(), sample(), geometry())
     with pytest.raises(ValueError, match="identity, input hash, checksum"):
         asyncio.run(plugin.score_teacher(args, item))
@@ -735,7 +766,7 @@ def test_cancellation_drains_the_owned_request_before_returning(monkeypatch):
         state.append("completed")
         return {}
 
-    monkeypatch.setattr(plugin, "post", fake_post)
+    monkeypatch.setattr(prism_http, "post", fake_post)
 
     async def exercise():
         args = types.SimpleNamespace(omni_request_timeout_s=1.0, omni_cancel_drain_timeout_s=0.1)
@@ -757,7 +788,7 @@ def test_cancellation_cleanup_does_not_wait_forever_for_remote_transport(monkeyp
             # A remote transport may not stop when its local waiter cancels.
             await asyncio.sleep(10)
 
-    monkeypatch.setattr(plugin, "post", slow_post)
+    monkeypatch.setattr(prism_http, "post", slow_post)
 
     async def exercise():
         args = types.SimpleNamespace(omni_request_timeout_s=1.0, omni_cancel_drain_timeout_s=0.01)
@@ -789,7 +820,7 @@ def test_generate_uses_router_and_preserves_sample_identity(monkeypatch, tmp_pat
         calls.append((url, payload))
         return copy.deepcopy(response)
 
-    monkeypatch.setattr(plugin, "post", fake_post)
+    monkeypatch.setattr(prism_http, "post", fake_post)
     monkeypatch.setattr(plugin, "_config", lambda path: geometry())
     monkeypatch.setitem(
         sys.modules,
@@ -822,3 +853,111 @@ def test_eval_teacher_hook_can_skip_without_changing_training():
     assert asyncio.run(plugin.score_teacher(args, item, evaluation=True)) is item
     with pytest.raises(ValueError, match="Unmapped"):
         asyncio.run(plugin.score_teacher(args, item, evaluation=False))
+
+
+@pytest.mark.parametrize("frames,finish", [(0, "stop"), (1, "stop"), (2, "length")])
+def test_compact_replay_reconstructs_the_same_teacher_request_and_training_tensors(frames, finish):
+    item = plugin.parse_rollout(output(frames, finish), sample(), geometry())
+    expected = plugin.teacher_request(item)
+    tensors = {name: tensor.clone() for name, tensor in item.multimodal_train_inputs.items()}
+    plugin.finalize_sample(types.SimpleNamespace(omni_compact_replay=True), item)
+    assert "replay_inputs" not in item.metadata["omni_rollout"]
+    assert "action_streams" not in item.metadata["omni_rollout"]
+    assert plugin.teacher_request(item) == expected
+    for name, tensor in tensors.items():
+        torch.testing.assert_close(item.multimodal_train_inputs[name], tensor, rtol=0, atol=0)
+
+
+def test_teacher_batches_are_bounded_and_match_results_by_sample_id(tmp_path, monkeypatch):
+    binding = teacher_binding()
+    path = tmp_path / "teachers.json"
+    path.write_text(json.dumps({"models": {"a": binding}, "by_domain": {"chinese": "a"}}))
+    args = types.SimpleNamespace(
+        omni_teacher_config=str(path),
+        omni_teacher_batch_size=4,
+        omni_teacher_max_inflight=2,
+        omni_teacher_batch_wait_ms=1,
+    )
+    batches, active, maximum = [], 0, 0
+    reads = []
+    original = type(path).read_text
+
+    def read(self, *positional, **keyword):
+        if self == path:
+            reads.append(self)
+        return original(self, *positional, **keyword)
+
+    async def request(_args, url, payload, **kwargs):
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        batches.append(payload["samples"])
+        await asyncio.sleep(0.005)
+        active -= 1
+        return {"version": 1, "results": [teacher_output(row, binding) for row in reversed(payload["samples"])]}
+
+    monkeypatch.setattr(type(path), "read_text", read)
+    monkeypatch.setattr(teacher_plugin, "_request", request)
+
+    async def run():
+        items = [plugin.parse_rollout(output(), sample(index), geometry()) for index in range(11)]
+        await asyncio.gather(*(plugin.score_teacher(args, item) for item in items))
+        path.write_text("invalid config after the binding was frozen")
+        await plugin.score_teacher(args, plugin.parse_rollout(output(), sample(20), geometry()))
+        await teacher_plugin.close_teacher_clients(args)
+        assert all(item.metadata["omni_teacher_status"] == "success" for item in items)
+
+    asyncio.run(run())
+    assert len(reads) == 1
+    assert sorted(len(batch) for batch in batches) == [1, 3, 4, 4]
+    assert maximum == 2
+
+
+def test_cancelling_one_teacher_sample_keeps_its_batch_peer_alive(monkeypatch):
+    binding = teacher_binding()
+    args = types.SimpleNamespace(
+        omni_teacher_config={"models": {"a": binding}, "by_domain": {"chinese": "a"}},
+        omni_teacher_batch_size=2,
+        omni_teacher_batch_wait_ms=100,
+    )
+
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def request(_args, url, payload, **kwargs):
+            entered.set()
+            await release.wait()
+            return {"version": 1, "results": [teacher_output(row, binding) for row in payload["samples"]]}
+
+        monkeypatch.setattr(teacher_plugin, "_request", request)
+        items = [plugin.parse_rollout(output(), sample(index), geometry()) for index in range(2)]
+        first, second = [asyncio.create_task(plugin.score_teacher(args, item)) for item in items]
+        await entered.wait()
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        release.set()
+        assert await second is items[1]
+        await teacher_plugin.close_teacher_clients(args)
+        assert items[0].metadata["omni_teacher_status"] == "cancelled"
+        assert items[1].metadata["omni_teacher_status"] == "success"
+
+    asyncio.run(run())
+
+
+def test_compact_replay_preserves_reference_audio_edges():
+    response = output()
+    response["meta_info"]["prompt_tokens"] = 4
+    replay = response["meta_info"]["omni_rollout"]["replay_inputs"]
+    replay.update(
+        prompt_rows=[[4, 0, 0], [9, 1, 2], [9, 3, 4], [4, 0, 0]],
+        item_kind=[0, 1, 1, 0],
+        audio_role=[0, 1, 1, 0],
+        successor_audio_mask=[True, True, False, False],
+        successor_audio_codes=[[1, 2], [3, 4], [0, 0], [0, 0]],
+        target_history_retention_mask=[[False, False]] * 4,
+    )
+    item = plugin.parse_rollout(response, sample(), geometry())
+    expected = plugin.teacher_request(item)
+    plugin.finalize_sample(types.SimpleNamespace(omni_compact_replay=True), item)
+    assert plugin.teacher_request(item) == expected

@@ -49,9 +49,26 @@ def save_checkpoint(args, rollout_id, actor_model, critic_model, rollout_manager
         and not args.debug_rollout_only
     )
     recoverable = training_recovery_enabled(args)
+    ordinary_checkpoint = (
+        getattr(args, "checkpoint_joint_commit", False)
+        and args.rollout_data_transport != "straw"
+        and actor_trains
+        and not args.debug_train_only
+        and not args.debug_rollout_only
+    )
     # A recovery boundary must wait for async model writes to finish before it
     # can declare earlier batches safe to discard.
-    force_sync = straw_checkpoint or recoverable or args.release_train or rollout_id == args.num_rollout - 1
+    force_sync = (
+        straw_checkpoint
+        or ordinary_checkpoint
+        or recoverable
+        or args.release_train
+        or rollout_id == args.num_rollout - 1
+    )
+    if ordinary_checkpoint:
+        from slime.data.checkpoint_boundary import begin_checkpoint_boundary
+
+        begin_checkpoint_boundary(args, rollout_id)
     if straw_checkpoint and (Path(args.save) / "rollout" / f"committed_{rollout_id}.json").exists():
         raise FileExistsError("Refusing to overwrite a committed straw checkpoint")
     if actor_trains:
@@ -59,6 +76,13 @@ def save_checkpoint(args, rollout_id, actor_model, critic_model, rollout_manager
     if args.use_critic:
         critic_model.save_model(rollout_id, force_sync=force_sync)
     ray.get(rollout_manager.save.remote(rollout_id))
+    if ordinary_checkpoint:
+        from slime.data.checkpoint_boundary import commit_checkpoint_boundary
+
+        model_args = [actor_model.args] + ([critic_model.args] if args.use_critic else [])
+        commit_checkpoint_boundary(
+            args, rollout_id, model_args, weight_version=ray.get(rollout_manager.get_weight_version.remote())
+        )
     if straw_checkpoint:
         # Failed saves raise above; publish only after all saves return.
         model_args = [actor_model.args]
@@ -245,6 +269,9 @@ def resolve_checkpoint(args):
     args = copy.deepcopy(args)
     mode, dataset_cursor = "new", None
     if getattr(args, "rollout_data_transport", None) != "straw":
+        from slime.data.checkpoint_boundary import resolve_checkpoint_boundary
+
+        resolve_checkpoint_boundary(args)
         return args, RestorePlan()
     if any(getattr(args, key, False) for key in ("debug_train_only", "debug_rollout_only", "load_debug_rollout_data")):
         return args, RestorePlan()

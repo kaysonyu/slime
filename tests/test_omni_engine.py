@@ -760,3 +760,27 @@ def test_tensor_publication_failure_requires_full_retry(omni_args, admin_server)
     engine.update_weights_from_tensor(["full-retry"], weight_version="1")
     engine.continue_generation()
     assert engine.get_weight_version() == "1"
+
+
+def test_partial_memory_failure_keeps_per_stage_state_explicit(omni_args, admin_server):
+    engine = _engine(omni_args, admin_server)
+    admin_server.responses["/release_memory_occupation"] = {
+        "success": False,
+        "results": [
+            {"stage": stage, "success": stage != "vocoder", "data": {"offload_tags": ["weights"]}}
+            for stage in engine.memory_stages
+        ],
+    }
+    with pytest.raises(RuntimeError):
+        engine.release_memory_occupation()
+    state = engine.get_memory_state()
+    assert state["paused"]
+    assert state["unknown_stages"] == ["vocoder"]
+    assert state["stages"]["tts_engine"] == ["weights"]
+    admin_server.responses["/resume_memory_occupation"] = {
+        "success": True,
+        "results": [{"stage": stage, "success": True, "data": {"offload_tags": []}} for stage in engine.memory_stages],
+    }
+    engine.resume_memory_occupation()
+    assert engine.get_memory_state()["unknown_stages"] == []
+    assert all(tags == [] for tags in engine.get_memory_state()["stages"].values())

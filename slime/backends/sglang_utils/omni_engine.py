@@ -127,6 +127,7 @@ class OmniEngine(RayActor):
         self.weight_update_groups: set[str] = set()
         self.offload_tags: set[str] = set()
         self.memory_stages = ("preprocessing", OMNI_AR_STAGE, "vocoder")
+        self.memory_stage_tags: dict[str, set[str] | None] = {}
         self.session = requests.Session()
         self.session.trust_env = False
         if args.omni_admin_key:
@@ -270,13 +271,35 @@ class OmniEngine(RayActor):
             if action in {"release_memory_occupation", "resume_memory_occupation"}
             else (OMNI_AR_STAGE,)
         )
+        memory_action = action in {"release_memory_occupation", "resume_memory_occupation"}
+        if memory_action:
+            self.memory_stage_tags.update({stage: None for stage in stages})
         response = self.session.post(
             f"{self.get_url()}/{action}",
             json={**(payload or {}), "stages": list(stages), "timeout_s": timeout},
             timeout=timeout,
         )
         response.raise_for_status()
-        return validate_admin_result(response.json(), action, expected_stages=stages)
+        result = response.json()
+        if memory_action and isinstance(result, dict):
+            for stage in result.get("results", []):
+                if not isinstance(stage, dict) or stage.get("stage") not in stages:
+                    continue
+                data = stage.get("data")
+                if stage.get("success") is True and isinstance(data, dict) and data.get("success") is not False:
+                    tags = data.get("offload_tags")
+                    if isinstance(tags, list) and all(isinstance(tag, str) for tag in tags):
+                        self.memory_stage_tags[stage["stage"]] = set(tags)
+        return validate_admin_result(result, action, expected_stages=stages)
+
+    def get_memory_state(self) -> dict:
+        return {
+            "paused": self.paused,
+            "stages": {
+                stage: sorted(tags) if tags is not None else None for stage, tags in self.memory_stage_tags.items()
+            },
+            "unknown_stages": [stage for stage in self.memory_stages if self.memory_stage_tags.get(stage) is None],
+        }
 
     def attach_router(self, router_ip: str, router_port: int, *, register: bool = False) -> None:
         self.router_ip, self.router_port = router_ip, router_port
@@ -453,6 +476,7 @@ class OmniEngine(RayActor):
         load_format: str | None = None,
         flush_cache: bool = False,
         weight_version: str | None = None,
+        publication: dict | None = None,
     ) -> dict:
         if not self.paused or weight_version is None or not serialized_named_tensors:
             raise RuntimeError("Omni tensor updates require a paused replica and an explicit version")
@@ -471,9 +495,24 @@ class OmniEngine(RayActor):
                 "weight_version": version,
                 "flush_cache": True,
                 "keep_pause": True,
+                "publication": publication,
             },
         )
         validate_admin_result(result, "update_weights_from_tensor", require_flush=True)
+        if publication is not None:
+            for stage in result["results"]:
+                observed = stage["data"].get("publication")
+                if not isinstance(observed, dict) or any(
+                    observed.get(key) != expected
+                    for key, expected in {
+                        "version": version,
+                        "manifest_sha256": publication["manifest_sha256"],
+                        "bucket_count": publication["bucket_count"],
+                        "received": publication["bucket_index"] + 1,
+                        "failed": False,
+                    }.items()
+                ):
+                    raise RuntimeError("Omni did not acknowledge the expected publication bucket")
         self.pending_version = version
         self.publication_failed = False
         return result

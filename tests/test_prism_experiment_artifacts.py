@@ -20,10 +20,9 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from examples.prism import artifacts, experiment
-
 from slime.rollout.sample_hooks import apply_rollout_sample_hooks, rollout_context
 from slime.utils.types import Sample
+from slime_plugins.prism import artifacts, experiment
 
 NUM_GPUS = 0
 
@@ -56,7 +55,7 @@ def args(tmp_path):
         prism_artifact_dir=str(tmp_path / "running_round_0"),
         omni_audio_dir=str(tmp_path / "audio"),
         prism_reward_function_path=f"{__name__}.score",
-        rollout_sample_hook_path=["examples.prism.artifacts.prepare_sample"],
+        rollout_sample_hook_path=["slime_plugins.prism.artifacts.prepare_sample"],
         prompt_data="training.jsonl",
         n_samples_per_prompt=2,
         prism_rollout_log_function_path=None,
@@ -171,7 +170,7 @@ def test_generated_waveform_is_written_directly_to_its_archive(args, monkeypatch
         item.metadata.update(
             eval_dataset_name="quality", eval_prompt_index=4, eval_sample_index=0, eval_run_id="eval-1"
         )
-    args.omni_audio_path_function_path = "examples.prism.artifacts.audio_path"
+    args.omni_audio_path_function_path = "slime_plugins.prism.artifacts.audio_path"
     content = io.BytesIO()
     with wave.open(content, "wb") as output:
         output.setnchannels(1)
@@ -538,7 +537,9 @@ def test_mopd_template_routes_teachers_and_archives_without_waveform(args, monke
         requests.append(url)
         return {"version": 1, "results": [teacher_output(payload["samples"][0], binding)]}
 
-    monkeypatch.setattr(omni_rollout, "_request", score_teacher)
+    from slime_plugins.prism import teacher
+
+    monkeypatch.setattr(teacher, "_request", score_teacher)
     for item in candidates:
         omni_rollout.build_generate_payload(args, item, {"max_new_tokens": 12})
         omni_rollout.parse_rollout(output(), item, geometry())
@@ -661,7 +662,9 @@ def test_attempt_preparation_snapshots_and_refuses_to_overwrite(tmp_path):
     assert resolved[-2:] == ["--custom-config-path", str(root / "config/experiment.yaml")]
     runtime = yaml.safe_load((root / "config/experiment.yaml").read_text())
     assert runtime["prism_reward_function_path"] == "user.config.reward"
-    assert runtime["rollout_sample_hook_path"] == ["examples.prism.artifacts.prepare_sample", "user.teacher.hook"]
+    assert runtime["rollout_sample_hook_path"] == ["user.teacher.hook"]
+    assert runtime["rollout_sample_observer_path"] == ["slime_plugins.prism.artifacts.observe"]
+    assert runtime["custom_rm_path"] == "user.config.reward"
     assert runtime["omni_return_audio"] is True
     assert (root / "config/experiment.yaml").stat().st_mode & 0o777 == 0o600
     manifest = json.loads((root / "config/launch.json").read_text())
@@ -867,7 +870,7 @@ def test_actual_launcher_isolates_attempt_and_preserves_checkpoint_override(tmp_
     runtime = yaml.safe_load(Path(options["custom_config_path"][-1]).read_text())
     assert runtime["prism_artifact_dir"] == str(root)
     assert runtime["prism_reward_function_path"] == (
-        "slime_plugins.tts_reward.reward" if mode == "grpo" else "examples.prism.hooks.zero_reward"
+        "slime_plugins.tts_reward.reward" if mode == "grpo" else "slime_plugins.prism.hooks.zero_reward"
     )
     assert runtime["omni_return_audio"] == (mode == "grpo")
     if mode == "mopd":
@@ -877,3 +880,29 @@ def test_actual_launcher_isolates_attempt_and_preserves_checkpoint_override(tmp_
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
+
+
+def test_resolved_config_records_real_types_and_redacts_nested_credentials(tmp_path):
+    from dataclasses import dataclass
+
+    from slime.observability.config_snapshot import write_resolved_configuration
+
+    @dataclass
+    class Binding:
+        auth_token: str
+        auth_token_env: str
+
+    destination = tmp_path / "resolved.json"
+    args = SimpleNamespace(
+        resolved_config_path=str(destination),
+        global_batch_size=2048,
+        omni_admin_key="private-admin",
+        binding=Binding("private-token", "INF_API_KEY"),
+        train_env_vars=json.dumps({"INF_API_KEY": "private-api", "OMP_NUM_THREADS": "4"}),
+    )
+    write_resolved_configuration(args)
+    text = destination.read_text()
+    assert all(secret not in text for secret in ("private-admin", "private-token", "private-api"))
+    value = json.loads(text)["options"]
+    assert value["global_batch_size"] == 2048
+    assert value["binding"]["auth_token_env"] == "INF_API_KEY"
