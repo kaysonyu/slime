@@ -2,6 +2,12 @@
 
 适用范围：账号 `kayson`，用户指定的 `CQ-科研驾驶舱` 工作空间，项目 `多模态自进化科学模型`。调度配额、可用 GPU 和平台状态每次从 Inspire Live 查询；本文件只记录共享资产及环境合同。
 
+运行时重构的固定验收产物位于
+`/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/runtime-refactor-20261013-182303`。
+入口为 `analysis/report.html`；每项配置、源码 SHA、checkpoint、归档及修正后的
+只读复核记录保留在该目录。具体性能数据和验收边界见
+`examples/prism/VALIDATION.md`；实际运行版本以每个 case 的 source pin 为准。
+
 | 资产 | 固定位置 / 身份 |
 | --- | --- |
 | Native Prism 预训练 RUN | `/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/yangxiaogui/mossLite/RUNs/delivery/pretrain/prism_pretrain_1.7B_v0.4.0` |

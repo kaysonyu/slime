@@ -1,5 +1,94 @@
 # Prism 训练验收与性能记录
 
+## 运行时重构与 32 卡回归（2026-10-13 UTC）
+
+本轮把 Prism 运行时从 examples 移入安装包，拆分模型辅助逻辑，并验证教师请求、
+样本观察器、紧凑 replay、权重发布边界、联合 checkpoint 和原生阶段计时。
+对照基线为 Slime `fb4a0f6b` / Omni `9e9e67f8`。最终训练代码为 Slime
+`b239a1ac` / Omni `50b8b1d8`；MoPD 64 步速度测试使用 `a86079a4`，其后
+`b239a1ac` 只补充旧 checkpoint 升级路径的保护和文档，没有修改训练/生成热路径。
+每个 case 的完整 SHA、参数、日志和采样均单独保存，运行中的源码保持固定。
+
+所有速度测试使用同一组 32 张 H200，DP32、TP=PP=CP=1、B2048、每卡 20480
+时间位置预算、每 rank 一条 packed microbatch；训练与学生推理均常驻。
+MoPD 每次抽取 2048 个 prompt、每个生成一次，使用两个独立部署的同权重 v0.4.0
+冻结教师副本；GRPO 为 256×8，只使用四副本 ASR 奖励。每条已生成轨迹只训练一次。
+实际平均样本长度约 277–278 个时间位置，每卡约 17700–17800；更长数据应重新
+核对 packing。64 步 MoPD 会跨过 80000 条 prompt 的 epoch，并重新生成后续轨迹。
+
+下表使用相同的 rollout 3–22，共 20 个稳态窗口。基线各有两轮独立重复，
+取两轮均值；窗口从本轮 generate 起点到下一轮起点，包含评分、归档、训练、
+清理和发布。初始化、前三步、checkpoint 步骤及末步单列，不删除较慢的稳态步骤。
+
+| 模式与配置 | 基线秒/步 | 重构秒/步 | 步耗时变化 | 重构 samples/s |
+| --- | ---: | ---: | ---: | ---: |
+| MoPD，教师并发 16，每步清理 | 14.289 | 14.135 | -1.1% | 144.89 |
+| MoPD，教师并发 16，每 16 步清理 | 14.289 | 13.665 | -4.4% | 149.87 |
+| GRPO，每步清理，两轮均值 | 17.068 | 16.987 | -0.5% | 120.56 |
+| GRPO，每 16 步清理 | 17.068 | 16.306 | -4.5% | 125.60 |
+
+GRPO 每步清理时的差异很小，结论为基本持平、未观察到回退。完整 64 步 MoPD
+的 59 个稳态窗口为 13.640 秒/步、150.15 samples/s；计入中途 checkpoint 的
+60 个窗口为 13.721 秒/步。完整 32 步 GRPO cleanup16 的 28 个稳态窗口为
+16.421 秒/步、124.72 samples/s；后面的数据窗口也保留在该均值中。
+配对音频帧吞吐分别从 13069 提高到 13666 frames/s（MoPD），以及从 11043
+提高到 11547 frames/s（GRPO）。这些短期重复实验不构成任意工作负载下的速度保证。
+
+首次重构候选将每个 rollout worker 的教师 HTTP 并发限制为 4，导致 MoPD 两轮
+均值变为 15.061 / 15.177 秒，回退集中在 generate 阶段。保持其余配置不变，
+将并发提高到 16 后，32 步消融为 14.139 秒/步。最终默认并发为 16；批量上限
+仍为 8，实际平均聚合约 1.3 条，因此不能将其解释为每个请求都攒满 8 条。
+MoPD worker 的合计 CPU 时间从每步约 43.5 秒降到 35.2 秒，减少约 19%。
+
+通用 `--resident-cleanup-interval` 默认仍为 1。本轮常驻配置可显式使用
+`--resident-cleanup-interval 16`，或设置 `RESIDENT_CLEANUP_INTERVAL=16`。
+MoPD 全运行采样显存峰值约 50.2 GiB，GRPO 约 51.0 GiB，未出现持续增长。
+32 卡稳态 GPU busy 约为 39.7% / 53.2%；NVML 的一秒采样不是 MFU，且按采样
+时刻归属的短阶段可能混入前一阶段。精确阶段耗时使用 driver 的独立计时。
+MoPD 每步仍约 11.7 秒用于生成和教师评分，训练约 1.3 秒；重构没有消除这部分
+主要耗时，也没有证明可以达到 90% GPU busy。
+
+功能验收包括 4 步新建联合 checkpoint、2 步完整恢复、3 步全卸载/恢复、
+两种算法的重复对照、MoPD 64 步和 GRPO 32 步连续运行。随后从用户旧长跑的
+checkpoint 999 实际恢复 4 步：optimizer 两组计数 `[1000,1000]` →
+`[1004,1004]`，scheduler 2048000 → 2056192，数据游标保持 epoch 25、
+offset 48000 → 56192，最终保存 iteration 1003。续训没有启用 finetune、
+跳过 optimizer/RNG 加载或重置 optimizer。旧目录保持不变，新目录启用联合提交。
+14 个本轮 case 的 checkpoint 均核验了 302 个模型 tensor、三类 optimizer
+状态的元素数、实际 optimizer/scheduler 计数和保存策略。累计完成 333 次更新，
+包含前一作业成功的 4 步 smoke；各独立实验不代表一条连续 333 步的训练轨迹。
+
+最终 64 条独立 ASR 评估跳过教师评分，全部 WAV 有效；固定 ASR 指纹，
+按项目现有归一化口径计算 corpus WER 为 3.19%，平均 reward 为 0.9704，
+评估耗时 3.82 秒。它验证评估链路，不代表长期语音质量收益。TensorBoard
+实际保留 RVQ/stop、概率差异、domain/teacher 和评分覆盖率；GRPO 的 WER
+评分覆盖率为 100%，另抽查各候选首末轮记录、波形和策略版本。
+
+Slime 广泛 CPU 回归为 372 passed / 2 skipped，后续教师和 checkpoint 回归为
+126 passed / 1 skipped，旧 checkpoint 升级保护另通过 19 项相关测试。
+Omni 的控制、显存和评分测试为 86 passed / 1 skipped；完整 pre-commit 通过。
+这些测试集合有重叠，不相加作为独立用例总数。
+
+主作业 `slime-prism-32-refactor-1013-a4` 完成全部训练和评估后，新增检查器误将
+首次初始化的 finetune/no_load 标志用于判定续训，导致尾部审计返回失败。
+修正规则后，`slime-prism-refactor-audit-1013-a5` 在同一镜像上进行单卡只读复核，
+通过全部检查，没有重跑训练。原失败日志和 campaign 返回码没有覆盖。
+所有 Job、Serving 条目、前三次启动/配置失败尝试及完整产物均保留。
+
+本轮固定产物根目录为：
+
+```text
+/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/runtime-refactor-20261013-182303
+```
+
+入口为 `analysis/report.html`；`analysis/comparison.json` 给出相同步号对照，
+`run-summary.json` / `run-summary.csv` 保留全部统计与逐步窗口，
+`feature-validation.json`、`checkpoint-verification.json` 和 `final-audit.json`
+分别记录指标/归档、真实 checkpoint 状态和修正后的只读复核。
+新恢复点位于 `runs/mopd-eval-final-r1-a4/checkpoint/`，对应联合提交
+`rollout/training_commit_1003.json`。增加训练轮数时明确使用 checkpoint
+optimizer scheduler 策略，见 README 的恢复说明。
+
 ## 指标、归档与日志策略合入验收（2026-10-13）
 
 合入 `feat/prism-training-metrics` 与 Omni `fix/prism-log-noise`，保留之前已验证的
