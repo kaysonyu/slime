@@ -1,5 +1,78 @@
 # Prism 训练验收与性能记录
 
+## 32 H200 全流程时间线与数据交接优化（2026-10-13）
+
+本轮继续使用 Prism v0.4.0 iteration 100000、DP32/TP1、B2048、每卡20480 token预算、
+一次 packed microbatch，以及两个独立部署的同权重冻结教师。训练和学生常驻，
+16个完整 rollout workers；每条 MoPD prompt 在一次运行内只消费一次。
+未提交新的64卡作业。本轮完整 CUDA 采集与新增端到端对照针对 MoPD，未外推 GRPO/ASR 收益。
+
+同一组32卡按下表顺序运行。稳态窗口包含生成、评分、数据交接、训练、内存清理和
+tensor 权重发布，剔除前两轮、重型 profiler/关闭轮次和最终 checkpoint。
+全部慢轮次保留；首尾两组原配置用于观察负载漂移。GPU busy 为全部32卡的一秒NVML
+采样均值，不是MFU。每次实验都验证单microbatch，实际平均pack约17800 tokens。
+
+| 配置 | 更新数 / 稳态窗口 | 秒/步 | samples/s | GPU busy |
+| --- | ---: | ---: | ---: | ---: |
+| 原配置 A | 8 / 3 | 16.441 | 124.56 | 35.31% |
+| GC threshold 70000 | 16 / 11 | 16.176 | 126.61 | 37.79% |
+| GC + 教师 score_chunk_size 1024 | 16 / 13 | 15.391 | 133.07 | 37.42% |
+| GC + 教师分块 + 训练 tensor buffer | 16 / 13 | 14.058 | 145.68 | 41.22% |
+| 原配置 B 复测 | 6 / 3 | 16.833 | 121.66 | 34.64% |
+
+首尾基线均值16.637秒，相对组合14.058秒，步耗时降低15.5%、吞吐提高18.3%。
+基线窗口较短，报告保留每轮数据和前后复测，不把单项收益相乘。组合的训练数据发布
+平均0.785秒，对应上一组的1.803秒；learner调用1.216秒、内存清理0.559秒、权重发布
+0.530秒。32卡观测峰值显存50.25GiB，manager稳态RSS峰值4.38GiB；此短跑不是长期内存
+稳定性或语音质量收益的证明。
+
+全流程追踪关联每轮2048条生成及2048条教师评分，覆盖所有32个学生的请求事件、
+4个代表性学生GPU、两个教师GPU及learner rank0 CUDA活动。时间线串联worker、router、
+frontend、AR、教师排队/前向、DP分片、训练和权重发布；提供可导入Perfetto的合并trace。
+跨主机时间以最小RTT校准，首次完整采集最大不确定性约±54.8ms。嵌套请求跨度不能相加，
+同卡learner与student进程也不能计作独立GPU。
+
+定位与处理：
+
+1. 主进程真实GC暂停约3.24秒/步。提高自动GC阈值后降至约1.29秒，完整回收仍会发生；
+   16个worker的GC开销也降低。实际整步只改善约1.6%，说明不少暂停与教师工作重叠。
+   `gc.freeze()`在真实CPU复现中没有改善总时间，未采用。
+2. 训练分片原先仍逐tensor执行Torch storage序列化。新增`--rollout-tensor-buffer`
+   对object-store分片复用buffer reducer，不注册全局tensor serializer。保持dtype、
+   shape、值、接收者写入隔离及嵌套ObjectRef所有权；特殊tensor回退原reducer，空tensor
+   显式恢复到CPU。旧worker buffer引用的reducer模块路径保留兼容别名。
+3. 教师评分head以128个预测位置分块，引入大量小kernel。单GPU固定真实输入实验中，
+   chunk1024吞吐100.90→111.77条/秒。128请求输入hash、冻结权重和code logprobs一致，
+   stop probability最大绝对差4.47e-7。增加构建线程至4反而降至89.47条/秒；扩大批次至64
+   未优于单纯增大分块，均未采用。
+4. 训练后clear_memory的约0.55秒主要由每个rank约0.5秒的完整GC组成。本轮保留该清理
+   语义；调整其频率仍需独立显存/同步边界验证。教师存在请求时仍有数秒细碎CUDA空隙，
+   后续可继续研究减少host launch或图捕获，不能把GPU busy低直接当成算力饱和。
+
+短测试的初始化也显著降低平台观测值：原配置A从首个NVML观测到首次生成约528秒，
+包含节点启动差异、Ray、32个Omni实例、模型与graph初始化；整段观测GPU busy约9.97%，
+稳态35.31%。生产长跑应单独记录并摊薄冷启动，不能混用两种统计口径。
+
+本轮七组成功case共80次优化器更新、163840条样本，全部32rank单microbatch、有限
+非零梯度、MoPD prompt唯一性、当前样本版本和每个学生的全部发布版本通过。
+七份checkpoint在GPU环境核验模型/optimizer元数据和计数，均含302个模型tensor，
+两组optimizer step与对应8/10/16/6次更新一致，scheduler按B2048推进。
+初次诊断的失败case与Job保留：脚本误用trace文件名`{pid}`占位符导致教师stage退出；
+修复脚本、前端模板校验和profiler重复start后，实际GPU start/score/stop预检与完整采集通过。
+
+Omni诊断相关285 passed、1 skipped，pre-commit全仓通过；Slime GC/协议/恢复相关191
+passed、1 skipped，训练buffer相关38 passed，另覆盖空tensor默认设备、旧reducer引用和
+删除原始引用后的真实Ray所有权。CPU恢复测试最初8项因子进程缺少straw失败，隔离环境
+补齐后原8项全部通过；保存的日志区分环境失败与补验。
+
+全部产物位于
+`/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/timeline-profile-20261013-070650`，
+入口`timeline-report.html`。原始请求/CUDA、CPU/GPU采样、逐轮表、配置与校验文件均保留。
+配对Job `slime-prism-32-gc-ab-1013` 为SUCCEEDED，共62次更新；其余18次来自采集前的两组。
+Job与Serving记录全部保留，运行资源已停止。GPU实验Slime使用e923be47及8e60fed2，
+Omni使用23a0f19e；最终发布另外包含reducer兼容别名、测试和文档，源码交付SHA见该目录
+`analysis/source-delivery.json`。
+
 ## 32 H200 rollout 与评分优化（2026-10-13）
 
 本轮按用户要求集中优化 32 卡，未提交新的 64 卡作业。使用同一 v0.4.0 iteration

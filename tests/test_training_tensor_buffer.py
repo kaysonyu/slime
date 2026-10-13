@@ -1,7 +1,9 @@
+import gc
 import os
 
 import pytest
 import ray
+import ray.cloudpickle as pickle
 import torch
 from test_dp_schedule import make_args, make_tp
 
@@ -10,6 +12,13 @@ from slime.utils.data import process_rollout_data
 from slime.utils.tensor_serialization import deserialize_tensor_payload, serialize_tensor_payload
 
 NUM_GPUS = 0
+
+
+def test_existing_worker_payloads_can_resolve_the_original_tensor_reducer():
+    restore = pickle.loads(b"cslime.rollout.group_serialization\n_restore_tensor\n.")
+    tensor = torch.arange(6, dtype=torch.bfloat16).reshape(2, 3)
+    result = restore(tensor.reshape(-1).view(torch.uint8).numpy(), tensor.dtype, tensor.shape)
+    assert torch.equal(result, tensor)
 
 
 def test_empty_cpu_tensor_ignores_receiver_default_device():
@@ -72,6 +81,10 @@ def test_real_ray_training_partitions_preserve_schedule_values_and_nested_refs(b
             ],
         }
         boxes = builder.split_by_dp(data)
+        del reference
+        for inputs in data["multimodal_train_inputs"]:
+            del inputs["reference"]
+        gc.collect()
         results = ray.get([consume_partition.remote(boxes, rank, buffered) for rank in range(2)])
         assert all(pid != os.getpid() for pid, _ in results)
         assert sorted(index for _, partition in results for index in partition) == list(range(8))

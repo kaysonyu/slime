@@ -62,9 +62,11 @@ QB 根目录中的 `colocate-005/fresh/checkpoint/` 与 `colocate-006/resume/che
 `progress.json` 与 `platform/` 记录状态，原始 trace 和失败采集记录均保留。
 
 GC 阈值与训练 tensor buffer 候选在远端 `perf/prism-training-buffer-20261013`，
-Omni 诊断增强在远端 `perf/prism-timeline-20261013`。CPU/真实 Ray 与独立 GPU 教师
-微测已完成；新 32 卡配对 Job 为 `slime-prism-32-gc-ab-1013`，计划 62 次更新，
-提交时等待四个完整节点，不能把微测收益当成端到端加速。等待期间评分资源已停止，
-`scripts/watch-campaign-services.py` 在分配启动后恢复并核验冻结服务，结束后停止服务
-并生成检查报告；Job/Serving 条目保留。当前正式代码与 editable 版本继续沿用上述
-已验收版本，候选按每个 case 的 worktree/SHA 运行。
+Omni 诊断增强在远端 `perf/prism-timeline-20261013`。32 卡配对 Job
+`slime-prism-32-gc-ab-1013` 已 SUCCEEDED，完成62次更新；本轮七组成功case累计80次更新。
+前后原配置均值16.637秒/步，组合14.058秒/步，吞吐提高18.3%；32卡GPU busy约35%→41.2%。
+所有rank单microbatch、样本/发布版本、梯度及checkpoint检查通过。
+`scripts/watch-campaign-services.py` 在节点分配后恢复并核验冻结服务，结束后停止服务
+并生成检查报告。运行资源已停止，Job/Serving条目、失败证据和所有逐次配置均保留。
+改动合入 `feat/prism-omni-colocate-rl` 与 `rl/moss-tts-prism`；最终源码与 editable
+同步收据见 `analysis/source-delivery.json`，实际GPU实验仍按各case原worktree/SHA复现。

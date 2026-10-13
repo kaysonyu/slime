@@ -1,6 +1,10 @@
 """Serialize worker groups with isolated, writable CPU tensor buffers."""
 
+from slime.utils import tensor_serialization
 from slime.utils.tensor_serialization import deserialize_tensor_payload, serialize_tensor_payload
+
+# Existing in-flight worker buffers refer to this reducer's original module.
+_restore_tensor = tensor_serialization._restore_tensor
 
 
 class SerializedGroup:

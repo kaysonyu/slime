@@ -140,6 +140,21 @@ bash examples/prism/run-grpo.sh \
 worker 独立的限额。例如 16 workers、ASR `max_inflight: 16` 对应最多 256 个在途评分。
 根据实际评分服务能力设置副本和并发；不要只增加训练卡而保持评分能力固定。
 
+32 H200 的 MoPD 全流程对照进一步验证了以下两个可选参数：
+
+```bash
+--rollout-gc-threshold 70000 --rollout-tensor-buffer
+```
+
+前者调整 rollout manager 和 group workers 的自动 GC 分配阈值，减少大批量结果解码
+期间的完整堆扫描；其他代际阈值保持原值，默认不调整。后者让 `object-store` 的
+训练分片复用 CPU tensor buffer 序列化，接收端仍得到普通字典和独立可写 tensor，
+并保留嵌套 ObjectRef 的 Ray 所有权；该参数不适用于 `straw` 或 `nixl`。
+两个参数均为 opt-in。教师示例 [teacher-score.yaml](teacher-score.yaml) 将评分 head
+分块设为 1024；128 个真实请求的 code logprobs 完全一致，stop probability 最大
+绝对差为 4.47e-7。完整配对 MoPD 平均步耗时 16.64→14.06 秒，GPU busy 约35%→41.2%；
+GC 单项的端到端收益较小。GRPO 的新增性能收益需要单独实测，详见 [VALIDATION.md](VALIDATION.md)。
+
 worker 结果中的普通 CPU tensor 使用批量 buffer 传输，接收端恢复独立可写内存，
 保留完整样本、元数据和 dtype。协调进程继续负责数据选择、过滤与排序，旧轮任务
 排空后才进入下一权重版本。评分错误会终止本轮；新池不把失败评分替换为零奖励。
