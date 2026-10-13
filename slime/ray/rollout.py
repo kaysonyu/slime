@@ -18,6 +18,7 @@ from slime.observability.rollout_data_utils import (
 )
 from slime.observability.rollout_metrics import log_eval_rollout_data, log_rollout_data
 from slime.rollout.base_types import RolloutFnTrainOutput, call_rollout_fn
+from slime.rollout.gc_utils import configure_rollout_gc
 from slime.rollout.sample_hooks import set_current_rollout_id
 from slime.utils.cleanup import Cleanup
 from slime.utils.http_utils import init_http_client
@@ -43,6 +44,7 @@ class RolloutManager:
 
     def __init__(self, args, pg, *, restore_plan=None, serving=None, deployment=None):
         configure_logger()
+        configure_rollout_gc(getattr(args, "rollout_gc_threshold", None))
 
         from slime.ray.training_recovery import TrainingRecovery, TrainingResume, training_recovery_enabled
 

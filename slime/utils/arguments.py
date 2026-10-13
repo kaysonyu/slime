@@ -1473,6 +1473,17 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument("--http-proxy", type=str, default=None)
             parser.add_argument("--use-distributed-post", action="store_true", default=False)
             parser.add_argument(
+                "--rollout-gc-threshold",
+                type=int,
+                default=None,
+                help=(
+                    "Generation-zero cyclic GC allocation threshold in the rollout manager and execution workers. "
+                    "A larger positive value reduces collection pauses for large batches at the cost of retaining "
+                    "temporary cycles longer. Other generations and automatic collection remain enabled; "
+                    "the default preserves Python's thresholds."
+                ),
+            )
+            parser.add_argument(
                 "--rollout-execution-workers",
                 type=int,
                 default=0,
@@ -2112,6 +2123,8 @@ def slime_validate_args(args):
 
     if getattr(args, "rollout_execution_workers", 0) < 0:
         raise ValueError("--rollout-execution-workers must be nonnegative")
+    if getattr(args, "rollout_gc_threshold", None) is not None and args.rollout_gc_threshold <= 0:
+        raise ValueError("--rollout-gc-threshold must be positive")
 
     if args.rollout_data_transport == "straw":
         from slime.data.transport import resolve_rollout_data_dir
