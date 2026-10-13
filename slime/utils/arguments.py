@@ -646,6 +646,16 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "Files are retained for pending samples, checkpoints and debug archives."
                 ),
             )
+            parser.add_argument(
+                "--rollout-tensor-buffer",
+                action="store_true",
+                default=False,
+                help=(
+                    "Pack CPU tensors in object-store training partitions as buffers to avoid per-storage "
+                    "torch serialization. Receivers get ordinary dictionaries with independent writable tensors. "
+                    "Requires --rollout-data-transport object-store."
+                ),
+            )
             parser.add_argument("--rollout-storage-profile", choices=["local", "juicefs"], default="local")
             parser.add_argument(
                 "--rollout-storage-declaration",
@@ -2123,6 +2133,8 @@ def slime_validate_args(args):
 
     if getattr(args, "rollout_execution_workers", 0) < 0:
         raise ValueError("--rollout-execution-workers must be nonnegative")
+    if getattr(args, "rollout_tensor_buffer", False) and args.rollout_data_transport != "object-store":
+        raise ValueError("--rollout-tensor-buffer requires --rollout-data-transport object-store")
     if getattr(args, "rollout_gc_threshold", None) is not None and args.rollout_gc_threshold <= 0:
         raise ValueError("--rollout-gc-threshold must be positive")
 
