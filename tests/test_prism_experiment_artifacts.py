@@ -149,6 +149,14 @@ def test_scoring_failure_preserves_waveform_and_partial_result_and_raises(args):
     assert Path(record["audio_path"]).exists()
 
 
+def test_archive_retains_source_prompt_id(args):
+    item = sample(args, prompt_id="frozen-dataset-row-17")
+    item.metadata.pop("id")
+    asyncio.run(archive_and_score(args, item))
+    record = json.loads(Path(item.metadata["prism_artifact"]["record_path"]).read_text())
+    assert record["data_id"] == "frozen-dataset-row-17"
+
+
 def test_per_dataset_reward_selection_and_kwargs_survive_archival(args):
     item = sample(args)
     item.custom_rm_path = f"{__name__}.alternate_score"

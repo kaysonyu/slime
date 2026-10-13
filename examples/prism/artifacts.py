@@ -94,7 +94,11 @@ def _prepare_sample(args, sample, rollout_id, evaluation):
         json.dumps(prompt or sample.prompt, sort_keys=True, ensure_ascii=False).encode()
     ).hexdigest()[:16]
     data_id = next(
-        (metadata[key] for key in ("id", "sample_id", "rollout_audio_id") if metadata.get(key) is not None),
+        (
+            metadata[key]
+            for key in ("id", "sample_id", "prompt_id", "rollout_audio_id")
+            if metadata.get(key) is not None
+        ),
         fingerprint,
     )
     split = "eval" if evaluation else "train"
