@@ -1330,6 +1330,16 @@ def policy_loss_function(
     else:
         pg_loss_reducer = sum_of_sample_mean
 
+    action_metrics = {}
+    if uses_custom_policy_scores(args):
+        action_metrics = action_view.split_metrics(pg_loss, "pg_loss")
+        action_metrics.update(action_view.split_metrics(pg_clipfrac, "clipfrac"))
+        action_metrics.update(action_view.split_metrics(ppo_kl, "ppo_kl_estimate"))
+        action_metrics["rvq/active_ratio"] = sum(
+            enabled * bool(count)
+            for enabled, count in zip(action_view.sample_masks, action_view.code_counts, strict=True)
+        )
+        action_metrics["stop/active_ratio"] = torch.stack(action_view.sample_masks).sum()
     pg_loss = pg_loss_reducer(pg_loss)
     # The text path may replace its reducer after rejection sampling. Keep
     # that existing behavior; action diagnostics use their independent mean.
@@ -1340,7 +1350,10 @@ def policy_loss_function(
     # entropy loss
     entropy_loss = None
     if "entropy" in log_probs_and_entropy:
-        entropy_loss = sum_of_sample_mean(torch.cat(log_probs_and_entropy["entropy"], dim=0))
+        entropies = torch.cat(log_probs_and_entropy["entropy"], dim=0)
+        entropy_loss = sum_of_sample_mean(entropies)
+        if uses_custom_policy_scores(args):
+            action_metrics.update(action_view.split_metrics(entropies, "entropy_mean"))
     loss = pg_loss if entropy_loss is None else pg_loss - args.entropy_coef * entropy_loss
 
     if args.use_kl_loss:
@@ -1370,6 +1383,11 @@ def policy_loss_function(
         log_probs_to_compare = log_probs if args.use_rollout_logprobs or use_score_centering else old_log_probs
         train_rollout_logprob_abs_diff = metric_reducer((log_probs_to_compare - rollout_log_probs).abs())
         if uses_custom_policy_scores(args):
+            action_metrics.update(
+                action_view.split_metrics(
+                    (log_probs_to_compare - rollout_log_probs).abs(), "train_rollout_logprob_abs_diff"
+                )
+            )
             mean_sample_train_rollout_logprob_max_abs_diff = action_view.reduce_sample_max(
                 (log_probs_to_compare - rollout_log_probs).abs()
             )
@@ -1379,6 +1397,7 @@ def policy_loss_function(
         "pg_loss": pg_loss.clone().detach(),
         "pg_clipfrac": pg_clipfrac.clone().detach(),
         "ppo_kl": ppo_kl.clone().detach(),
+        **action_metrics,
     }
 
     if entropy_loss is not None:
@@ -1413,6 +1432,8 @@ def policy_loss_function(
     if batch.get("opd_reverse_kl"):
         opd_reverse_kl = torch.cat(batch["opd_reverse_kl"], dim=0)
         reported_loss["opd_reverse_kl"] = metric_reducer(opd_reverse_kl).clone().detach()
+        if uses_custom_policy_scores(args):
+            reported_loss.update(action_view.split_metrics(opd_reverse_kl, "opd_logratio_mean"))
 
     return loss, reported_loss
 

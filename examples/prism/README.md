@@ -167,6 +167,42 @@ Omni 解释器需要包含配套的 `--log-level-http` 和状态码过滤支持�
 group；未启用的奖励分项不当作零分。纯 MOPD 保持原有不生成波形的配置，记录
 实际轨迹与教师信息。
 
+Prism 指标的单位与分母如下；旧的有效指标名保留为兼容项：
+
+| 指标 | 口径 |
+| --- | --- |
+| `rollout/audio_frames/*` | 实际生成的目标音频帧数；旧 `response_len/*` 保留按 loss mask 计算的有效长度口径 |
+| `perf/rollout_audio_frames_per_gpu_sec` | 本次 rollout 收集到的目标帧数 / 耗时 / 学生 rollout GPU 数 |
+| `perf/rollout_samples_per_sec` | 本次 rollout 收集到的候选数 / 耗时 |
+| `perf/rollout_audio_seconds_per_sec` | 仅当全部候选有真实 WAV 时长（零帧为 0）时报告；不从未知 codec 帧率推算 |
+| `perf/train_sequence_rows_per_sec` | 整个训练批的序列行数 / actor 训练耗时，包含 prompt 和音频行，未除 GPU 数 |
+| `rollout/rvq_frame_logprob_mean` | 每帧 RVQ 通道 logprob 求和，再按样本平均；不含 stop |
+| `train/{rvq,stop}/pg_loss` | 未乘 stop 权重的损失分项，保留全训练 batch 分母；两者按 stop 权重组合后等于原策略损失 |
+| `train/{rvq,stop}/{clipfrac,ppo_kl_estimate,opd_logratio_mean,train_rollout_logprob_abs_diff}` | 先按样本内该类动作平均，再按有效样本平均；`active_samples`/`active_ratio` 给出分母和覆盖率 |
+| `rollout/prism/{domain,teacher}/<label>/{rvq,stop}/opd_logratio_mean` | 实际训练使用的冻结学生与教师分数差，按有效样本加权聚合；分组标签经过 URL 编码 |
+
+OPD log-ratio 是已采样动作上的统计，单批可以为负，不是完整词表的精确 KL。
+零帧样本仍参与 stop 训练；没有 RVQ 动作时不把 RVQ 诊断伪造为零。
+新增统计不改变 loss、梯度或采样。分组均值汇总分子与有效计数，不对各 GPU
+的均值再平均。熵分项只在原配置已要求计算熵时输出，不额外启动模型计算。
+
+`rollout/prism/` 与 `eval/<dataset>/prism/` 下的质量汇总还包括：
+
+- `frames/*`、`audio_seconds/*` 的均值、p50、p95，以及时长覆盖率；
+- `component/<name>/coverage_ratio`（有效评分数 / 当前样本范围）、`valid_ratio`
+  （有效评分数 / 该服务已有返回或已知失败数）、`error_ratio` 和无效音频比例；
+- `component/wer/language/<language>/corpus_error_rate`：总编辑错误数 / 总参考
+  字符或词数。保留原每条错误率均值，语言分母不混合，缺失评分不补零；
+- `component/judge_clap/attribute/<attribute>/mean` 与对应覆盖率；
+- reward category、语言、domain、teacher 分组。单候选的 MOPD/eval 不再报告
+  没有区分意义的组内 reward 零方差指标。
+
+异步预取时，上述 rollout 吞吐是收集窗口的交付速度，不是推理引擎的纯 decode
+吞吐；外部教师和评分服务的 GPU 不在学生 GPU 分母内。等待占比不是 GPU 空闲率。
+Prism 路径不再报告空文本重复率、未填充的缓存命中率、`reward==1` 的文本 pass@k
+和通用 LM 公式估算的 TFLOPS。没有新增 Prism TFLOPS 估算或声学复读检测。
+
+
 准备阶段合并用户实际选择的 `--custom-config-path`，保留原奖励、sample hook
 和日志 hook，生成当前轮次的配置后进入原 `train.py`。原奖励函数仍接收原来的
 单样本/批量输入及 kwargs。`config/launch.json` 记录启动选项、Git SHA/工作树状态、
