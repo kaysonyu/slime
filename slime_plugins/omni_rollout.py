@@ -177,13 +177,21 @@ def _prompt(sample):
     if instruction is not None and not isinstance(instruction, str):
         raise ValueError("global_instruction must be a JSON object or string")
     references = source.get("references", [])
+    if isinstance(references, dict):
+        if set(references) - {"audio1", "audio2"} or ("audio2" in references and "audio1" not in references):
+            raise ValueError("Prism references slots must start at audio1 and may include audio2")
+        if any(not isinstance(uri, str) or not uri.strip() for uri in references.values()):
+            raise ValueError("Prism references slot values must be nonempty URI strings")
+        # The revision 6 processor numbers references by list position. Keep
+        # Omni's wire format and the reward/archive inputs independent of JSON key order.
+        references = [{"id": slot, "uri": references[slot]} for slot in ("audio1", "audio2") if slot in references]
     if not isinstance(references, list) or any(
         not isinstance(reference, dict)
         or not reference.get("id")
         or not (reference.get("uri") or reference.get("codes_uri"))
         for reference in references
     ):
-        raise ValueError("references require explicit id and uri/codes_uri")
+        raise ValueError("references require audio1/audio2 URI slots or a list with explicit id and uri/codes_uri")
     control = source.get("tokens_control", False)
     if type(control) is not bool:
         raise ValueError("tokens_control must be Boolean")

@@ -27,7 +27,7 @@ GRPO 的候选组由数据源复制同一行产生，不需要在数据集里预
 | 文件 | 用途 | 每行额外字段 |
 | --- | --- | --- |
 | [grpo-base.example.jsonl](data/grpo-base.example.jsonl) | 固定 WER/CER 奖励 | `transcript_target`、`language` |
-| [grpo-voiceclone.example.jsonl](data/grpo-voiceclone.example.jsonl) | 固定 WER/CER + SIM | 参考音频与音色参考映射 |
+| [grpo-voiceclone.example.jsonl](data/grpo-voiceclone.example.jsonl) | 固定 WER/CER + SIM | `references.audio1`，音色参考由任务推导 |
 | [grpo-instruction.example.jsonl](data/grpo-instruction.example.jsonl) | 固定 WER/CER + JudgeCLAP | 支持的全局属性指令 |
 | [mixrl.example.jsonl](data/mixrl.example.jsonl) | 混合 base、voiceclone、instruction、voiceclone_gated | 每行显式 `reward_category` |
 | [mopd.example.jsonl](data/mopd.example.jsonl) | 按 chinese/english 路由到两个教师 | 每行显式 `domain` |
@@ -35,11 +35,28 @@ GRPO 的候选组由数据源复制同一行产生，不需要在数据集里预
 模板中的 `/assets/reference-*.wav` 是待替换路径。基础模型、codec、评分服务和教师
 必须使用实际资产；模板本身不启动这些服务。
 
+参考音频沿用 revision 6 的任务位置，直接用槽位名填写，无需逐音频 `id`：
+
+```json
+"references": {
+  "audio1": "/assets/reference-speaker.wav",
+  "audio2": "/assets/reference-style.wav"
+}
+```
+
+上例适用于 `Attribute Clone Triplet`：音色/口音取 `audio1`，韵律/情绪取 `audio2`。
+`Full VoiceClone` 只需 `audio1`，四项属性都由它提供。无参考的任务省略
+`references` 或写 `{}`。只接受连续的 `audio1`、`audio2`，解析顺序不取决于 JSON
+字段顺序；标准任务省略 `reference_targets`，SIM 自动使用任务指定的音色参考。
+旧的 `[{"id": "speaker", "uri": "/assets/reference-speaker.wav"}]` 仍然兼容，
+保留原 ID 和列表位置；若写了 `reference_targets`，继续校验它与任务映射一致。
+
 字段的职责分别是：
 
 - `script`：实际交给 Prism 生成的文本。
 - `metadata.id`：建议填写唯一、稳定的数据 ID，用于音频目录及跨实验定位。
 - `metadata.omni_prompt.task_type`：Prism 生成任务，例如 `TTS`、`Full VoiceClone`、`Instruction`。
+- `metadata.omni_prompt.references`：可选的 `audio1`/`audio2` 到参考音频路径/URI 的映射。
 - `metadata.omni_prompt.show_language`：必填布尔值；语言用于奖励计算时，即便这里是 false，也填写 `language`。
 - `metadata.omni_prompt.transcript_target`：期望的 ASR 转写文本，模板中与 script 相同。
 - `metadata.reward_category`：MixRL 的奖励选择；固定函数模式不要求填写。

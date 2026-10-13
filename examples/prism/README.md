@@ -196,14 +196,24 @@ bash examples/prism/run-grpo.sh \
       "language": "zh",
       "transcript_target": "你好，欢迎来到今天的节目。",
       "global_instruction": {"Gender": "female"},
-      "references": [{"id": "audio1", "uri": "/assets/reference-zh.wav"}],
-      "reference_targets": {"timbre": "audio1"}
+      "references": {"audio1": "/assets/reference-zh.wav"}
     }
   }
 }
 ```
 
-每行必须显式提供 `task_type` 和布尔 `show_language`。`references` 的 `id` 对应实际参考 URI；使用 SIM 时，`reference_targets.timbre` 必须明确指向音色参考。`transcript_target` 与 `language` 供 WER/CER 客户端使用，不传给 ASR 解码器。
+每行必须显式提供 `task_type` 和布尔 `show_language`。沿用 revision 6 的任务模板，
+`references` 直接写 `{"audio1": "/path/voice.wav", "audio2": "/path/style.wav"}`，
+单参考只写 `audio1`，无参考可省略或写 `{}`。槽位按 `audio1`、`audio2` 排序，
+不能跳过 `audio1` 或增加 `audio3`；音频值必须是非空路径/URI 字符串。
+`task_type` 决定参考属性，标准任务不必再写 `reference_targets`：Full VoiceClone
+的四项属性都取 `audio1`，Attribute Clone Triplet 的音色/口音取 `audio1`、
+韵律/情绪取 `audio2`。SIM 使用任务指定的音色参考。
+
+旧的 `[{"id": "speaker", "uri": "/path/voice.wav"}]` 列表仍可使用，按原列表位置
+映射到 processor 的音频槽位。旧数据若填写 `reference_targets`，仍要求它与任务
+实际映射一致。样本级 `metadata.id` 用于归档定位，与参考音频槽位无关。
+`transcript_target` 与 `language` 供 WER/CER 客户端使用，不传给 ASR 解码器。
 
 启用 JudgeCLAP 时，`global_instruction` 是实际交给 processor 的全局属性 object 或其 JSON 字符串。属性必须同时属于实际 Prism renderer 与 JudgeCLAP 支持的英文规范类别。第一版只评分全局属性，不把全局分数用于局部片段指令。空属性或普通自由文本不能作为这条 JudgeCLAP 路径的评分目标。
 

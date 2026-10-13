@@ -309,8 +309,11 @@ def test_grpo_templates_route_native_groups_and_archive_actual_rewards(
     reference.write_bytes(b"reference waveform")
     candidates = [item for group in groups for item in group]
     for item in candidates:
-        for ref in item.metadata["omni_prompt"].get("references", []):
-            ref["uri"] = str(reference)
+        prompt = item.metadata["omni_prompt"]
+        assert "reference_targets" not in prompt
+        references = prompt.get("references", {})
+        for slot in references:
+            references[slot] = str(reference)
         payload = omni_rollout.build_generate_payload(args, item, {"max_new_tokens": 12})
         assert payload["prompt"]["script"] == item.prompt
         candidate = audio / f"sample-{item.index}.wav"
@@ -340,6 +343,9 @@ def test_grpo_templates_route_native_groups_and_archive_actual_rewards(
             assert record["reward_function_path"] == reward_path
             assert set(record["reward_details"]["components"]) == components[category]
             assert record["data_id"] == item.metadata["id"]
+            if "sim" in components[category]:
+                assert record["reward_details"]["components"]["sim"]["details"]["reference_id"] == "audio1"
+                assert (Path(record["audio_path"]).parent / "ref_audio1.wav").resolve() == reference
     metrics = artifacts._summarize(args, 7, candidates)
     assert metrics["rollout/prism/all/sample_count"] == len(candidates)
     assert metrics["rollout/prism/selected/complete_group_count"] == len(groups)
