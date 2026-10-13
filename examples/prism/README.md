@@ -202,6 +202,7 @@ OPD log-ratio 是已采样动作上的统计，单批可以为负，不是完整
 Prism 路径不再报告空文本重复率、未填充的缓存命中率、`reward==1` 的文本 pass@k
 和通用 LM 公式估算的 TFLOPS。没有新增 Prism TFLOPS 估算或声学复读检测。
 
+MOPD 可使用独立的音频质量 eval，配置见 [训练与评测说明](TRAINING_MODES.md#独立评测grpo-与-mopd-共用质量指标)。
 
 准备阶段合并用户实际选择的 `--custom-config-path`，保留原奖励、sample hook
 和日志 hook，生成当前轮次的配置后进入原 `train.py`。原奖励函数仍接收原来的

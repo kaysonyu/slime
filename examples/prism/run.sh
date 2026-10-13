@@ -241,6 +241,11 @@ else
     --omni-teacher-config "${TEACHER_CONFIG}"
     --custom-rm-path examples.prism.hooks.zero_reward
   )
+  # MOPD can reuse frozen audio scorers for eval without changing its training reward.
+  if [[ -n ${REWARD_CONFIG:-} ]]; then
+    [[ -f ${REWARD_CONFIG} ]] || { echo "Missing eval reward config: ${REWARD_CONFIG}" >&2; exit 2; }
+    TASK_ARGS+=(--omni-reward-config "${REWARD_CONFIG}")
+  fi
 fi
 
 # Keep actual Omni scores for diagnostics; no --use-rollout-logprobs means

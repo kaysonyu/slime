@@ -147,6 +147,35 @@ logprob 张量继续由原 debug dump 参数控制。需要合成波形用于听
 将 `omni_return_audio` 改为 true，再用 `--custom-config-path` 指定该文件；这会增加
 vocoder 与音频保存开销，不会自动启用 GRPO 奖励。
 
+## 独立评测（GRPO 与 MOPD 共用质量指标）
+
+默认 recipe 不开启 eval。准备与训练集独立的 revision 6 JSONL，复制并修改
+[eval.example.yaml](eval.example.yaml) 中各数据集路径，再在启动命令后追加
+`--eval-interval 10 --eval-config /path/to/eval.yaml`。每个数据集明确指定自己的
+`custom_rm_path`，因此质量评分不必与训练奖励相同。只启用需要的评测集，
+`REWARD_CONFIG` 绑定这些评测集需要的评分服务；固定函数评测不要求 `reward_category`。
+
+MOPD 使用 [mopd-eval.yaml](mopd-eval.yaml) 在 eval 阶段请求 WAV，训练仍使用无波形的
+教师动作蒸馏和零 task reward：
+
+```bash
+REWARD_CONFIG=/path/to/frozen-rewards.yaml \
+  bash examples/prism/run-mopd.sh \
+  --custom-config-path examples/prism/mopd-eval.yaml \
+  --eval-config /path/to/eval.yaml --eval-interval 10
+```
+
+该配置设置 `omni_eval_return_audio: true` 和 `omni_eval_teacher_scoring: false`。
+评测直接调用各数据集指定的质量 reward，跳过教师评分；教师仍照常参与训练。
+需要同时检查教师时可将后一项设为 true，并为评测 domain 提供有效教师路由。
+这两个字段也接受 CLI：`--omni-eval-return-audio`、`--no-omni-eval-teacher-scoring`。
+未配置时，eval 的音频开关继承训练，教师 hook 保持原行为。
+
+评测使用同步后的学生权重，从第 0 轮开始训练时默认先评一次，后续按 rollout
+间隔或 epoch 边界触发。它不参与梯度更新，也不自动选择最佳 checkpoint。
+结果进入本轮 `rollout_audio/eval/`、`records/eval/` 和 `eval/<dataset>/prism/` 指标。
+MOPD 的音频解码和质量评分开销仅在配置的 eval 中发生。
+
 ## 保存目录与恢复
 
 建议始终显式填写 RUN_NAME 区分三种实验。GRPO 的两种用法都走 grpo 入口，默认

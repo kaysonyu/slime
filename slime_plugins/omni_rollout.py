@@ -213,7 +213,7 @@ def _prompt(sample):
     return prompt, source
 
 
-def build_generate_payload(args, sample, sampling_params):
+def build_generate_payload(args, sample, sampling_params, *, evaluation=False):
     """Send the structured task to Omni; its processor owns prompt rendering."""
     if getattr(args, "partial_rollout", False) or sample.response_length:
         raise ValueError("Prism baseline supports complete single-turn requests only")
@@ -243,6 +243,12 @@ def build_generate_payload(args, sample, sampling_params):
     if seed is not None or sampling_seed is not None:
         params["seed"] = seed if seed is not None else sampling_seed
     model = getattr(args, "omni_model_name", "prism")
+    return_audio = getattr(args, "omni_return_audio", True)
+    eval_audio = getattr(args, "omni_eval_return_audio", None)
+    if evaluation and eval_audio is not None:
+        if type(eval_audio) is not bool:
+            raise ValueError("omni_eval_return_audio must be Boolean or None")
+        return_audio = eval_audio
     return dict(
         model=model,
         prompt=prompt,
@@ -250,7 +256,7 @@ def build_generate_payload(args, sample, sampling_params):
         stream=False,
         return_logprob=True,
         return_omni_rollout=True,
-        return_audio=getattr(args, "omni_return_audio", True),
+        return_audio=return_audio,
         response_format="wav",
         metadata={"sample_index": sample.index, "group_index": sample.group_index},
     )
@@ -546,7 +552,7 @@ async def generate(args, sample, sampling_params, *, evaluation=False):
 
     if sample.status not in (Sample.Status.PENDING, Sample.Status.ABORTED):
         raise ValueError(f"Prism generation requires a pending sample, got {sample.status}")
-    payload = build_generate_payload(args, sample, sampling_params)
+    payload = build_generate_payload(args, sample, sampling_params, evaluation=evaluation)
     config = _config(str(args.hf_checkpoint))
     headers = None
     if sample.session_id and getattr(args, "router_policy", None) == "consistent_hashing":
@@ -751,8 +757,14 @@ async def _teacher_endpoint(args, sample, binding):
     raise ValueError(f"Omni teacher deployment {deployment!r} has no reachable running workers")
 
 
-async def score_teacher(args, sample, **kwargs):
+async def score_teacher(args, sample, *, evaluation=False, **kwargs):
     """Per-sample hook: route an explicit domain to one frozen Prism teacher."""
+    if evaluation:
+        score_during_eval = getattr(args, "omni_eval_teacher_scoring", True)
+        if type(score_during_eval) is not bool:
+            raise ValueError("omni_eval_teacher_scoring must be Boolean")
+        if not score_during_eval:
+            return sample
     if not getattr(args, "omni_teacher_config", None):
         return sample
     config = _load_teacher_config(args.omni_teacher_config)

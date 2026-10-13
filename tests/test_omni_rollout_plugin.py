@@ -803,3 +803,22 @@ def test_generate_uses_router_and_preserves_sample_identity(monkeypatch, tmp_pat
     assert item.metadata["omni_audio_seconds"] == pytest.approx(32 / 24000)
     assert item.metadata["omni_prompt"]["transcript_target"] == "你好"
     assert plugin.generate.abort_mode == "request"
+
+
+@pytest.mark.parametrize("override,expected", [(None, False), (True, True), (False, False)])
+def test_eval_audio_override_does_not_change_training(override, expected):
+    args = types.SimpleNamespace(omni_return_audio=False, omni_eval_return_audio=override)
+    assert (
+        plugin.build_generate_payload(args, sample(), {"max_new_tokens": 12}, evaluation=True)["return_audio"]
+        is expected
+    )
+    assert plugin.build_generate_payload(args, sample(), {"max_new_tokens": 12})["return_audio"] is False
+    assert args.omni_return_audio is False
+
+
+def test_eval_teacher_hook_can_skip_without_changing_training():
+    args = types.SimpleNamespace(omni_eval_teacher_scoring=False, omni_teacher_config={"models": {}, "by_domain": {}})
+    item = sample()
+    assert asyncio.run(plugin.score_teacher(args, item, evaluation=True)) is item
+    with pytest.raises(ValueError, match="Unmapped"):
+        asyncio.run(plugin.score_teacher(args, item, evaluation=False))

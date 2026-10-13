@@ -474,6 +474,72 @@ def test_mopd_template_routes_teachers_and_archives_without_waveform(args, monke
     assert not list(artifacts.audio_archive_root(args).rglob("*.wav"))
 
 
+def test_mopd_quality_eval_generates_audio_uses_dataset_reward_and_skips_teacher(args, tmp_path, monkeypatch):
+    import copy
+    import types
+
+    from test_omni_rollout_plugin import geometry, output
+    from test_tts_reward_plugin import Service, config
+
+    from slime.utils.eval_config import build_eval_dataset_configs
+    from slime_plugins import omni_rollout, tts_reward
+
+    args.__dict__.update(yaml.safe_load((REPO / "examples/prism/mopd-eval.yaml").read_text()))
+    settings = yaml.safe_load((REPO / "examples/prism/eval.example.yaml").read_text())["eval"]
+    args.eval_datasets = build_eval_dataset_configs(args, settings["datasets"], settings["defaults"])
+    args.hf_checkpoint = "fixture"
+    args.prism_reward_function_path = "examples.prism.hooks.zero_reward"
+    args.rollout_sample_hook_path.append("slime_plugins.omni_rollout.score_teacher")
+    # This binding must never be consulted during quality eval.
+    args.omni_teacher_config = {"models": {}, "by_domain": {}}
+    args.omni_reward_config = config(wer=1)
+    service = Service()
+    monkeypatch.setattr(tts_reward, "get", service.get)
+    monkeypatch.setattr(tts_reward, "post", service.post)
+    monkeypatch.setattr(omni_rollout, "_config", lambda path: geometry())
+    monkeypatch.setitem(
+        sys.modules,
+        "slime.rollout.sglang_rollout",
+        types.SimpleNamespace(get_model_url=lambda args, model: "http://student/generate"),
+    )
+    wav_bytes = io.BytesIO()
+    with wave.open(wav_bytes, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(24000)
+        wav.writeframes(b"\0\0" * 240)
+    payloads = []
+
+    async def generate(_args, url, payload, **kwargs):
+        assert url == "http://student/generate"
+        payloads.append(copy.deepcopy(payload))
+        response = output()
+        if payload["return_audio"]:
+            response["audio"] = dict(
+                format="wav", sample_rate=24000, data=base64.b64encode(wav_bytes.getvalue()).decode()
+            )
+        return response
+
+    monkeypatch.setattr(omni_rollout, "_request", generate)
+    item = _template_groups(args, "grpo-base.example.jsonl", 1)[0][0]
+    item.metadata.update(eval_dataset_name="content", eval_prompt_index=0, eval_sample_index=0, eval_run_id="quality")
+    item.custom_rm_path = args.eval_datasets[0].custom_rm_path
+
+    async def evaluate():
+        await omni_rollout.generate(args, item, {"max_new_tokens": 12}, evaluation=True)
+        await archive_and_score(args, item, evaluation=True)
+
+    asyncio.run(evaluate())
+    record = json.loads(Path(item.metadata["prism_artifact"]["record_path"]).read_text())
+    assert record["reward_function_path"] == "examples.prism.rewards.base.reward"
+    assert record["reward"] > 0 and record["audio_seconds"] == pytest.approx(0.01)
+    assert Path(record["audio_path"]).is_file() and record["teacher"] == {}
+    training = _template_groups(args, "mopd.example.jsonl", 1)[0][0]
+    asyncio.run(omni_rollout.generate(args, training, {"max_new_tokens": 12}, evaluation=False))
+    assert [payload["return_audio"] for payload in payloads] == [True, False]
+    assert training.metadata["omni_audio_path"] is None and args.omni_return_audio is False
+
+
 def test_attempt_preparation_snapshots_and_refuses_to_overwrite(tmp_path):
     root = tmp_path / "attempt"
     config = tmp_path / "custom.yaml"
@@ -709,6 +775,7 @@ def test_actual_launcher_isolates_attempt_and_preserves_checkpoint_override(tmp_
     assert runtime["omni_return_audio"] == (mode == "grpo")
     if mode == "mopd":
         assert runtime["rollout_sample_hook_path"][-1] == "slime_plugins.omni_rollout.score_teacher"
+        assert options["omni_reward_config"] == [str(config)]
 
 
 if __name__ == "__main__":
