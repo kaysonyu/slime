@@ -201,7 +201,7 @@ def test_stop_prevents_queued_groups_from_starting():
             return SimpleNamespace(remote=lambda *args: asyncio.create_task(function(*args)))
 
         pool = object.__new__(execution_pool.RolloutExecutionPool)
-        pool.workers = [SimpleNamespace(generate=remote(execute), stop=remote(stop))]
+        pool.workers = [SimpleNamespace(generate_serialized=remote(execute), stop=remote(stop))]
         pool.limits = [asyncio.Semaphore(1)]
         pool.pending = set()
         pool.running = True

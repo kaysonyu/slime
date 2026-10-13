@@ -14,6 +14,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from slime.ray.utils import add_default_ray_env_vars
 from slime.rollout.base_types import iter_samples
+from slime.rollout.group_serialization import SerializedGroup
 from slime.rollout.sample_hooks import rollout_context
 from slime.utils.http_utils import get_rollout_num_engines, init_http_client
 from slime.utils.types import Sample
@@ -73,6 +74,9 @@ class GroupWorker:
             "wall_seconds": time.perf_counter() - self.started,
             "cpu_seconds": time.process_time() - self.cpu_started,
         }
+
+    async def generate_serialized(self, rollout_id, group, sampling_params):
+        return SerializedGroup(await self.generate(rollout_id, group, sampling_params))
 
     async def close(self):
         if self.running:
@@ -156,7 +160,7 @@ class RolloutExecutionPool:
         async with self.limits[index]:
             if not self.running:
                 return aborted_group(group)
-            ref = self.workers[index].generate.remote(self.rollout_id, group, sampling_params)
+            ref = self.workers[index].generate_serialized.remote(self.rollout_id, group, sampling_params)
             self.pending.add(ref)
             try:
                 return await ref
