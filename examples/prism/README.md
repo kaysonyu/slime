@@ -128,14 +128,23 @@ export COLOCATE=1 ACTOR_NODES=4 ACTOR_GPUS_PER_NODE=8 ROLLOUT_GPUS=32 GPUS_PER_N
 export PROMPTS_PER_BATCH=256 SAMPLES_PER_PROMPT=8 GLOBAL_BATCH_SIZE=2048
 export TRAIN_SEQ_LENGTH=20480 MAX_FRAMES=1024 ROLLOUT_CONCURRENCY_PER_REPLICA=16
 bash examples/prism/run-grpo.sh \
-  --use-dynamic-batch-size --max-tokens-per-gpu 20480 --balance-by-flops \
-  --use-distributed-optimizer --rollout-data-transport object-store --use-distributed-post \
+  --use-dynamic-batch-size --max-tokens-per-gpu 20480 --balance-data --balance-by-flops \
+  --use-distributed-optimizer --rollout-data-transport object-store --rollout-execution-workers 16 \
   --no-offload-train --no-offload-rollout --update-weight-buffer-size 268435456
 ```
 
 该命令还需要前文的权重、数据、`OMNI_CONFIG`、`REWARD_CONFIG` 和已有 Ray cluster。
-上例的 `--use-distributed-post` 已在 DP32 GRPO 中做同节点对照，吞吐提高约14.5%；
-64卡及MOPD的该开关收益尚未测量。详见性能验收记录。
+`--rollout-execution-workers 16` 在 GPU 节点间分配 16 个 CPU actor，每个占用 1 CPU，
+执行完整 prompt group 的生成、协议解析、音频落盘、sample hook 和奖励。总生成并发
+仍由每副本并发乘副本数决定，再分给 workers；评分服务的 `max_inflight` 则是每个
+worker 独立的限额。例如 16 workers、ASR `max_inflight: 16` 对应最多 256 个在途评分。
+根据实际评分服务能力设置副本和并发；不要只增加训练卡而保持评分能力固定。
+
+worker 结果中的普通 CPU tensor 使用批量 buffer 传输，接收端恢复独立可写内存，
+保留完整样本、元数据和 dtype。协调进程继续负责数据选择、过滤与排序，旧轮任务
+排空后才进入下一权重版本。评分错误会终止本轮；新池不把失败评分替换为零奖励。
+该选项默认 0，启用后不再另建 `--use-distributed-post` actors。
+32 卡的 CPU、评分副本和传输实测对照见 [VALIDATION.md](VALIDATION.md)。
 MOPD 使用 `SAMPLES_PER_PROMPT=1`、`PROMPTS_PER_BATCH=GLOBAL_BATCH_SIZE`，保持每条
 轨迹只参与一次 optimizer update。`L` 应计入文本、参考音频和生成时间行；24 路 RVQ
 不能再乘进序列长度。训练是否没有梯度累积，以实际 `num_microbatches=[1]` 为准。

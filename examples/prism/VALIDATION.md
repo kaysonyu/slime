@@ -1,5 +1,82 @@
 # Prism 训练验收与性能记录
 
+## 32 H200 rollout 与评分优化（2026-10-13）
+
+本轮按用户要求集中优化 32 卡，未提交新的 64 卡作业。使用同一 v0.4.0 iteration
+100000、真实 ASR 奖励与同权重冻结教师；TP=PP=CP=1、DP=32、B2048、每 rank
+20480 tokens、一次 packed microbatch。GRPO 每 prompt 8 条，MoPD 每 prompt 1 条且
+只消费一次。训练与学生模型驻留，16 个完整 rollout CPU workers；评分服务独立
+使用表中数量的 H200。GPU busy 为稳态窗口内全部训练卡的一秒采样均值，不是 MFU。
+
+| 配置 | 更新数 / 稳态窗口 | 秒/步 | samples/s | GPU busy | 含评分 GPU秒/样本 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| GRPO HTTP 分发基线，ASR×1 | 5 / 2 | 54.79 | 37.38 | 18.4% | 0.883 |
+| GRPO 完整 worker，ASR×1 | 5 / 2 | 41.86 | 48.92 | 28.6% | 0.675 |
+| GRPO 完整 worker，ASR×2 | 10 / 7 | 26.40 | 77.57 | 35.4% | 0.438 |
+| GRPO 完整 worker，ASR×4 | 10 / 7 | 20.78 | 98.55 | 41.6% | 0.365 |
+| GRPO 同节点复测，ASR×4，并发16 | 8 / 5 | 19.18 | 106.78 | 46.4% | 0.337 |
+| GRPO 同节点，并发32 | 8 / 5 | 23.84 | 85.89 | 37.8% | 0.419 |
+| GRPO buffer，ASR×4，并发16 | 12 / 9 | 19.82 | 103.33 | 44.8% | 0.348 |
+| MoPD 原教师×1，配对基线 | 5 / 2 | 31.16 | 65.72 | 28.3% | 0.502 |
+| MoPD 优化教师×1，配对 | 5 / 2 | 25.22 | 81.20 | 33.5% | 0.406 |
+| MoPD 优化教师×2 | 8 / 5 | 17.33 | 118.15 | 33.9% | 0.288 |
+| MoPD buffer，优化教师×2 | 12 / 9 | 16.81 | 121.83 | 33.2% | 0.279 |
+| MoPD 完成队列配对基线 | 8 / 5 | 16.08 | 127.34 | 35.2% | 0.267 |
+| MoPD 完成队列优化 | 12 / 9 | 16.08 | 127.36 | 34.3% | 0.267 |
+
+前两次更新及最终 checkpoint 不计入稳态；完整窗口从一次 generate 开始到下一次
+开始，包含评分、数据处理、learner 和 tensor 权重发布。保留所有慢轮次。
+HTTP/worker 的单 ASR 对照在同一作业内完成；教师原版/向量化也使用相同分配节点。
+并发16/32、双教师与 buffer 最终验证复用另一组相同32卡节点。跨作业的评分副本
+梯度实验会受到外部负载及采样长度波动影响，不把各项收益简单相乘。
+
+瓶颈及修改：
+
+1. 只分发 HTTP 仍让 JSON/协议解析、tensor 构建、WAV 落盘、教师 hook 和奖励
+   集中在一个进程。完整 group 下放 CPU worker 后，单 ASR 的 GRPO 协调 CPU
+   约32.9秒/轮降至约8秒/轮，吞吐从37.38升至48.92条/秒。协调进程继续执行
+   选样、过滤与排序；旧轮任务排空后才允许新权重版本，失败评分直接传播。
+2. 客户端改善后，ASR 成为主要等待源，1→2→4 副本逐步提高吞吐。继续把生成并发
+   16加至32没有稳定收益，出现大批评分请求同时等待的长尾，因此最终保留16。
+3. 冻结教师的模型输入校验以 NumPy 批量检查词表、role、successor edge 和 anchor。
+   128个真实输入的 hash 与所有构建 tensor 完全一致，32个实际 GPU 教师输出逐项
+   一致。CPU 构建约4.93→2.56 ms；实际单教师配对 MoPD 31.16→25.22秒/步。
+4. 实际 coordinator profile 一轮GRPO触发24576次、MoPD触发28672次 tensor
+   storage加载。worker结果改为buffer传输，普通CPU tensor免去逐storage torch.load；
+   接收端复制为独立可写tensor，保留完整样本元数据、dtype和形状，特殊tensor回退
+   原reducer。未注册进程级tensor序列化器，不改变权重发布的CUDA IPC路径。
+
+5. MoPD 2048个独立任务逐个结束时，原asyncio.wait反复遍历剩余任务并重建callback；
+   新完成队列让每个task只通知一次，并支持补样、取消及异常。纯调度微测中2048个
+   完成事件约0.65→0.015秒CPU；4096个约2.99→0.030秒。微测不计模型和网络，
+   端到端同节点8/12更新配对约16.083→16.080秒/步，未观察到额外吞吐收益；
+   协调CPU平均9.78→8.51秒。教师两副本的NVML稳态busy约13.8%和14.0%，当前
+   还受请求处理和端到端调度限制，不能据此声称教师GPU计算已饱和。
+
+单独buffer的GRPO端到端收益未获证实：同节点基线19.18秒/步，12次更新的buffer
+测试19.82秒/步（含一次ASR长尾）；中位数18.97→18.65秒。协调CPU平均8.30→6.24秒，
+因此只能确认CPU开销下降，不把整步均值声称为提升。评分长尾、短序列AR小batch
+及阶段屏障仍限制GPU busy；不以增加无效计算或隐藏梯度累积来提高利用率数字。
+
+Slime源码候选为`f2de700562689f75083702bdee6af14b87b4c195`（完整worker）和
+`5814045f268a8e96ba8eb73e0dc106aee62991eb`（buffer）及
+`5d36a3f5ae66497aa8cd35c84818d54be6c8dbf6`（完成队列），Omni教师候选为
+`402f9affa9a7f1aecf6f546cc6c3602fbd106d6f`；Omni学生仍使用a25fe84基线。
+Slime相关回归279 passed、1 skipped；Omni评分29 passed、pre-commit全仓通过。
+256个真实MoPD样本的全部字段做过传输前后比较；另有两进程Ray、原生采集、
+跨轮版本、取消排空、异常传播与嵌套ObjectRef验证。
+
+完整报告及逐次配置：`/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/worker-profile-20261013-031520/optimization-report.html`。
+`analysis/training-validation.json` 检查所有rank的单microbatch、有限非零梯度及
+MoPD prompt唯一性；`publication-verification.json`检查全部学生副本的发布版本。
+早期四组checkpoint目录当前缺失（HTTP基线、ASR1 worker、ASR2 worker、初始单教师），
+虽有成功保存日志，不把它们声称为tensor内容核验通过；`checkpoint-verification.json`
+明确列出可读通过与缺失目录。最终GRPO与MoPD各12更新的checkpoint均核验完整参数与Adam
+moments，optimizer进度为[12,12]，scheduler消费24576条。全部14组共113次更新、
+231424条样本，所有32个训练rank均保持一个microbatch且梯度有限非零，每条样本
+版本与当前发布版本一致，GRPO组完整、MoPD每次运行内prompt不重复。
+平台Job全部保留。性能短跑不证明语音质量提升，也不新增跨引擎logprob精度保证。
+
 ## 32/64 H200 性能验收（2026-10-12）
 
 使用相同的 Prism 1.7B v0.4.0 native iteration 100000、统一 editable 镜像和原

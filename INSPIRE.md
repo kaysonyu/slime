@@ -12,7 +12,7 @@
 | GPU 容器镜像 | `slime-ttsrl:editable-v1`；地址 `docker.sii.shaipower.online/inspire-studio/slime-ttsrl:editable-v1`；digest `sha256:008ecc97fd306fc13c351d38a0e46ea2592a0ece0a8e8ba3102a0a06a712cd6c` |
 | 训练、Ray、Omni Python | 统一使用镜像内 `/opt/venvs/core/bin/python`；环境入口 `/opt/slime-ttsrl/env.sh` |
 | Editable slime | `/inspire/ssd/project/cq-scientific-cooperation-zone/public/kyu/editable/slime`；NumPy2镜像验收基线 `4909f8121d6af1ae0495f306f799929b35e347f0`；性能改动随分支更新，分支 `feat/prism-omni-colocate-rl` |
-| Editable SGLang-Omni | `/inspire/ssd/project/cq-scientific-cooperation-zone/public/kyu/editable/sglang-omni`；`a25fe84ec01476799fbb637a8d1e4b5765dc9204`，分支 `rl/moss-tts-prism` |
+| Editable SGLang-Omni | `/inspire/ssd/project/cq-scientific-cooperation-zone/public/kyu/editable/sglang-omni`；教师校验优化 `402f9affa9a7f1aecf6f546cc6c3602fbd106d6f`，分支 `rl/moss-tts-prism` |
 | Editable Megatron-LM | `/inspire/ssd/project/cq-scientific-cooperation-zone/public/kyu/editable/Megatron-LM`；`3f49de20de81c1ad5dfc10efa0f7d0c8098f1ce4` |
 
 HF 制品由 mossLite 的官方 native 转换工具在 CPU 上生成。结构为 24 RVQ、32 物理层、H2048、MLP-only 28–31、BF16；执行中的重复层保留物理参数共享。模型初始化使用 native DCP 模型组件，RL 续训使用 slime 自己的完整 checkpoint。
@@ -47,3 +47,10 @@ QB 根目录中的 `colocate-005/fresh/checkpoint/` 与 `colocate-006/resume/che
 端口、Ray head 和平台 workload 均为临时资源，后续运行重新分配。
 
 32/64 H200 性能验收与完整复现产物位于 `/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/scale-profile-20261012-193554`；`profile-report.html`、`analysis/results.csv` 和 `analysis/jobs-retained.csv` 记录测试范围、结果和保留的Job。实际生产配置与测量方法见 `examples/prism/VALIDATION.md`。
+
+后续 32 H200 rollout worker、tensor 传输及冻结评分优化的复现产物位于
+`/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/worker-profile-20261013-031520`。
+入口为 `optimization-report.html`；配置、逐步统计、CPU profiles、GPU 采样和验证结果
+分别位于 `configs/`、`runs/`、`analysis/`。Job 记录全部保留；checkpoint 核验报告
+明确列出可读并通过的目录和缺失目录。每次实验使用的 Slime 与 Omni 源码 SHA 以
+该目录 manifest 为准，64 卡扩展按用户要求延期。
