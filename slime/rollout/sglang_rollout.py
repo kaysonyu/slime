@@ -694,6 +694,7 @@ async def eval_rollout_single_dataset(
 
     tasks = []
     # do multiple samples for eval prompts
+    eval_run_id = uuid.uuid4().hex
     sample_index = 0
     for _i, prompt_sample in enumerate(dataset.samples):
         for j in range(dataset_cfg.n_samples_per_eval_prompt):
@@ -702,6 +703,12 @@ async def eval_rollout_single_dataset(
             sample.index = sample_index
             sample_index += 1
             sample.metadata = dataset_cfg.inject_metadata(getattr(sample, "metadata", None))
+            sample.metadata.update(
+                eval_dataset_name=dataset_cfg.name,
+                eval_prompt_index=_i,
+                eval_sample_index=j,
+                eval_run_id=eval_run_id,
+            )
             sample.custom_rm_path = dataset_cfg.custom_rm_path
             sample.generate_function_path = getattr(dataset_cfg, "custom_generate_function_path", None)
             sampling_params = base_sampling_params

@@ -331,6 +331,14 @@ def test_original_deterministic_eval_forwards_sampling_seed_to_omni(monkeypatch)
     monkeypatch.setattr(rollout, "generate_and_rm", capture_generate)
     result = asyncio.run(rollout.eval_rollout_single_dataset(args, 0, config))
     assert [item.metadata["forwarded_seed"] for item in result[config.name]["samples"]] == [321, 322]
+    items = result[config.name]["samples"]
+    assert [item.metadata["eval_sample_index"] for item in items] == [0, 1]
+    assert all(item.metadata["eval_prompt_index"] == 0 for item in items)
+    assert all(item.metadata["eval_dataset_name"] == config.name for item in items)
+    event = items[0].metadata["eval_run_id"]
+    assert all(item.metadata["eval_run_id"] == event for item in items)
+    repeated = asyncio.run(rollout.eval_rollout_single_dataset(args, 0, config))
+    assert repeated[config.name]["samples"][0].metadata["eval_run_id"] != event
 
 
 def teacher_binding():

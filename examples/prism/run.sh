@@ -16,7 +16,19 @@ esac
 : "${OMNI_CONFIG:?Set OMNI_CONFIG to the student pipeline YAML}"
 TASK_TRAIN_PYTHON=${TRAIN_PYTHON:-python3}
 TASK_OMNI_PYTHON=${OMNI_PYTHON:-${TASK_TRAIN_PYTHON}}
-TASK_OUTPUT_DIR=${OUTPUT_DIR:-${PWD}/runs/prism-${TASK_MODE}}
+TASK_RUN_NAME=${RUN_NAME:-prism-${TASK_MODE}}
+TASK_JOB_TAG=${JOB_TAG:-${JOB_NAME:-$(date -u +%Y%m%dT%H%M%SZ)}_${TRAIN_JOB_ID:-$$}}
+TASK_RUNNING_ROUND=${RUNNING_ROUND:-0}
+[[ ${TASK_RUNNING_ROUND} =~ ^[0-9]+$ ]] || { echo "RUNNING_ROUND must be a nonnegative integer" >&2; exit 2; }
+for TASK_NAME in "${TASK_RUN_NAME}" "${TASK_JOB_TAG}"; do
+  [[ -n ${TASK_NAME} && ${TASK_NAME} != . && ${TASK_NAME} != .. && ${TASK_NAME} != */* && ${TASK_NAME} != *\\* ]] || {
+    echo "RUN_NAME and JOB_TAG must be single directory names" >&2; exit 2;
+  }
+done
+TASK_ROUND_DIR=${RUN_DIR:-${OUTPUT_ROOT:-${PWD}/outputs}/${TASK_RUN_NAME}/${TASK_JOB_TAG}/running_round_${TASK_RUNNING_ROUND}}
+TASK_ROUND_DIR=$("${TASK_TRAIN_PYTHON}" -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "${TASK_ROUND_DIR}")
+# Preserve OUTPUT_DIR's existing meaning for callers that set it explicitly.
+TASK_OUTPUT_DIR=${OUTPUT_DIR:-${TASK_ROUND_DIR}/checkpoints}
 TASK_ACTOR_NODES=${ACTOR_NODES:-1}
 TASK_ACTOR_GPUS=${ACTOR_GPUS_PER_NODE:-1}
 TASK_ROLLOUT_GPUS=${ROLLOUT_GPUS:-1}
@@ -98,6 +110,7 @@ TASK_ARGS=(
   --rollout-function-path slime.rollout.sglang_rollout.generate_rollout
   --custom-generate-function-path slime_plugins.omni_rollout.generate
   --custom-config-path "${TASK_EXAMPLE_DIR}/${TASK_MODE}.yaml"
+  --omni-audio-dir "${AUDIO_DIR:-${TASK_ROUND_DIR}/rollout_audio}"
   --train-env-vars "${TASK_TRAIN_ENV}"
   --prompt-data "${PROMPT_DATA}"
   --input-key script
@@ -150,6 +163,25 @@ if [[ ${TASK_COLOCATE} == 1 ]]; then
   TASK_ARGS+=(--colocate)
 fi
 
+if [[ ${USE_TENSORBOARD:-1} == 1 ]]; then
+  TASK_ARGS+=(
+    --use-tensorboard
+    --tensorboard-dir "${TASK_ROUND_DIR}/tensorboard"
+    --tb-project-name "${TASK_RUN_NAME}"
+    --tb-experiment-name "${TASK_JOB_TAG}/running_round_${TASK_RUNNING_ROUND}"
+  )
+fi
+if [[ ${USE_WANDB:-0} == 1 ]]; then
+  TASK_ARGS+=(
+    --use-wandb
+    --wandb-project "${WANDB_PROJECT:-prism-rl}"
+    --wandb-group "${WANDB_GROUP:-${TASK_RUN_NAME}/${TASK_JOB_TAG}/running_round_${TASK_RUNNING_ROUND}}"
+    --wandb-dir "${TASK_ROUND_DIR}/wandb"
+    --wandb-mode "${WANDB_MODE:-online}"
+    --disable-wandb-random-suffix
+  )
+fi
+
 if [[ -n ${RL_LOAD:-} ]]; then
   [[ -d ${RL_LOAD} ]] || { echo "Missing RL checkpoint directory: ${RL_LOAD}" >&2; exit 2; }
   TASK_ARGS+=(--load "${RL_LOAD}")
@@ -173,7 +205,6 @@ if [[ ${TASK_MODE} == grpo ]]; then
   TASK_ARGS+=(
     --custom-rm-path slime_plugins.tts_reward.reward
     --omni-reward-config "${REWARD_CONFIG}"
-    --omni-audio-dir "${AUDIO_DIR:-${TASK_OUTPUT_DIR}/audio}"
   )
 else
   : "${TEACHER_CONFIG:?Set TEACHER_CONFIG to domain-to-frozen-Prism-teacher bindings}"
@@ -191,8 +222,23 @@ fi
 # Keep actual Omni scores for diagnostics; no --use-rollout-logprobs means
 # Megatron recomputes and freezes old selected scores before optimization.
 if [[ ${PRISM_DRY_RUN:-0} == 1 ]]; then
-  printf '%q ' "${TASK_TRAIN_PYTHON}" "${TASK_REPO_ROOT}/train.py" "${TASK_ARGS[@]}" "$@"
-  printf '\n'
+  "${TASK_TRAIN_PYTHON}" -m examples.prism.experiment \
+    --run-dir "${TASK_ROUND_DIR}" --run-name "${TASK_RUN_NAME}" \
+    --job-tag "${TASK_JOB_TAG}" --running-round "${TASK_RUNNING_ROUND}" --dry-run \
+    -- "${TASK_TRAIN_PYTHON}" "${TASK_REPO_ROOT}/train.py" "${TASK_ARGS[@]}" "$@"
   exit 0
 fi
-exec "${TASK_TRAIN_PYTHON}" "${TASK_REPO_ROOT}/train.py" "${TASK_ARGS[@]}" "$@"
+TASK_COMMAND_FILE=$(mktemp)
+trap 'rm -f -- "${TASK_COMMAND_FILE}"' EXIT
+"${TASK_TRAIN_PYTHON}" -m examples.prism.experiment \
+  --run-dir "${TASK_ROUND_DIR}" --run-name "${TASK_RUN_NAME}" \
+  --job-tag "${TASK_JOB_TAG}" --running-round "${TASK_RUNNING_ROUND}" \
+  --command-file "${TASK_COMMAND_FILE}" \
+  -- "${TASK_TRAIN_PYTHON}" "${TASK_REPO_ROOT}/train.py" "${TASK_ARGS[@]}" "$@"
+mapfile -d '' -t TASK_COMMAND < "${TASK_COMMAND_FILE}"
+rm -f -- "${TASK_COMMAND_FILE}"
+trap - EXIT
+exec > >(tee -a "${TASK_ROUND_DIR}/logs/driver.log") 2>&1
+echo "Prism run: ${TASK_ROUND_DIR}"
+echo "Default RL checkpoint directory: ${TASK_OUTPUT_DIR}"
+exec "${TASK_COMMAND[@]}"

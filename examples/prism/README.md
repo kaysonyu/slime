@@ -38,7 +38,10 @@ export HF_CHECKPOINT=/assets/prism-student-hf
 export PRISM_PRETRAINED_CHECKPOINT=/assets/prism-native-dcp
 export CODEC_MODEL=/assets/moss-audio-tokenizer-v2
 export PROMPT_DATA=/data/prism-train.jsonl
-export OUTPUT_DIR=/runs/prism-grpo
+export OUTPUT_ROOT=/runs
+export RUN_NAME=prism-1p7b-grpo
+export JOB_TAG=voiceclone-first-run
+export RUNNING_ROUND=0
 # 可选：固定 native iteration；未指定时使用 importer 的 checkpoint 选择规则。
 export PRISM_PRETRAINED_STEP=100000
 ```
@@ -56,6 +59,81 @@ HF 制品与 native DCP 必须对应同一个学生结构、执行计划、token
 initializer 接收 `(models, args)`，只加载模型权重并返回 `None`；框架负责同步低精度 optimizer 的 master 参数和设置新训练进度。mossLite 目录、manifest、分片布局与模型身份的识别全部留在插件中。`PRISM_PRETRAINED_CHECKPOINT`、`PRISM_PRETRAINED_STEP` 仍是示例脚本的环境变量，脚本将它们转换成上述通用参数；旧的 Prism 专属 checkpoint CLI 参数已移除。明确的 iteration 目录可以同时提供一致的 step，冲突会报错。
 
 显式 `--load` 始终优先于 initializer，并走原 Megatron/HF 加载路径。错误的显式路径不会回退成重新初始化。恢复脚本仅传 `--load`，不附带首次初始化的 hook、source 或 step。
+
+## 实验目录、音频与监控
+
+`run-grpo.sh` / `run-mopd.sh` 默认把一次运行放在
+`OUTPUT_ROOT/RUN_NAME/JOB_TAG/running_round_<RUNNING_ROUND>/`。`OUTPUT_ROOT`
+默认是当前目录的 `outputs`，`RUN_NAME` 默认是 `prism-grpo` 或 `prism-mopd`；
+未指定 `JOB_TAG` 时使用 UTC 时间与平台 job ID（本地运行使用进程 ID）。
+可以用 `RUN_DIR` 指定这一轮的完整目录。脚本拒绝覆盖已经启动过的轮次。
+
+```text
+running_round_0/
+├── config/                 # 启动选项、源码版本、配置快照、加载来源
+├── logs/driver.log         # driver 和转发到 driver 的 Ray 日志
+├── checkpoints/           # 原生 RL checkpoint 与数据源状态
+├── tensorboard/
+├── wandb/
+├── rollout_audio/
+│   ├── train/rollout_0000000/group_<group>_<data-id>/
+│   └── eval/rollout_0000000/<dataset>/<eval-id>/group_<prompt>_<data-id>/
+├── records/train/         # 每个 rollout 的 JSONL 与 metrics.json
+├── records/eval/          # 每个数据集、每次评估的 JSONL 与 metrics.json
+└── debug/                 # 按需启用原 rollout/train tensor dump
+```
+
+`OUTPUT_DIR` 保留原来的含义：显式设置时覆盖 **checkpoint 目录**；未设置时使用
+这一轮的 `checkpoints/`。`AUDIO_DIR` 同样可以把完整音频树放到其他共享存储。
+所有训练与 rollout 节点仍须能读取配置、音频及记录路径。
+
+训练中产生的音频全部保留，包括最终未进入训练批次的候选，不自动清理或抽样。
+每个 group 保存 `prompt.json`、`prompt_text.txt`、可读取的本地参考音频链接，以及
+每个候选的 WAV 和 JSON。JSON 记录 domain、reward category、语言、生成配置、
+结束原因、原始与变换后的奖励分项、评分服务身份、模型版本和教师身份；实际动作
+tensor 继续交给原 debug dump。原始数据的 `metadata.id`、`sample_id` 或
+`rollout_audio_id` 可用于可读目录名，未提供时使用 prompt 内容摘要。文件名经过
+路径处理并带有候选唯一标识，多个副本和特殊字符数据 ID 不会覆盖其他候选。
+
+音频在评分前归档，每个候选先写入 pending 记录，评分完成或失败后原子更新。
+服务故障仍抛出原异常，不转换成数字奖励。完成一个 rollout 后生成 JSONL 汇总，
+标记 `selected_for_training`；保留 `generation_rollout_id`、`training_rollout_id`
+和 `policy_version` 三个独立字段。若批次中途失败，已生成候选的单独 JSON/WAV
+仍可读取，JSONL 只代表已经完成汇总的批次。训练前后同一 rollout 编号的两次评估
+使用不同 `eval-id`，不会混合。
+
+TensorBoard 默认启用（`USE_TENSORBOARD=0` 可关闭），使用仓库 requirements 中的
+`tensorboard`。日志目录通过实际 `--tensorboard-dir` 参数传给 learner 和 rollout
+actor，不依赖已有 Ray worker 的环境变量。`USE_WANDB=1` 可同时启用 W&B；
+`WANDB_PROJECT`、`WANDB_GROUP` 沿用显式配置，默认 group 包含本轮运行名称。
+每个 `running_round` 使用独立日志目录，恢复时 step 沿用框架的训练进度。
+
+新增 `rollout/prism/` 与 `eval/<dataset>/prism/` 指标包含：
+
+- reward 及 WER/CER、SIM、JudgeCLAP 分项的原始值/变换后值统计、参与比例；
+- 完整 prompt group 的奖励均值、组内标准差、p50/p90、零方差比例；
+- 零帧、截断、评分失败、待完成与取消比例；
+- 按 reward category、语言和 domain 分组的统计。
+
+训练统计的 `all`、`selected`、`not_selected` 分别表示已归档候选、选入训练的候选
+和其余候选。`not_selected` 包括过滤与过采样等原因，不等同于动态过滤失败；
+原有 `rollout/dynamic_filter/*` 原因计数继续保留。组内统计只计入完整、评分成功的
+group；未启用的奖励分项不当作零分。纯 MOPD 保持原有不生成波形的配置，记录
+实际轨迹与教师信息。
+
+准备阶段合并用户实际选择的 `--custom-config-path`，保留原奖励、sample hook
+和日志 hook，生成当前轮次的配置后进入原 `train.py`。原奖励函数仍接收原来的
+单样本/批量输入及 kwargs。`config/launch.json` 记录启动选项、Git SHA/工作树状态、
+checkpoint 来源和配置文件 SHA256；可读快照屏蔽凭据，实际 `experiment.yaml`
+以仅文件所有者可读写的权限保存。它记录启动配置，不是源码或完整模型的备份。
+
+较大的调试数据使用原参数按需开启，例如：
+
+```bash
+bash examples/prism/run-grpo.sh \
+  --save-debug-rollout-data '/runs/debug/rollout-{rollout_id}.pt' \
+  --save-debug-train-data '/runs/debug/train-{rollout_id}.pt'
+```
 
 ## JSONL 输入
 
@@ -225,7 +303,8 @@ CUDA_VISIBLE_DEVICES=3 "$OMNI_PYTHON" -m sglang_omni.cli serve \
 
 ```bash
 export RUN_CONFIG=/runs/prism-mopd-config
-export OUTPUT_DIR=/runs/prism-mopd
+export RUN_NAME=prism-1p7b-mopd
+export JOB_TAG=domain-teachers-first-run
 "$TRAIN_PYTHON" -m examples.prism.configure \
   --student "$HF_CHECKPOINT" --codec "$CODEC_MODEL" --output "$RUN_CONFIG" \
   --teacher zh_teacher http://teacher-host:8201 "$TEACHER_ZH" \
@@ -272,10 +351,15 @@ bash examples/prism/run-mopd.sh --sglang-config /runs/prism-managed-deployment.y
 恢复时保持同一算法、采样和服务配置，使用 slime 的完整 RL checkpoint：
 
 ```bash
-export RL_LOAD="$OUTPUT_DIR"
+export RL_LOAD="$OUTPUT_ROOT/$RUN_NAME/$JOB_TAG/running_round_0/checkpoints"
+export RUNNING_ROUND=1
 bash examples/prism/run-grpo.sh
 # 或相应的 run-mopd.sh
 ```
+
+若首次运行显式设置了 `OUTPUT_DIR`，则 `RL_LOAD` 指向该 checkpoint 目录，并为
+本次保存设置新的 `OUTPUT_DIR`（或取消该变量以使用本轮默认目录）。这里只显式
+恢复选定 checkpoint；脚本不扫描其他实验或自动重启平台作业。
 
 `NUM_ROLLOUT` 沿用原框架的总 rollout 上限，续训时需要大于 checkpoint 中已经完成的 rollout。恢复 `iter_0000000` 时，下一次训练为 rollout 1，恢复后的首次完整学生发布为版本 2；下一次更新后发布版本 3。已有更高 serving/recovery 版本会保留。新模型初始化仍从 rollout 0 与首次发布版本 1 开始。
 
