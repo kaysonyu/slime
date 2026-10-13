@@ -19,7 +19,7 @@ import torch
 import yaml
 
 from slime.utils.http_utils import _wrap_ipv6, get
-from slime_plugins.prism.http import _request
+from slime_plugins.prism.http_client import _request
 from slime_plugins.prism.protocol import LOGPROB_SEMANTICS, REPLAY_FIELDS, _config, _copy_wire_data, _integer, _tensor
 
 

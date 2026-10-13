@@ -20,7 +20,7 @@ import torch
 
 from slime.utils.misc import load_function
 from slime.utils.types import Sample
-from slime_plugins.prism.http import _request
+from slime_plugins.prism.http_client import _request
 from slime_plugins.prism.protocol import (
     AUDIO,
     LAYOUT,

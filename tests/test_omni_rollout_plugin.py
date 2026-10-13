@@ -20,7 +20,7 @@ import torch
 
 from slime.utils.types import Sample
 from slime_plugins import omni_rollout as plugin
-from slime_plugins.prism import http as prism_http
+from slime_plugins.prism import http_client as prism_http
 from slime_plugins.prism import teacher as teacher_plugin
 
 NUM_GPUS = 0
