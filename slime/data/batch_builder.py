@@ -23,6 +23,7 @@ from slime.observability.rollout_data_utils import (
 from slime.utils.data import get_source
 from slime.utils.dp_schedule import build_dp_schedule
 from slime.utils.misc import Box, load_function
+from slime.utils.tensor_serialization import SerializedTensorPayload
 from slime.utils.types import Sample
 
 logger = logging.getLogger(__name__)
@@ -530,6 +531,8 @@ class BatchBuilder:
                 tensorize_rollout_data_for_training(value)
             if transport == "nixl":
                 result.append(Box(ray.put(value, _tensor_transport="nixl")))
+            elif transport == "object-store" and getattr(self.args, "rollout_tensor_buffer", False):
+                result.append(Box(ray.put(SerializedTensorPayload(value))))
             elif transport in {"straw", "object-store"}:
                 result.append(Box(ray.put(value)))
             else:

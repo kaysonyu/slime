@@ -14,6 +14,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from slime.ray.utils import add_default_ray_env_vars
 from slime.rollout.base_types import iter_samples
+from slime.rollout.gc_utils import configure_rollout_gc
 from slime.rollout.group_serialization import SerializedGroup
 from slime.rollout.sample_hooks import rollout_context
 from slime.utils.http_utils import get_rollout_num_engines, init_http_client
@@ -24,6 +25,7 @@ class GroupWorker:
     def __init__(self, args, concurrency):
         from slime.rollout.sglang_rollout import GenerateState
 
+        configure_rollout_gc(getattr(args, "rollout_gc_threshold", None))
         self.args = copy.copy(args)
         self.args.__dict__.pop("_omni_reward_pipeline", None)
         self.args.rollout_execution_workers = 0
