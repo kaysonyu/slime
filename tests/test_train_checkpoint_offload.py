@@ -320,3 +320,30 @@ def test_dataset_resume_rejects_changed_input_identity():
     source.dataset_identity = {"sha256": "new"}
     with pytest.raises(ValueError, match="Dataset contents"):
         source.load_state_dict({"dataset_identity": {"sha256": "old"}, "sample_offset": 5})
+
+
+@pytest.mark.parametrize("direct_iteration", [False, True])
+def test_legacy_checkpoint_upgrade_keeps_original_recovery_directory(tmp_path, direct_iteration):
+    from slime.data.checkpoint import resolve_checkpoint
+
+    original = tmp_path / "legacy"
+    iteration = original / "iter_0000003"
+    iteration.mkdir(parents=True)
+    tracker = original / "latest_checkpointed_iteration.txt"
+    tracker.write_text("3")
+    args = SimpleNamespace(
+        rollout_data_transport="object-store",
+        checkpoint_joint_commit=True,
+        load=str(iteration if direct_iteration else original),
+        save=str(original),
+        finetune=False,
+    )
+    with pytest.raises(ValueError, match="new --save directory"):
+        resolve_checkpoint(args)
+    args.save = str(tmp_path / "continued")
+    restored, _ = resolve_checkpoint(args)
+    assert restored.load == args.load
+    assert tracker.read_text() == "3"
+    assert not (original / "rollout/joint_checkpoint.json").exists()
+    args.save, args.checkpoint_joint_commit = str(original), False
+    resolve_checkpoint(args)

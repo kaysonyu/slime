@@ -96,6 +96,16 @@ def resolve_checkpoint_boundary(args) -> None:
         args.ckpt_step, args.load = step, str(root.parent)
         root = root.parent
     if not (root / "rollout" / "joint_checkpoint.json").exists():
+        legacy_root = root.parent if directory_step else root
+        if (
+            getattr(args, "checkpoint_joint_commit", False)
+            and getattr(args, "save", None)
+            and Path(args.save).resolve() == legacy_root
+        ):
+            raise ValueError(
+                "Use a new --save directory when enabling joint commits for a legacy checkpoint; "
+                "an interrupted first save must not invalidate its previous recovery boundary"
+            )
         return
     commits = {
         int(path.stem.removeprefix("training_commit_")): path

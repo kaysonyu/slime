@@ -546,12 +546,25 @@ The teacher request can still be reconstructed from those tensors. Pass
 `--no-omni-compact-replay` when a custom postprocessing hook needs the original
 wire trace. The native archive does not require that duplicate trace.
 
+Colocated Omni tensor updates carry a parameter-plan manifest and ordered bucket
+indices. Slime verifies the receiver's acknowledgement for each bucket; Omni
+keeps generation paused until the publication is complete. Upgrade both
+repositories together: this client requires publication acknowledgements from
+the Omni server and does not downgrade to an unchecked update. A failed update
+requires a fresh pause and a complete retry because the tensors are loaded in
+place. The manifest checks publication structure, not a full hash of tensor
+contents on every training step.
+
 Prism examples enable `--checkpoint-joint-commit`. A checkpoint is resumable only
 after its model and dataset cursor are committed together. An interrupted later
 save cannot supersede the last complete commit. Dataset state is required for
 ordinary resume; use Megatron's explicit `--finetune` mode to load a model and
 start a new dataset run. New cursor snapshots verify the dataset content hash
 and sampling configuration. The existing straw commit format is unchanged.
+When upgrading a legacy checkpoint without a joint commit, use a new output
+directory for `--save`. Reusing its old root is rejected: an interrupted first
+joint save must not invalidate the original legacy recovery boundary. Resuming
+an existing joint checkpoint may keep the same output root.
 
 `logs/phases.jsonl` records explicit driver phase boundaries using a monotonic
 clock; `config/resolved-args.json` records the final redacted arguments. The
