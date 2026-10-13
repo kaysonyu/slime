@@ -162,10 +162,15 @@ def test_archive_retains_source_prompt_id(args):
     assert record["data_id"] == "frozen-dataset-row-17"
 
 
-def test_generated_waveform_is_written_directly_to_its_archive(args, monkeypatch):
+@pytest.mark.parametrize("evaluation", [False, True])
+def test_generated_waveform_is_written_directly_to_its_archive(args, monkeypatch, evaluation):
     from slime_plugins import omni_rollout
 
     item = sample(args)
+    if evaluation:
+        item.metadata.update(
+            eval_dataset_name="quality", eval_prompt_index=4, eval_sample_index=0, eval_run_id="eval-1"
+        )
     args.omni_audio_path_function_path = "examples.prism.artifacts.audio_path"
     content = io.BytesIO()
     with wave.open(content, "wb") as output:
@@ -184,10 +189,12 @@ def test_generated_waveform_is_written_directly_to_its_archive(args, monkeypatch
 
     monkeypatch.setattr(os, "replace", replace)
     with rollout_context(7):
-        omni_rollout._write_audio(response, args, item, SimpleNamespace(sample_rate=24000), True)
+        omni_rollout._write_audio(
+            response, args, item, SimpleNamespace(sample_rate=24000), True, evaluation=evaluation
+        )
     generated = Path(item.metadata["omni_audio_path"])
     assert generated.read_bytes() == content.getvalue()
-    asyncio.run(artifacts.prepare_sample(args, item, rollout_id=7))
+    asyncio.run(artifacts.prepare_sample(args, item, rollout_id=7, evaluation=evaluation))
     record = json.loads(Path(item.metadata["prism_artifact"]["record_path"]).read_text())
     assert record["audio_path"] == str(generated) and record["reward_status"] == "pending"
     assert generated.stem == Path(record["record_path"]).stem

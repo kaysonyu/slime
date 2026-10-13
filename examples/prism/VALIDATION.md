@@ -1,5 +1,73 @@
 # Prism 训练验收与性能记录
 
+## 指标、归档与日志策略合入验收（2026-10-13）
+
+合入 `feat/prism-training-metrics` 与 Omni `fix/prism-log-noise`，保留之前已验证的
+GC threshold 70000、object-store tensor buffer、教师 score chunk 1024 和 resident 训推配置。
+Slime 的 GPU 验证源码为 `eba5c5ee`，Omni 为 `9e9e67f8`。全部使用原 `train.py`、
+Prism v0.4.0 iteration 100000、DP32/TP=PP=CP=1、B2048、每卡 20480 时间行预算，
+每个 rank 均为单 packed microbatch。GRPO 为 256 prompts × 8，仅使用四副本 ASR；
+MOPD 使用两个相同 v0.4.0 冻结教师副本，每个独立 trial 内不重复使用 prompt。
+本轮没有并行申请 64 张训练卡。
+
+**验收边界：GRPO 没有观察到速度退化；MOPD 仍有 2.7%–3.5% 的额外耗时，
+没有满足严格的零性能回退要求。** 结果不将小幅回退归为已经消除。
+
+| 同分配对照 | 原基线秒/步 | 全 feature 秒/步 | 步耗时变化 |
+| --- | ---: | ---: | ---: |
+| GRPO，16 rollout workers | 17.186 | 16.943 | -1.4% |
+| MOPD，16 workers，第一组 | 13.909 | 14.281 | +2.7% |
+| MOPD，16 workers，复测 | 13.951 | 14.438 | +3.5% |
+| MOPD，32 workers，复测 | 13.951 | 14.436 | +3.5% |
+
+保留 16 workers。增加到 32 没有收益，未作为默认配置。每组通常运行18次更新，
+前3次用于预热及算子采集，最后一次 checkpoint/额外评估单列；中间14个完整步骤
+包含生成、评分、归档、日志、数据发布、训练、清理和 tensor 权重同步，保留所有慢步骤。
+同节点配对以 driver 的相邻 generate 起点计时，不把不同实验重新初始化的空隙放入稳态。
+报告提供全部逐步数据和成对 block-bootstrap 区间；它只描述短跑波动。
+
+原样合入的 MOPD 平均60.417秒/步，其中归档汇总约13.989秒，暴露了共享盘上的
+重复目录遍历、路径解析和小文件操作。修订后使用每进程候选索引，复用已返回的
+样本记录；固定目录和同组公共文件有界缓存；准备与评分结果写入使用独立队列。
+不生成波形的 MOPD 保存完整的分片候选 JSON，prompt/引用信息保留在记录内。
+逐样本原子记录、失败/取消/未选中候选与取消时写入完成的语义均保留。
+
+GRPO 还需要省去 WAV 的中间移动。实验入口的 audio path hook 让客户端直接写入
+最终 group 目录；正常插件调用保留原路径行为。完整对照中，单候选归档准备从
+1.159秒降到0.010秒；ASR请求均值从0.899秒回到0.474秒。18步的整组日志从
+45,479,278字节降到877,255字节（含初始化，不能直接换算成训练收益）。
+HTTP成功访问与权重桶消息降噪，错误、警告、训练与发布摘要保留。
+
+RVQ/stop 诊断改为 detached segment reduction，不修改目标函数或梯度；64样本、
+365464个选中动作的H200微基准从2.142ms降至0.066ms，最大数值差5.96e-8。
+这项局部加速不能解释为整步32倍加速。MOPD剩余开销集中在rollout侧的归档与汇总，
+训练、内存清理和权重发布基本不变。
+
+GPU测试同时核验真实sample/group计数、MoPD prompt唯一性、全部rank单microbatch、
+有限非零梯度、每轮32副本版本、checkpoint模型/optimizer结构和step计数。
+完整归档清点在测速结束后进行；抽查训练WAV头并检查全部独立eval WAV，校验
+TensorBoard中的RVQ/stop、覆盖率、domain/teacher等实际输出。独立64样本ASR评估
+不调用教师，单列耗时约4秒，不作为语音质量收敛结论。另保留32步MOPD长确认结果。
+
+首个Job因旧版TensorBoard未读取CLI目录、写入容器相对路径而触发磁盘配额错误。
+该失败记录保留，未计入速度；重跑对全部32个rank执行了共享盘写入预检。
+`mopd32-optimized-001`含有带采样延迟的py-spy诊断，调用栈只用于定性定位；
+`grpo32-features-002`与文件审计有部分重叠，仅作诊断参考。回归结论使用单独列出的
+基线/最终候选，不混用这些诊断窗口。
+
+全部Job、Serving条目、失败尝试、源码pin和原始产物保存在：
+
+```text
+/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/metrics-integration-20261013-113000
+```
+
+入口为 `metrics-integration-report.html`，机器可读结果为 `analysis/comparison.json`、
+`results.csv`、`feature-validation.json`、`training-validation.json`、
+`publication-verification.json`、`checkpoint-verification.json`。
+最终远端/ editable 对齐收据与资源释放信息分别在 `source-delivery.json`、
+`resources-released.json`。实际复现按每个 `configs/*.json` 的源码和配置执行。
+
+
 ## 32 H200 全流程时间线与数据交接优化（2026-10-13）
 
 本轮继续使用 Prism v0.4.0 iteration 100000、DP32/TP1、B2048、每卡20480 token预算、

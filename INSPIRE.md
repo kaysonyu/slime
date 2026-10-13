@@ -70,3 +70,9 @@ Omni 诊断增强在远端 `perf/prism-timeline-20261013`。32 卡配对 Job
 并生成检查报告。运行资源已停止，Job/Serving条目、失败证据和所有逐次配置均保留。
 改动合入 `feat/prism-omni-colocate-rl` 与 `rl/moss-tts-prism`；最终源码与 editable
 同步收据见 `analysis/source-delivery.json`，实际GPU实验仍按各case原worktree/SHA复现。
+
+指标、实验归档与 HTTP 日志策略合入的固定验收产物位于
+`/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/metrics-integration-20261013-113000`。
+入口为 `metrics-integration-report.html`；每次源码/config pin、训练和归档核验、性能数据、
+源码交付收据保存在 `configs/`、`runs/`、`analysis/`。性能结论及限制见
+`examples/prism/VALIDATION.md`，不从镜像构建版本推断运行源码版本。

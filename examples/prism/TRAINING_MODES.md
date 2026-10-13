@@ -141,8 +141,10 @@ bash examples/prism/run-mopd.sh
 OPD 使用这些分数形成训练信号。这里 task reward 固定为 0 是预期行为，不能用
 GRPO 的总 reward 曲线判断 MOPD 是否在学习。显式 domain 没有映射时会报错。
 
-MOPD 默认每个 prompt 一条轨迹、`omni_return_audio: false`，因此保留 prompt、候选
-JSON、JSONL、教师 key/身份/checksum 和 checkpoint，但不产生生成 WAV。完整动作和
+MOPD 默认每个 prompt 一条轨迹、`omni_return_audio: false`。完整 prompt、参考 URI、候选
+JSON、JSONL、教师 key/身份/checksum 和 checkpoint 都保留；逐候选 JSON 按 worker 分片到
+本轮 `_records_<host>_<pid>/`，不为无波形样本建立试听目录。音频评估和请求波形的训练
+继续按 group 保存公共 prompt 文件、参考音频链接、各候选 WAV 与 JSON。完整动作和
 logprob 张量继续由原 debug dump 参数控制。需要合成波形用于听音时，可复制 mopd.yaml，
 将 `omni_return_audio` 改为 true，再用 `--custom-config-path` 指定该文件；这会增加
 vocoder 与音频保存开销，不会自动启用 GRPO 奖励。

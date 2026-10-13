@@ -93,10 +93,12 @@ running_round_0/
 所有训练与 rollout 节点仍须能读取配置、音频及记录路径。
 
 训练中产生的音频全部保留，包括最终未进入训练批次的候选，不自动清理或抽样。
-每个 group 保存 `prompt.json`、`prompt_text.txt`、可读取的本地参考音频链接，以及
-每个候选的 WAV 和 JSON。JSON 记录 domain、reward category、语言、生成配置、
+请求波形时，每个 group 保存 `prompt.json`、`prompt_text.txt`、可读取的本地参考音频链接，
+以及每个候选的 WAV 和 JSON。相同 group 的公共文件只准备一次；不同候选的文件独立保存。
+不请求波形的 MOPD 将完整候选 JSON 放在本轮的 `_records_<host>_<pid>/` 分片中，
+prompt、文本和参考 URI 仍保存在每条记录内。JSON 记录 domain、reward category、语言、生成配置、
 结束原因、原始与变换后的奖励分项、评分服务身份、模型版本和教师身份；实际动作
-tensor 继续交给原 debug dump。原始数据的 `metadata.id`、`sample_id` 或
+tensor 继续交给原 debug dump。原始数据的 `metadata.id`、`sample_id`、`prompt_id` 或
 `rollout_audio_id` 可用于可读目录名，未提供时使用 prompt 内容摘要。文件名经过
 路径处理并带有候选唯一标识，多个副本和特殊字符数据 ID 不会覆盖其他候选。
 
@@ -104,11 +106,18 @@ tensor 继续交给原 debug dump。原始数据的 `metadata.id`、`sample_id` 
 原输入标签另存为 `requested_reward_category`。MixRL 的分发仍由原输入类别决定。
 
 音频在评分前归档，每个候选先写入 pending 记录，评分完成或失败后原子更新。
+实验入口设置 `omni_audio_path_function_path`，让 Omni 客户端将 WAV 直接写入最终候选目录，
+避免共享盘上的中间移动；普通插件调用仍可使用原有音频根目录。
 服务故障仍抛出原异常，不转换成数字奖励。完成一个 rollout 后生成 JSONL 汇总，
 标记 `selected_for_training`；保留 `generation_rollout_id`、`training_rollout_id`
 和 `policy_version` 三个独立字段。若批次中途失败，已生成候选的单独 JSON/WAV
 仍可读取，JSONL 只代表已经完成汇总的批次。训练前后同一 rollout 编号的两次评估
 使用不同 `eval-id`，不会混合。
+
+每个进程追加本轮的 `*.candidates.jsonl` 索引，汇总通过索引保留未选中、失败和取消的候选，
+并复用返回样本已有的记录。旧版没有索引的归档仍可读取。文件准备和评分结果写入使用
+独立、有界的 I/O 队列；取消会等待已提交的写入完成。父目录解析、group 公共文件和相同
+样本集合的统计结果复用，避免共享盘上重复的目录遍历、路径解析和小文件操作。
 
 TensorBoard 默认启用（`USE_TENSORBOARD=0` 可关闭），使用仓库 requirements 中的
 `tensorboard`。日志目录通过实际 `--tensorboard-dir` 参数传给 learner 和 rollout
