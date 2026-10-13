@@ -480,11 +480,13 @@ def _summarize(args, rollout_id, samples, *, dataset=None, group_size=None):
         for value in sorted({str(row[field]) for row in selected_rows if row.get(field) is not None}):
             namespace = "teacher" if field == "teacher_key" else field
             subsets[f"{namespace}/{path_component(value)}"] = [r for r in selected_rows if str(r.get(field)) == value]
-    metrics = {
-        f"{prefix}/{name}/{key}": value
-        for name, subset in subsets.items()
-        for key, value in compute_metrics(subset, group_size or args.n_samples_per_prompt).items()
-    }
+    metrics = {}
+    populations = {}
+    for subset_name, subset in subsets.items():
+        identity = tuple(row["record_id"] for row in subset)
+        if identity not in populations:
+            populations[identity] = compute_metrics(subset, group_size or args.n_samples_per_prompt)
+        metrics.update({f"{prefix}/{subset_name}/{key}": value for key, value in populations[identity].items()})
     _write_json(destination / f"{name}.metrics.json", metrics)
     return metrics
 
