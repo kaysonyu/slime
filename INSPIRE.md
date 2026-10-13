@@ -54,3 +54,17 @@ QB 根目录中的 `colocate-005/fresh/checkpoint/` 与 `colocate-006/resume/che
 分别位于 `configs/`、`runs/`、`analysis/`。Job 记录全部保留；checkpoint 核验报告
 明确列出可读并通过的目录和缺失目录。每次实验使用的 Slime 与 Omni 源码 SHA 以
 该目录 manifest 为准，64 卡扩展按用户要求延期。
+
+2026-10-13 的 32 H200 全流程请求/CUDA 时间线保存在
+`/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/timeline-profile-20261013-070650`。
+入口为 `timeline-report.html`；成功 MoPD trace 关联 2048 条生成与 2048 条教师评分，
+包含 worker/router/frontend、AR、冻结教师、DP 数据发布、learner 和 tensor 权重同步。
+`progress.json` 与 `platform/` 记录状态，原始 trace 和失败采集记录均保留。
+
+GC 阈值与训练 tensor buffer 候选在远端 `perf/prism-training-buffer-20261013`，
+Omni 诊断增强在远端 `perf/prism-timeline-20261013`。CPU/真实 Ray 与独立 GPU 教师
+微测已完成；新 32 卡配对 Job 为 `slime-prism-32-gc-ab-1013`，计划 62 次更新，
+提交时等待四个完整节点，不能把微测收益当成端到端加速。等待期间评分资源已停止，
+`scripts/watch-campaign-services.py` 在分配启动后恢复并核验冻结服务，结束后停止服务
+并生成检查报告；Job/Serving 条目保留。当前正式代码与 editable 版本继续沿用上述
+已验收版本，候选按每个 case 的 worktree/SHA 运行。
