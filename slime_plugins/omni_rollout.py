@@ -25,6 +25,7 @@ from typing import Any
 import torch
 
 from slime.utils.http_utils import _wrap_ipv6, get, post
+from slime.utils.misc import load_function
 from slime.utils.types import Sample
 
 # mossLite.models.MossTTSPrism.run_policy: PrismItemKind / PrismAudioRole.
@@ -497,7 +498,16 @@ async def _request(args, url, payload, *, headers=None):
         raise
 
 
-def _write_audio(response, args, sample, config, required):
+@lru_cache(maxsize=4096)
+def _audio_directory(path, allowed_root=None):
+    directory = Path(path).resolve()
+    if allowed_root is not None and not directory.is_relative_to(allowed_root):
+        raise ValueError("Custom audio output must belong to omni_audio_dir")
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _write_audio(response, args, sample, config, required, *, evaluation=False):
     audio = response.get("audio")
     sample.metadata["omni_audio_seconds"] = None
     if sample.response_length == 0:
@@ -516,9 +526,15 @@ def _write_audio(response, args, sample, config, required):
         raise ValueError("omni_audio_dir is required when returning waveform")
     if not isinstance(audio, dict) or audio.get("format") != "wav" or audio.get("sample_rate") != config.sample_rate:
         raise ValueError("Omni must return matching WAV audio")
-    directory = Path(root).resolve()
-    directory.mkdir(parents=True, exist_ok=True)
-    output = directory / f"sample-{sample.index}-{uuid.uuid4().hex}.wav"
+    directory = _audio_directory(os.path.abspath(root))
+    path_function = getattr(args, "omni_audio_path_function_path", None)
+    if path_function:
+        output = Path(load_function(path_function)(args, sample, evaluation=evaluation))
+        if not output.is_absolute():
+            output = directory / output
+        output = _audio_directory(str(output.parent), directory) / output.name
+    else:
+        output = directory / f"sample-{sample.index}-{uuid.uuid4().hex}.wav"
     if audio.get("data") is not None:
         limit = int(getattr(args, "omni_max_audio_bytes", 64 * 1024 * 1024))
         if len(audio["data"]) > (limit + 2) // 3 * 4:
@@ -567,7 +583,7 @@ async def generate(args, sample, sampling_params, *, evaluation=False):
             "omni_expected_weight_version", sample.metadata.get("policy_version")
         ),
     )
-    _write_audio(response, args, sample, config, payload["return_audio"])
+    _write_audio(response, args, sample, config, payload["return_audio"], evaluation=evaluation)
     return sample
 
 

@@ -162,6 +162,38 @@ def test_archive_retains_source_prompt_id(args):
     assert record["data_id"] == "frozen-dataset-row-17"
 
 
+def test_generated_waveform_is_written_directly_to_its_archive(args, monkeypatch):
+    from slime_plugins import omni_rollout
+
+    item = sample(args)
+    args.omni_audio_path_function_path = "examples.prism.artifacts.audio_path"
+    content = io.BytesIO()
+    with wave.open(content, "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(24000)
+        output.writeframes(b"\0\0" * 240)
+    response = {
+        "audio": {"format": "wav", "sample_rate": 24000, "data": base64.b64encode(content.getvalue()).decode()}
+    }
+    original = os.replace
+
+    def replace(source, target):
+        assert Path(source).suffix != ".wav", "A generated archive waveform must not be moved again"
+        return original(source, target)
+
+    monkeypatch.setattr(os, "replace", replace)
+    with rollout_context(7):
+        omni_rollout._write_audio(response, args, item, SimpleNamespace(sample_rate=24000), True)
+    generated = Path(item.metadata["omni_audio_path"])
+    assert generated.read_bytes() == content.getvalue()
+    asyncio.run(artifacts.prepare_sample(args, item, rollout_id=7))
+    record = json.loads(Path(item.metadata["prism_artifact"]["record_path"]).read_text())
+    assert record["audio_path"] == str(generated) and record["reward_status"] == "pending"
+    assert generated.stem == Path(record["record_path"]).stem
+    assert "prism_audio_record" not in item.metadata
+
+
 def test_cached_group_rejects_changed_reference_binding(args, tmp_path):
     first, second = sample(args, 0), sample(args, 1)
     asyncio.run(archive_and_score(args, first))

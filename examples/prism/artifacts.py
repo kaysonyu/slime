@@ -25,6 +25,8 @@ from pathlib import Path
 
 from examples.prism.experiment import path_component
 
+from slime.rollout.sample_hooks import get_current_rollout_id
+
 logger = logging.getLogger(__name__)
 REWARD_HOOK = "examples.prism.artifacts.reward"
 INDEX_LOCK = threading.Lock()
@@ -144,7 +146,7 @@ def _record(sample, *, reward_value=None, reward_status="pending", error=None):
     }
 
 
-def _prepare_sample(args, sample, rollout_id, evaluation):
+def _archive_location(args, sample, rollout_id, evaluation):
     if rollout_id is None:
         raise ValueError("Prism archive hook requires the rollout context")
     metadata = sample.metadata
@@ -161,7 +163,6 @@ def _prepare_sample(args, sample, rollout_id, evaluation):
         fingerprint,
     )
     split = "eval" if evaluation else "train"
-    audio_root = _resolved_directory(os.path.abspath(args.omni_audio_dir))
     directory = audio_archive_root(args) / split / f"rollout_{rollout_id:07d}"
     dataset = metadata.get("eval_dataset_name") if evaluation else str(args.prompt_data)
     if evaluation:
@@ -184,17 +185,65 @@ def _prepare_sample(args, sample, rollout_id, evaluation):
         if audio_requested
         else f"_records_{socket.gethostname()}_{os.getpid()}"
     )
-    _make_directory(str(directory))
     record_id = uuid.uuid4().hex
     stem = f"gen_audio_s{path_component(candidate_index)}_{record_id}"
+    artifact = {
+        "record_id": record_id,
+        "record_path": str(directory / f"{stem}.json"),
+        "run_dir": args.prism_artifact_dir,
+        "generation_rollout_id": rollout_id,
+        "split": split,
+        "dataset": dataset,
+        "data_id": data_id,
+        "prompt_index": group_index,
+        "candidate_index": candidate_index,
+        "evaluation_id": metadata.get("eval_run_id") if evaluation else None,
+    }
+    return directory, round_directory, fingerprint, audio_requested, artifact
+
+
+def audio_path(args, sample, *, evaluation=False):
+    directory, _, _, _, artifact = _archive_location(args, sample, get_current_rollout_id(), evaluation)
+    _make_directory(str(directory))
+    sample.metadata["prism_audio_record"] = artifact
+    return Path(artifact["record_path"]).with_suffix(".wav")
+
+
+def _prepare_sample(args, sample, rollout_id, evaluation):
+    directory, round_directory, fingerprint, audio_requested, artifact = _archive_location(
+        args, sample, rollout_id, evaluation
+    )
+    metadata = sample.metadata
+    prompt = metadata.get("omni_prompt") or {}
+    audio_root = _resolved_directory(os.path.abspath(args.omni_audio_dir))
+    _make_directory(str(directory))
+    direct_record = metadata.pop("prism_audio_record", None)
     source = metadata.get("omni_audio_path")
     if source:
         source = _resolved_leaf(source)
         if not source.is_relative_to(audio_root):
             raise ValueError("Generated audio must belong to omni_audio_dir before archival")
-        target = directory / f"{stem}.wav"
-        os.replace(source, target)
-        metadata["omni_audio_path"] = str(target)
+        if direct_record is not None:
+            expected = Path(direct_record["record_path"]).with_suffix(".wav")
+            if source != expected or any(
+                direct_record[key] != artifact[key]
+                for key in (
+                    "run_dir",
+                    "generation_rollout_id",
+                    "split",
+                    "dataset",
+                    "data_id",
+                    "prompt_index",
+                    "candidate_index",
+                    "evaluation_id",
+                )
+            ):
+                raise ValueError("Generated audio does not match its archive context")
+            artifact = direct_record
+        else:
+            target = Path(artifact["record_path"]).with_suffix(".wav")
+            os.replace(source, target)
+            metadata["omni_audio_path"] = str(target)
     if audio_requested:
         with GROUP_LOCK:
             group = _archive_group(str(directory))
@@ -226,19 +275,7 @@ def _prepare_sample(args, sample, rollout_id, evaluation):
     reward_path = sample.custom_rm_path or args.prism_reward_function_path
     if reward_path == REWARD_HOOK:
         reward_path = metadata.get("prism_artifact", {}).get("reward_function_path", args.prism_reward_function_path)
-    metadata["prism_artifact"] = {
-        "record_id": record_id,
-        "record_path": str(directory / f"{stem}.json"),
-        "run_dir": args.prism_artifact_dir,
-        "generation_rollout_id": rollout_id,
-        "split": split,
-        "dataset": dataset,
-        "data_id": data_id,
-        "prompt_index": group_index,
-        "candidate_index": candidate_index,
-        "evaluation_id": metadata.get("eval_run_id") if evaluation else None,
-        "reward_function_path": reward_path,
-    }
+    metadata["prism_artifact"] = {**artifact, "reward_function_path": reward_path}
     # Per-dataset rewards retain precedence. The wrapper owns persistence only,
     # and invokes the original function with its original scalar/batch shape.
     sample.custom_rm_path = REWARD_HOOK

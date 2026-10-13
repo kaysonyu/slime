@@ -107,6 +107,7 @@ def prepare_run(run_dir, command, *, identity, dry_run=False):
             *[p for p in hooks if p != f"{ARTIFACTS}.prepare_sample"],
         ],
     )
+    config.setdefault("omni_audio_path_function_path", f"{ARTIFACTS}.audio_path")
     for kind in ("rollout", "eval_rollout"):
         key = f"custom_{kind}_log_function_path"
         original = effective.get(key)

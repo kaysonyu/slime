@@ -17,6 +17,11 @@ def set_current_rollout_id(rollout_id: int | None) -> None:
     _current_rollout_id = rollout_id
 
 
+def get_current_rollout_id() -> int | None:
+    rollout_id = _task_rollout_id.get()
+    return rollout_id if rollout_id is not None else _current_rollout_id
+
+
 @contextmanager
 def rollout_context(rollout_id):
     """Keep concurrent worker requests' hook contexts independent."""
@@ -55,8 +60,7 @@ async def apply_rollout_sample_hooks(args, value, **kwargs):
     paths = getattr(args, "rollout_sample_hook_path", None) or []
     if not paths:
         return value
-    rollout_id = _task_rollout_id.get()
-    kwargs.setdefault("rollout_id", rollout_id if rollout_id is not None else _current_rollout_id)
+    kwargs.setdefault("rollout_id", get_current_rollout_id())
     if isinstance(value, Sample):
         return await _apply_to_sample(args, value, paths, **kwargs)
     if isinstance(value, list):
