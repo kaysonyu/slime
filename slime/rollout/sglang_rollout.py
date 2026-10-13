@@ -136,6 +136,7 @@ class GenerateState(metaclass=SingletonMeta):
     def reset(self) -> None:
         self.remaining_batch_size = 0
         self.pendings = set()
+        self.completed = asyncio.Queue()
         self.aborted = False
         self.cancellable_tasks = set()
         self.active_server_generations = 0
@@ -143,20 +144,30 @@ class GenerateState(metaclass=SingletonMeta):
     def submit_generate_tasks(self, samples: list[list[Sample]]) -> None:
         for group in samples:
             if self.executor is not None:
-                self.pendings.add(asyncio.create_task(self.executor.generate(group, self.sampling_params.copy())))
-                continue
-            self.pendings.add(
-                asyncio.create_task(
-                    # submit a group of samples as a single task.
-                    generate_and_rm_group(
-                        self.args,
-                        group,
-                        sampling_params=self.sampling_params.copy(),
-                        evaluation=False,
-                    )
+                coroutine = self.executor.generate(group, self.sampling_params.copy())
+            else:
+                # Submit a group of samples as a single task.
+                coroutine = generate_and_rm_group(
+                    self.args,
+                    group,
+                    sampling_params=self.sampling_params.copy(),
+                    evaluation=False,
                 )
-            )
+            task = asyncio.create_task(coroutine)
+            self.pendings.add(task)
+            task.add_done_callback(self.completed.put_nowait)
         self.remaining_batch_size += len(samples)
+
+    async def next_completed(self):
+        # Rebuilding asyncio.wait's callbacks for every completed group scans
+        # the entire batch repeatedly. Each task instead notifies us once.
+        if not self.pendings:
+            raise ValueError("No pending rollout groups")
+        done = {await self.completed.get()}
+        while not self.completed.empty():
+            done.add(self.completed.get_nowait())
+        self.pendings.difference_update(done)
+        return done
 
 
 async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, Any]) -> Sample:
@@ -559,7 +570,7 @@ async def _generate_rollout_async(
             state.submit_generate_tasks(samples)
 
         # wait for the generation to finish
-        done, state.pendings = await asyncio.wait(state.pendings, return_when=asyncio.FIRST_COMPLETED)
+        done = await state.next_completed()
         for task in done:
             group: list[Sample] = task.result()
 
