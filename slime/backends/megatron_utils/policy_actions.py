@@ -7,6 +7,7 @@ weights real actions for the objective; it never changes response_lengths.
 import math
 from argparse import Namespace
 from dataclasses import dataclass
+from functools import cached_property
 from urllib.parse import quote
 
 import torch
@@ -82,19 +83,34 @@ class PolicyActionView:
     sample_masks: list[torch.Tensor]
     code_counts: list[int]
 
+    @cached_property
+    def metric_segment_lengths(self) -> torch.Tensor:
+        return torch.tensor(
+            [
+                length
+                for count, weight in zip(self.code_counts, self.weights, strict=True)
+                for length in (count, weight.numel() - count)
+            ],
+            dtype=torch.int64,
+            device=self.weights[0].device,
+        )
+
+    @cached_property
+    def metric_sample_masks(self) -> torch.Tensor:
+        return torch.stack(self.sample_masks)
+
     def split_metrics(self, values: torch.Tensor, name: str) -> dict[str, torch.Tensor]:
         """Detached sums of per-sample RVQ/stop means, before DP reduction.
 
         The reporter divides diagnostics by active sample counts; pg_loss keeps
         the global-batch denominator so its two components reconstruct the loss.
         """
-        chunks = values.detach().split([weight.numel() for weight in self.weights])
-        totals = {kind: values.new_zeros(()) for kind in ("rvq", "stop")}
-        for chunk, count, enabled in zip(chunks, self.code_counts, self.sample_masks, strict=True):
-            for kind, part in (("rvq", chunk[:count]), ("stop", chunk[count:])):
-                if part.numel():
-                    totals[kind] = totals[kind] + part.mean() * enabled
-        return {f"{kind}/{name}": total for kind, total in totals.items()}
+        lengths = self.metric_segment_lengths
+        # Segment lengths come from this view; unsafe avoids a device validation sync.
+        means = torch.segment_reduce(values.detach(), "mean", lengths=lengths, unsafe=True)
+        means = torch.where(lengths > 0, means, 0).reshape(-1, 2)
+        totals = (means * self.metric_sample_masks[:, None]).sum(dim=0)
+        return {f"{kind}/{name}": total for kind, total in zip(("rvq", "stop"), totals, strict=True)}
 
     def reduce(self, values: torch.Tensor) -> torch.Tensor:
         """Sum sample means: mean(RVQ) + stop_weight * mean(stop)."""

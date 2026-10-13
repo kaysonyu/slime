@@ -356,16 +356,22 @@ def _summarize(args, rollout_id, samples, *, dataset=None, group_size=None):
             raise ValueError("Eval summary must belong to one evaluation invocation")
         evaluation_id = evaluation_ids.pop()
         source /= path_component(evaluation_id)
+    # Selected samples already carry the final scores; only unselected records
+    # need a disk read to retain pending, failed, or filtered candidates.
+    selected_paths = set()
+    for sample in samples:
+        if "prism_artifact" not in sample.metadata:
+            raise ValueError("Prism artifact logging requires prepare_sample on every candidate")
+        selected_paths.add(sample.metadata["prism_artifact"]["record_path"])
     records = {
         record["record_id"]: record
         for path in source.glob("*/gen_audio_s*.json")
+        if str(path) not in selected_paths
         for record in [json.loads(path.read_text())]
         if record["run_dir"] == args.prism_artifact_dir
     }
     selected = set()
     for sample in samples:
-        if "prism_artifact" not in sample.metadata:
-            raise ValueError("Prism artifact logging requires prepare_sample on every candidate")
         record = _record(sample, reward_value=sample.reward, reward_status="success")
         records[record["record_id"]] = record
         selected.add(record["record_id"])

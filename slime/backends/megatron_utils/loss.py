@@ -1335,11 +1335,10 @@ def policy_loss_function(
         action_metrics = action_view.split_metrics(pg_loss, "pg_loss")
         action_metrics.update(action_view.split_metrics(pg_clipfrac, "clipfrac"))
         action_metrics.update(action_view.split_metrics(ppo_kl, "ppo_kl_estimate"))
-        action_metrics["rvq/active_ratio"] = sum(
-            enabled * bool(count)
-            for enabled, count in zip(action_view.sample_masks, action_view.code_counts, strict=True)
-        )
-        action_metrics["stop/active_ratio"] = torch.stack(action_view.sample_masks).sum()
+        action_metrics["rvq/active_ratio"] = (
+            action_view.metric_sample_masks * (action_view.metric_segment_lengths[::2] > 0)
+        ).sum()
+        action_metrics["stop/active_ratio"] = action_view.metric_sample_masks.sum()
     pg_loss = pg_loss_reducer(pg_loss)
     # The text path may replace its reducer after rejection sampling. Keep
     # that existing behavior; action diagnostics use their independent mean.
