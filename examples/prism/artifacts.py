@@ -60,11 +60,13 @@ def _record(sample, *, reward_value=None, reward_status="pending", error=None):
         "text": prompt.get("transcript_target", sample.prompt),
         "language": prompt.get("language", metadata.get("language")),
         "domain": metadata.get("domain"),
+        "teacher_key": metadata.get("omni_teacher_key"),
         "reward_category": outcome.get("category") or metadata.get("reward_category"),
         "requested_reward_category": metadata.get("reward_category"),
         "generation_status": sample.status.value,
         "finish_reason": metadata.get("omni_finish_reason"),
         "frames": metadata.get("omni_frames"),
+        "audio_seconds": metadata.get("omni_audio_seconds"),
         "audio_path": metadata.get("omni_audio_path"),
         "policy_version": metadata.get("omni_policy_version", metadata.get("policy_version")),
         "model_identity": trace.get("model_identity"),
@@ -238,19 +240,39 @@ def compute_metrics(records, group_size):
         metrics[key] = sum(predicate(record) for record in records) / len(records)
     scored = [record for record in records if record["reward_status"] == "success"]
     metrics["scored_count"] = len(scored)
+    metrics["scored_ratio"] = len(scored) / len(records)
+    for field in ("frames", "audio_seconds"):
+        values = [record[field] for record in records if _number(record.get(field))]
+        metrics[f"{field}/coverage_ratio"] = len(values) / len(records)
+        if values:
+            metrics.update({f"{field}/{key}": value for key, value in _statistics(values).items()})
+            metrics[f"{field}/p50"] = _percentile(values, 0.5)
+            metrics[f"{field}/p95"] = _percentile(values, 0.95)
     values = [r["reward"] for r in scored if _number(r["reward"])]
     if values:
         metrics.update({f"reward/{key}": value for key, value in _statistics(values).items()})
     components = defaultdict(list)
     groups = defaultdict(list)
     for record in scored:
-        for name, component in (record.get("reward_details") or {}).get("components", {}).items():
-            components[name].append(component)
         groups[(record["dataset"], record["prompt_index"])].append(record)
+    # Retain completed components even when a different service/aggregation failed.
+    for record in records:
+        outcome = record.get("reward_details") or {}
+        returned = outcome.get("components", {})
+        for name, component in returned.items():
+            components[name].append(component)
+        for name in set(outcome.get("errors", {})) - returned.keys():
+            if name in {"wer", "sim", "judge_clap"}:
+                components[name].append({"status": "error"})
     for name, items in components.items():
         prefix = f"component/{path_component(name)}"
         metrics[f"{prefix}/active_count"] = len(items)
         metrics[f"{prefix}/active_ratio"] = len(items) / len(records)
+        valid = [item for item in items if item.get("status") == "success" and _number(item.get("raw"))]
+        metrics[f"{prefix}/valid_count"] = len(valid)
+        metrics[f"{prefix}/coverage_ratio"] = len(valid) / len(records)
+        metrics[f"{prefix}/valid_ratio"] = len(valid) / len(items)
+        metrics[f"{prefix}/error_ratio"] = sum(item.get("status") == "error" for item in items) / len(items)
         metrics[f"{prefix}/invalid_audio_ratio"] = sum(item.get("status") == "invalid_audio" for item in items) / len(
             items
         )
@@ -258,9 +280,43 @@ def compute_metrics(records, group_size):
             values = [item[field] for item in items if _number(item.get(field))]
             if values:
                 metrics.update({f"{prefix}/{field}/{key}": value for key, value in _statistics(values).items()})
+        if name == "wer":
+            # Never pool character and word denominators, or different languages.
+            languages = defaultdict(list)
+            for item in valid:
+                detail = item.get("details") or {}
+                errors, tokens = detail.get("errors"), detail.get("reference_tokens")
+                language = detail.get("language")
+                if language and _number(errors) and errors >= 0 and _number(tokens) and tokens > 0:
+                    languages[str(language)].append((errors, tokens))
+            for language, counts in languages.items():
+                key = f"{prefix}/language/{path_component(language)}"
+                errors = sum(value[0] for value in counts)
+                tokens = sum(value[1] for value in counts)
+                metrics.update(
+                    {
+                        f"{key}/errors": errors,
+                        f"{key}/reference_tokens": tokens,
+                        f"{key}/corpus_error_rate": errors / tokens,
+                        f"{key}/scored_count": len(counts),
+                    }
+                )
+        elif name == "judge_clap":
+            attributes = defaultdict(list)
+            for item in valid:
+                detail = item.get("details") or {}
+                for query, score in zip(detail.get("queries", []), detail.get("attribute_scores", []), strict=True):
+                    if isinstance(query, str) and _number(score):
+                        attributes[query.partition(":")[0]].append(score)
+            for attribute, scores in attributes.items():
+                key = f"{prefix}/attribute/{path_component(attribute)}"
+                metrics[f"{key}/mean"] = statistics.fmean(scores)
+                metrics[f"{key}/coverage_ratio"] = len(scores) / len(records)
     complete = [group for group in groups.values() if len(group) == group_size]
     metrics["complete_group_count"] = len(complete)
     metrics["incomplete_group_count"] = len(groups) - len(complete)
+    if group_size == 1:
+        return metrics
     for name in ("total", *sorted(components)):
         values_by_group = []
         for group in complete:
@@ -337,9 +393,10 @@ def _summarize(args, rollout_id, samples, *, dataset=None, group_size=None):
             not_selected=[r for r in rows if not r["selected_for_training"]],
         )
     selected_rows = rows if evaluation else subsets["selected"]
-    for field in ("reward_category", "language", "domain"):
+    for field in ("reward_category", "language", "domain", "teacher_key"):
         for value in sorted({str(row[field]) for row in selected_rows if row.get(field) is not None}):
-            subsets[f"{field}/{path_component(value)}"] = [r for r in selected_rows if str(r.get(field)) == value]
+            namespace = "teacher" if field == "teacher_key" else field
+            subsets[f"{namespace}/{path_component(value)}"] = [r for r in selected_rows if str(r.get(field)) == value]
     metrics = {
         f"{prefix}/{name}/{key}": value
         for name, subset in subsets.items()

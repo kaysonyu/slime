@@ -212,6 +212,81 @@ def test_component_metrics_ignore_inactive_components_and_incomplete_groups(args
     assert "group_reward/sim/std_mean" not in metrics
 
 
+def test_corpus_error_rate_and_coverage_keep_languages_and_failures_separate():
+    def row(index, language, errors, tokens, status="success"):
+        return dict(
+            dataset="eval",
+            prompt_index=index,
+            frames=10,
+            audio_seconds=1.0,
+            generation_status="completed",
+            reward_status=status,
+            reward=0.5,
+            reward_details={
+                "components": {
+                    "wer": dict(
+                        raw=errors / tokens,
+                        transformed=0.5,
+                        status="success",
+                        details=dict(language=language, errors=errors, reference_tokens=tokens),
+                    )
+                }
+            },
+        )
+
+    rows = [row(0, "en", 1, 2), row(1, "en", 1, 8), row(2, "zh", 3, 3), row(3, "en", 0, 4, "error")]
+    # A completed WER component still counts when another component or the aggregate failed.
+    rows.append(
+        dict(
+            dataset="eval",
+            prompt_index=4,
+            frames=0,
+            audio_seconds=None,
+            generation_status="completed",
+            reward_status="success",
+            reward=0,
+            reward_details={"components": {"wer": dict(raw=None, transformed=0, status="invalid_audio")}},
+        )
+    )
+    metrics = artifacts.compute_metrics(rows, group_size=1)
+    assert metrics["component/wer/language/en/corpus_error_rate"] == pytest.approx(2 / 14)
+    assert metrics["component/wer/language/zh/corpus_error_rate"] == 1
+    assert metrics["component/wer/coverage_ratio"] == 0.8
+    assert metrics["scored_ratio"] == 0.8
+    assert metrics["audio_seconds/coverage_ratio"] == 0.8
+    assert metrics["zero_frame_ratio"] == 0.2
+    assert not any(key.startswith("group_reward/") for key in metrics)
+
+
+def test_quality_metrics_keep_attribute_coverage_and_service_errors():
+    row = dict(
+        dataset="eval",
+        prompt_index=0,
+        frames=10,
+        generation_status="completed",
+        reward_status="error",
+        reward=None,
+        reward_details={
+            "components": {
+                "judge_clap": dict(
+                    raw=0.5,
+                    transformed=0.5,
+                    status="success",
+                    details=dict(queries=["Speed: slow", "Gender: female"], attribute_scores=[0.2, 0.8]),
+                )
+            },
+            "errors": {"wer": "TimeoutError"},
+        },
+    )
+    metrics = artifacts.compute_metrics([row], group_size=1)
+    assert metrics["component/judge_clap/attribute/Speed/mean"] == 0.2
+    assert metrics["component/judge_clap/attribute/Gender/mean"] == 0.8
+    assert metrics["component/judge_clap/coverage_ratio"] == 1
+    assert metrics["component/wer/coverage_ratio"] == 0
+    assert metrics["component/wer/error_ratio"] == 1
+    assert "component/wer/raw/mean" not in metrics
+
+
 @pytest.mark.parametrize("category", [None, "base"])
 def test_fixed_reward_archives_the_executed_category(args, monkeypatch, category):
     from test_tts_reward_plugin import Service, config

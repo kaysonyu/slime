@@ -45,15 +45,24 @@ _SGLANG_DECODE_PERF_FIELDS = (
 
 def compute_metrics_from_samples(args, samples):
     response_lengths = [sample.effective_response_length for sample in samples]
+    prism = getattr(args, "model_name", None) == "moss_tts_prism"
 
     log_dict = {}
     log_dict |= dict_add_prefix(compute_statistics(response_lengths), "response_len/")
-    log_dict |= _compute_zero_std_metrics(args, samples)
+    if not (prism and getattr(args, "use_opd", False)):
+        log_dict |= _compute_zero_std_metrics(args, samples)
     log_dict |= _compute_spec_metrics(args, samples)
-    log_dict |= _compute_prefix_cache_metrics(samples)
+    if not prism:
+        log_dict |= _compute_prefix_cache_metrics(samples)
     log_dict |= _compute_reward_cat_metrics(args, samples)
     log_dict |= _compute_top_p_kept_vocab_metrics(samples)
-    log_dict["repetition_frac"] = np.mean([int(has_repetition(s.response)) for s in samples]).item()
+    if prism:
+        log_dict |= dict_add_prefix(
+            compute_statistics([sample.response_length for sample in samples]), "audio_frames/"
+        )
+        log_dict["zero_frame_ratio"] = np.mean([s.response_length == 0 for s in samples]).item()
+    else:
+        log_dict["repetition_frac"] = np.mean([int(has_repetition(s.response)) for s in samples]).item()
     log_dict["truncated_ratio"] = np.mean([int(s.status == Sample.Status.TRUNCATED) for s in samples]).item()
     return log_dict
 
@@ -87,6 +96,17 @@ def compute_perf_metrics_from_samples(args, samples, rollout_time):
 
     token_perf([sample.response_length for sample in samples], non_generation_time, key="")
     token_perf([sample.effective_response_length for sample in samples], non_generation_time, key="effective_")
+    if getattr(args, "model_name", None) == "moss_tts_prism":
+        if "tokens_per_gpu_per_sec" in log_dict:
+            log_dict["rollout_audio_frames_per_gpu_sec"] = log_dict["tokens_per_gpu_per_sec"]
+        if rollout_time > 0:
+            log_dict["rollout_samples_per_sec"] = len(samples) / rollout_time
+            durations = [(sample.metadata or {}).get("omni_audio_seconds") for sample in samples]
+            if all(
+                isinstance(value, (int, float)) and not isinstance(value, bool) and np.isfinite(value) and value >= 0
+                for value in durations
+            ):
+                log_dict["rollout_audio_seconds_per_sec"] = sum(durations) / rollout_time
     log_dict |= _compute_sglang_request_perf_metrics(samples)
 
     return log_dict
@@ -153,8 +173,14 @@ def _compute_zero_std_metrics(args, all_samples: list[Sample]):
         rewards = [sample.get_reward_value(args) for sample in samples]
         return len(rewards) == 0 or all(rewards[0] == r for r in rewards)
 
-    all_sample_groups = group_by(all_samples, lambda s: s.group_index)
-    interesting_sample_groups = [g for g in all_sample_groups.values() if _is_zero_std(g)]
+    prism = getattr(args, "model_name", None) == "moss_tts_prism"
+    all_sample_groups = group_by(
+        all_samples,
+        lambda s: (s.metadata or {}).get("eval_prompt_index", s.group_index) if prism else s.group_index,
+    )
+    interesting_sample_groups = [
+        g for g in all_sample_groups.values() if (not prism or len(g) > 1) and _is_zero_std(g)
+    ]
 
     interesting_rewards = [str(round(g[0].get_reward_value(args), 1)) for g in interesting_sample_groups]
 
@@ -239,7 +265,7 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any] 
         if "truncated" in data[key]:
             truncated = data[key]["truncated"]
             log_dict[f"eval/{key}-truncated_ratio"] = sum(truncated) / len(truncated)
-        if args.log_passrate:
+        if args.log_passrate and getattr(args, "model_name", None) != "moss_tts_prism":
             log_dict |= dict_add_prefix(
                 compute_pass_rate(
                     flat_rewards=rewards,

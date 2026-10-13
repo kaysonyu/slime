@@ -493,10 +493,12 @@ async def _request(args, url, payload, *, headers=None):
 
 def _write_audio(response, args, sample, config, required):
     audio = response.get("audio")
+    sample.metadata["omni_audio_seconds"] = None
     if sample.response_length == 0:
         if audio is not None:
             raise ValueError("A zero-frame sampled stop must not return waveform")
         sample.metadata["omni_audio_path"] = None
+        sample.metadata["omni_audio_seconds"] = 0.0
         return
     if not required:
         if audio is not None:
@@ -533,8 +535,10 @@ def _write_audio(response, args, sample, config, required):
         expected_bytes = source.getnframes() * source.getnchannels() * source.getsampwidth()
         if len(source.readframes(source.getnframes())) != expected_bytes:
             raise ValueError("Omni WAV payload is truncated")
+        duration = source.getnframes() / source.getframerate()
     output.write_bytes(data)
     sample.metadata["omni_audio_path"] = str(output)
+    sample.metadata["omni_audio_seconds"] = duration
 
 
 async def generate(args, sample, sampling_params, *, evaluation=False):

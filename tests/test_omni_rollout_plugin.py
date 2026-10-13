@@ -800,5 +800,6 @@ def test_generate_uses_router_and_preserves_sample_identity(monkeypatch, tmp_pat
     assert calls[0][0] == "http://python-router/prism/generate"
     assert item.index == 7 and item.group_index == 2
     assert item.metadata["omni_audio_path"].endswith(".wav")
+    assert item.metadata["omni_audio_seconds"] == pytest.approx(32 / 24000)
     assert item.metadata["omni_prompt"]["transcript_target"] == "你好"
     assert plugin.generate.abort_mode == "request"
