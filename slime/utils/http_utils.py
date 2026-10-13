@@ -264,7 +264,7 @@ def init_http_client(args, *, concurrency: int | None = None):
         )
 
     # Optionally initialize distributed POST via Ray without changing interfaces
-    if args.use_distributed_post:
+    if args.use_distributed_post and not getattr(args, "rollout_execution_workers", 0):
         _init_ray_distributed_post(args)
         _distributed_post_enabled = True
 

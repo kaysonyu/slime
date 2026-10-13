@@ -1472,6 +1472,16 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
         def add_network_arguments(parser):
             parser.add_argument("--http-proxy", type=str, default=None)
             parser.add_argument("--use-distributed-post", action="store_true", default=False)
+            parser.add_argument(
+                "--rollout-execution-workers",
+                type=int,
+                default=0,
+                help=(
+                    "CPU processes for complete prompt-group generation, sample hooks and rewards in synchronous "
+                    "sglang_rollout. Zero executes locally. Generation concurrency is divided across workers; "
+                    "reward-service concurrency settings apply separately to each worker."
+                ),
+            )
             return parser
 
         def add_reward_model_arguments(parser):
@@ -2099,6 +2109,9 @@ def slime_validate_args(args):
             continue
         if value <= 0:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
+
+    if getattr(args, "rollout_execution_workers", 0) < 0:
+        raise ValueError("--rollout-execution-workers must be nonnegative")
 
     if args.rollout_data_transport == "straw":
         from slime.data.transport import resolve_rollout_data_dir

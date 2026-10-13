@@ -117,6 +117,7 @@ class GenerateState(metaclass=SingletonMeta):
         # dp rank balancing
         self.dp_counts = [0] * (args.sglang_dp_size or 1)
         self.dp_rank = 0
+        self.executor = None
 
         self.reset()
 
@@ -141,6 +142,9 @@ class GenerateState(metaclass=SingletonMeta):
 
     def submit_generate_tasks(self, samples: list[list[Sample]]) -> None:
         for group in samples:
+            if self.executor is not None:
+                self.pendings.add(asyncio.create_task(self.executor.generate(group, self.sampling_params.copy())))
+                continue
             self.pendings.add(
                 asyncio.create_task(
                     # submit a group of samples as a single task.
@@ -411,7 +415,15 @@ async def generate_and_rm_group(
             asyncio.create_task(generate_and_rm(args, sample, current_sampling_params, evaluation=evaluation))
         )
 
-    group = await asyncio.gather(*tasks)
+    try:
+        group = await asyncio.gather(*tasks)
+    except BaseException:
+        # A failed sample must not leave siblings scoring or generating beyond
+        # this group's boundary, including when it executes in a remote worker.
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
     # for the rm that need the whole group, we will do the rm here
     if not state.aborted and args.group_rm:
@@ -429,6 +441,9 @@ async def abort(args: Namespace, rollout_id: int) -> list[list[Sample]]:
     state = GenerateState(args)
     assert not state.aborted
     state.aborted = True
+
+    if getattr(state, "executor", None) is not None:
+        await state.executor.stop()
 
     cancellable_tasks = list(state.cancellable_tasks)
     state.cancellable_tasks.difference_update(cancellable_tasks)
@@ -474,6 +489,30 @@ async def abort(args: Namespace, rollout_id: int) -> list[list[Sample]]:
 
 
 async def generate_rollout_async(
+    args: Namespace, rollout_id: int, data_source: Callable[[int], list[list[Sample]]]
+) -> tuple[RolloutFnTrainOutput, list[list[Sample]]]:
+    state = GenerateState(args)
+    if getattr(args, "rollout_execution_workers", 0):
+        from slime.rollout.execution_pool import RolloutExecutionPool
+
+        if state.executor is None:
+            state.executor = RolloutExecutionPool(args)
+    try:
+        if getattr(state, "executor", None) is not None:
+            await state.executor.start(rollout_id)
+        output, aborted = await _generate_rollout_async(args, rollout_id, data_source)
+    except BaseException:
+        if getattr(state, "executor", None) is not None:
+            await state.executor.stop(suppress_errors=True)
+            await asyncio.gather(*state.pendings, return_exceptions=True)
+            state.reset()
+        raise
+    if getattr(state, "executor", None) is not None:
+        output.metrics = (output.metrics or {}) | state.executor.metrics
+    return output, aborted
+
+
+async def _generate_rollout_async(
     args: Namespace, rollout_id: int, data_source: Callable[[int], list[list[Sample]]]
 ) -> tuple[RolloutFnTrainOutput, list[list[Sample]]]:
     """An example to implement the generate_rollout function for an rule based rm rollout generation.
@@ -773,3 +812,13 @@ def generate_rollout(
     if aborted_samples:
         data_source.add_samples(aborted_samples)
     return output
+
+
+def close_rollout_execution():
+    state = GenerateState._instances.get(GenerateState)
+    if state is not None and state.executor is not None:
+        state.executor.close()
+        state.executor = None
+
+
+generate_rollout.close = close_rollout_execution

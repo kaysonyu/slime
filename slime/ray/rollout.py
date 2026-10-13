@@ -163,6 +163,8 @@ class RolloutManager:
         # The driver disposes serving separately, even when a custom source
         # fails here. Managers close only resources they own, never borrowed ones.
         with Cleanup(getattr(self.args, "rollout_cleanup_timeout", 60) if timeout is None else timeout) as cleanup:
+            if close := getattr(getattr(self, "generate_rollout", None), "close", None):
+                cleanup.run("close rollout execution", close)
             if close := getattr(self.data_source, "close", None):
                 cleanup.run("close rollout data source", close)
             if self.recovery is not None:
