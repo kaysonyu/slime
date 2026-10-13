@@ -162,6 +162,16 @@ def test_archive_retains_source_prompt_id(args):
     assert record["data_id"] == "frozen-dataset-row-17"
 
 
+def test_cached_group_rejects_changed_reference_binding(args, tmp_path):
+    first, second = sample(args, 0), sample(args, 1)
+    asyncio.run(archive_and_score(args, first))
+    replacement = tmp_path / "replacement.wav"
+    replacement.write_bytes(b"different reference")
+    second.metadata["omni_prompt"]["references"][0]["uri"] = str(replacement)
+    with pytest.raises(ValueError, match="Reference changed"):
+        asyncio.run(archive_and_score(args, second))
+
+
 def test_cancelled_preparation_finishes_durable_candidate_record(args, monkeypatch):
     item = sample(args)
     started, finish = threading.Event(), threading.Event()

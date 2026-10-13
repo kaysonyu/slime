@@ -15,8 +15,11 @@ import socket
 import statistics
 import threading
 import uuid
+from _thread import LockType
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from functools import lru_cache
 from pathlib import Path
 
@@ -25,6 +28,18 @@ from examples.prism.experiment import path_component
 logger = logging.getLogger(__name__)
 REWARD_HOOK = "examples.prism.artifacts.reward"
 INDEX_LOCK = threading.Lock()
+GROUP_LOCK = threading.Lock()
+
+
+@dataclass
+class _ArchiveGroup:
+    lock: LockType = dataclass_field(default_factory=threading.Lock)
+    fingerprint: str | None = None
+
+
+@lru_cache(maxsize=4096)
+def _archive_group(directory):
+    return _ArchiveGroup()
 
 
 @lru_cache(maxsize=128)
@@ -181,28 +196,32 @@ def _prepare_sample(args, sample, rollout_id, evaluation):
         os.replace(source, target)
         metadata["omni_audio_path"] = str(target)
     if audio_requested:
-        if not (directory / "prompt.json").exists():
-            _write_json(directory / "prompt.json", prompt)
-        text = prompt.get("transcript_target", sample.prompt)
-        if isinstance(text, str):
-            # Identical candidates share this prompt. Atomic JSON records are the
-            # authoritative source; this text file is a convenience for listening.
-            if not (directory / "prompt_text.txt").exists():
-                (directory / "prompt_text.txt").write_text(text)
-        for reference in prompt.get("references", []):
-            uri = reference.get("uri")
-            if isinstance(uri, str) and "://" not in uri:
-                reference_path = _resolved_leaf(uri)
-                if not reference_path.is_file():
-                    continue
-                link = directory / f"ref_{path_component(reference['id'])}{reference_path.suffix}"
-                try:
-                    link.symlink_to(reference_path)
-                except FileExistsError:
-                    if not link.is_symlink() or (
-                        link.readlink() != reference_path and link.resolve() != reference_path
-                    ):
-                        raise ValueError(f"Reference changed within an archived prompt group: {link}") from None
+        with GROUP_LOCK:
+            group = _archive_group(str(directory))
+        with group.lock:
+            if group.fingerprint != fingerprint:
+                if not (directory / "prompt.json").exists():
+                    _write_json(directory / "prompt.json", prompt)
+                text = prompt.get("transcript_target", sample.prompt)
+                if isinstance(text, str) and not (directory / "prompt_text.txt").exists():
+                    (directory / "prompt_text.txt").write_text(text)
+                for reference in prompt.get("references", []):
+                    uri = reference.get("uri")
+                    if isinstance(uri, str) and "://" not in uri:
+                        reference_path = _resolved_leaf(uri)
+                        if not reference_path.is_file():
+                            continue
+                        link = directory / f"ref_{path_component(reference['id'])}{reference_path.suffix}"
+                        try:
+                            link.symlink_to(reference_path)
+                        except FileExistsError:
+                            if not link.is_symlink() or (
+                                link.readlink() != reference_path and link.resolve() != reference_path
+                            ):
+                                raise ValueError(
+                                    f"Reference changed within an archived prompt group: {link}"
+                                ) from None
+                group.fingerprint = fingerprint
 
     reward_path = sample.custom_rm_path or args.prism_reward_function_path
     if reward_path == REWARD_HOOK:
