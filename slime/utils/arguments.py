@@ -74,7 +74,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             )
             parser.add_argument("--omni-teacher-batch-size", type=int, default=8)
             parser.add_argument("--omni-teacher-batch-wait-ms", type=float, default=2.0)
-            parser.add_argument("--omni-teacher-max-inflight", type=int, default=4)
+            parser.add_argument(
+                "--omni-teacher-max-inflight",
+                type=int,
+                default=16,
+                help="Maximum in-flight frozen teacher HTTP batches per rollout execution worker.",
+            )
             parser.add_argument("--omni-teacher-max-attempts", type=int, default=2)
             parser.add_argument("--omni-teacher-request-timeout-s", type=float, default=120.0)
             parser.add_argument("--omni-compact-replay", action=argparse.BooleanOptionalAction, default=False)

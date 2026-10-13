@@ -533,7 +533,7 @@ retain their stage and status in candidate records.
 
 The frozen teacher client loads each configuration once per process. Its
 `--omni-teacher-batch-size` (default 8), `--omni-teacher-batch-wait-ms` (2 ms),
-`--omni-teacher-max-inflight` (4 per execution worker), and
+`--omni-teacher-max-inflight` (16 per execution worker), and
 `--omni-teacher-max-attempts` (2) bound request aggregation and transient retries.
 Only fixed-action scoring retries transport errors and HTTP 429/502/503/504;
 identity and input-hash mismatches remain fatal. Teacher endpoints may return
@@ -572,3 +572,11 @@ shared absolute paths. Optional fields include `batch`, `rollouts`, `seed`,
 The job records per-node GPU samples, validates GPU collectives and TensorBoard
 storage, and starts the ordinary Prism launcher on the Ray head. A fresh output
 path is required for every attempt.
+
+When changing `NUM_ROLLOUT` during resume, explicitly choose Megatron's optimizer
+scheduler policy. `--use-checkpoint-opt-param-scheduler` restores the checkpoint's
+scheduler settings and progress. It preserves the constant LR/WD recipe used by
+this example when extending the run. `--override-opt-param-scheduler` instead
+uses the new command's schedule settings while retaining progress; choose it
+only when intentionally changing that schedule. Leaving both flags unset
+requires the saved and requested schedule settings to match.

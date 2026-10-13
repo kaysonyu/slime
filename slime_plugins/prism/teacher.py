@@ -63,7 +63,7 @@ class TeacherClient:
         self.configuration = copy.deepcopy(_load_teacher_config(configuration))
         self.batch_size = int(getattr(args, "omni_teacher_batch_size", 8))
         self.wait_seconds = float(getattr(args, "omni_teacher_batch_wait_ms", 2.0)) / 1000
-        self.max_inflight = int(getattr(args, "omni_teacher_max_inflight", 4))
+        self.max_inflight = int(getattr(args, "omni_teacher_max_inflight", 16))
         self.attempts = int(getattr(args, "omni_teacher_max_attempts", 2))
         if (
             not 1 <= self.batch_size <= 64
@@ -191,7 +191,7 @@ def teacher_client(args):
         for name, default in (
             ("omni_teacher_batch_size", 8),
             ("omni_teacher_batch_wait_ms", 2.0),
-            ("omni_teacher_max_inflight", 4),
+            ("omni_teacher_max_inflight", 16),
             ("omni_teacher_max_attempts", 2),
             ("omni_teacher_request_timeout_s", 120.0),
         )

@@ -69,7 +69,10 @@ def commit_checkpoint_boundary(args, rollout_id: int, model_args: list, *, weigh
             if path == source or path.suffix == ".json" or path.name == ".metadata":
                 entry["sha256"] = _file_digest(stream)
         manifest[str(path.relative_to(root))] = entry
-    for directory in {path.parent for path in payloads}:
+    directories = {root}
+    for path in payloads:
+        directories.update(parent for parent in path.parents if parent.is_relative_to(root))
+    for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
         descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(descriptor)
