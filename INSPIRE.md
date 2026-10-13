@@ -11,7 +11,7 @@
 | 转换命令与检查记录 | `/inspire/ssd/project/cq-scientific-cooperation-zone/public/kyu/src/vox/artifacts/prism17b-v04/conversion-command.sh`、`conversion-report.json` |
 | GPU 容器镜像 | `slime-ttsrl:editable-v1`；地址 `docker.sii.shaipower.online/inspire-studio/slime-ttsrl:editable-v1`；digest `sha256:008ecc97fd306fc13c351d38a0e46ea2592a0ece0a8e8ba3102a0a06a712cd6c` |
 | 训练、Ray、Omni Python | 统一使用镜像内 `/opt/venvs/core/bin/python`；环境入口 `/opt/slime-ttsrl/env.sh` |
-| Editable slime | `/inspire/ssd/project/cq-scientific-cooperation-zone/public/kyu/editable/slime`；功能版本 `4909f8121d6af1ae0495f306f799929b35e347f0`，分支 `feat/prism-omni-colocate-rl` |
+| Editable slime | `/inspire/ssd/project/cq-scientific-cooperation-zone/public/kyu/editable/slime`；NumPy2镜像验收基线 `4909f8121d6af1ae0495f306f799929b35e347f0`；性能改动随分支更新，分支 `feat/prism-omni-colocate-rl` |
 | Editable SGLang-Omni | `/inspire/ssd/project/cq-scientific-cooperation-zone/public/kyu/editable/sglang-omni`；`a25fe84ec01476799fbb637a8d1e4b5765dc9204`，分支 `rl/moss-tts-prism` |
 | Editable Megatron-LM | `/inspire/ssd/project/cq-scientific-cooperation-zone/public/kyu/editable/Megatron-LM`；`3f49de20de81c1ad5dfc10efa0f7d0c8098f1ce4` |
 
@@ -45,3 +45,5 @@ NumPy 1.26.4 / Transformers 5.0.0 训练环境。对应的固定 Omni 源码入�
 QB 根目录中的 `colocate-005/fresh/checkpoint/` 与 `colocate-006/resume/checkpoint/`
 是工程奖励下的共卡完整 RL checkpoint fixture；联合报告为 `colocate-006/verification.json`。
 端口、Ray head 和平台 workload 均为临时资源，后续运行重新分配。
+
+32/64 H200 性能验收与完整复现产物位于 `/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/scale-profile-20261012-193554`；`profile-report.html`、`analysis/results.csv` 和 `analysis/jobs-retained.csv` 记录测试范围、结果和保留的Job。实际生产配置与测量方法见 `examples/prism/VALIDATION.md`。

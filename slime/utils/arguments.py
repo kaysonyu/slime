@@ -102,7 +102,8 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=False,
                 help=(
                     "Whether to colocate the inference engines and the actor. "
-                    "Turning this on will also set --offload to true."
+                    "CPU offload is enabled by default; use --no-offload-train and "
+                    "--no-offload-rollout to keep both models resident."
                 ),
             )
             parser.add_argument(
@@ -115,8 +116,8 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 "--offload-train",
                 action=argparse.BooleanOptionalAction,
                 help=(
-                    "Whether to offload the training actor to CPU during training. "
-                    "This will always be true when --colocate is set."
+                    "Whether to offload the training actor to CPU outside training. "
+                    "Enabled by default with --colocate; --no-offload-train keeps the learner resident."
                 ),
             )
             parser.add_argument(
@@ -124,7 +125,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 action=argparse.BooleanOptionalAction,
                 help=(
                     "Whether to offload the rollout generator to CPU during training. "
-                    "This will always be true when --colocate is set."
+                    "Enabled by default with --colocate; --no-offload-rollout keeps the generator resident."
                 ),
             )
 

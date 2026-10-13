@@ -97,19 +97,51 @@ bash examples/prism/run-grpo.sh
 ```
 
 需要使用支持 tensor 更新和显存释放的 Omni 版本。脚本传入原生 `--colocate`，由 slime
-启用 learner/rollout 的 offload，并选择原 `UpdateWeightFromTensor`，通过 CUDA IPC
+默认启用 learner/rollout 的 offload，并选择原 `UpdateWeightFromTensor`，通过 CUDA IPC
 传递 SGLang flattened buckets。`--update-weight-transport nccl` 仍沿用原参数默认值，
 共卡时 factory 根据 `--colocate` 选择 tensor 路径。
 
-Omni adapter 自动启用 pipeline 的 `enable_memory_saver`，释放 AR 权重、KV/graph 内存，
+启用 rollout offload 时，Omni adapter 自动启用 pipeline 的 `enable_memory_saver`，释放 AR 权重、KV/graph 内存，
 并将参考编码器和 vocoder 的持久状态备份到 CPU。先恢复 weights、完成全部权重桶发布，
 再恢复 KV/graph，之后才开放下一轮生成。当前 SGLang 的 breakable prefill graph 不支持
-memory saver，因此共卡使用 eager prefill 和 eager vocoder，AR decode graph 保留。
+memory saver，因此启用 offload 的共卡运行使用 eager prefill 和 eager vocoder，AR decode graph 保留。
 外部冻结教师仍需要自己的资源。完整 RL checkpoint 的保存与恢复方式相同。
 
 主循环会在训练前确定本轮是否保存 checkpoint。保存轮次让 learner 在训练后保持 GPU
 驻留，完成保存后再 offload，省去一次保存前的换出、换入；由原 `SAVE_INTERVAL`
 控制，无需增加开关。有 critic 时只保留最后训练的角色，避免两个训练模型同时驻留。
+
+Prism 1.7B 在 H200 上也支持驻留共卡：`COLOCATE=1` 加
+`--no-offload-train --no-offload-rollout`，训练和生成仍按轮次切换，两份模型保留在 GPU。
+使用 [student-throughput.yaml](student-throughput.yaml) 并填写 codec 路径，可将每个 Omni
+副本的 KV 容量固定为 65,536 tokens，避免默认按显存比例预留过大的 KV pool。
+该配置支持 32 个运行请求；本次测试使用每副本 16 个生成并发。适用的硬件、权重、
+实际峰值和性能对照见 [VALIDATION.md](VALIDATION.md)。
+
+要让每个 DP rank 一步处理一个 pack，需启用动态 batch；单独设置
+`--micro-batch-size 1` 表示一个原始样本，不代表自动组成大 pack。例如 DP32 的
+GRPO 使用 4 个节点、每节点 8 卡，共 32 个学生 rollout 副本，并设置
+`PROMPTS_PER_BATCH=256`、`SAMPLES_PER_PROMPT=8`、`GLOBAL_BATCH_SIZE=2048`：
+
+```bash
+export COLOCATE=1 ACTOR_NODES=4 ACTOR_GPUS_PER_NODE=8 ROLLOUT_GPUS=32 GPUS_PER_NODE=8
+export PROMPTS_PER_BATCH=256 SAMPLES_PER_PROMPT=8 GLOBAL_BATCH_SIZE=2048
+export TRAIN_SEQ_LENGTH=20480 MAX_FRAMES=1024 ROLLOUT_CONCURRENCY_PER_REPLICA=16
+bash examples/prism/run-grpo.sh \
+  --use-dynamic-batch-size --max-tokens-per-gpu 20480 --balance-by-flops \
+  --use-distributed-optimizer --rollout-data-transport object-store --use-distributed-post \
+  --no-offload-train --no-offload-rollout --update-weight-buffer-size 268435456
+```
+
+该命令还需要前文的权重、数据、`OMNI_CONFIG`、`REWARD_CONFIG` 和已有 Ray cluster。
+上例的 `--use-distributed-post` 已在 DP32 GRPO 中做同节点对照，吞吐提高约14.5%；
+64卡及MOPD的该开关收益尚未测量。详见性能验收记录。
+MOPD 使用 `SAMPLES_PER_PROMPT=1`、`PROMPTS_PER_BATCH=GLOBAL_BATCH_SIZE`，保持每条
+轨迹只参与一次 optimizer update。`L` 应计入文本、参考音频和生成时间行；24 路 RVQ
+不能再乘进序列长度。训练是否没有梯度累积，以实际 `num_microbatches=[1]` 为准。
+FLOPs packing 会先确定 DP/VPP 对齐后的最终 pack 数再均衡；仍需检查实际最大 pack
+长度，因为 FLOPs 均衡不是硬 token 上限。正常吞吐测试不启用 `--dump-details` 或
+`--save-debug-rollout-data`，完整 tensor 归档的 CPU/文件开销应单独计时。
 
 以下单机例子保留 GPU 0 给 learner、GPU 1 给一个完整学生 pipeline。教师和奖励服务使用其他 GPU 或其他机器，并在 Ray 管理的学生资源之外运行。
 
@@ -147,6 +179,11 @@ export REWARD_CONFIG="$RUN_CONFIG/rewards.yaml"
 export AUDIO_DIR=/shared/prism-grpo-audio
 NUM_ROLLOUT=1 bash examples/prism/run-grpo.sh
 ```
+
+只使用 ASR 时，仅传入 `--reward wer "$ASR_ENDPOINT" 1`。模型部署需要 Bearer 鉴权时，
+再传 `--reward-auth-token-env INF_API_KEY`；工具只把环境变量名写入配置。
+训练进程及 rollout worker 的环境中须已设置该变量。评分服务的 `max_retries` 可显式
+设为 2 以重试瞬时连接失败；最终评分失败仍会终止本轮，不会替换成零奖励。
 
 上述权重只是示例，应按实验显式选择。只用 WER 与 SIM 时，省去 `--reward judge_clap ...`，无需提供可评分指令。配置 schema 参见 [rewards.example.yaml](rewards.example.yaml)。
 

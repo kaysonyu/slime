@@ -1,4 +1,87 @@
-# Prism 首轮工程验收
+# Prism 训练验收与性能记录
+
+## 32/64 H200 性能验收（2026-10-12）
+
+使用相同的 Prism 1.7B v0.4.0 native iteration 100000、统一 editable 镜像和原
+`train.py`。TP=PP=CP=1，DP 等于训推共卡数量；GRPO 每 prompt 8 条轨迹，
+仅用 Qwen3-ASR-1.7B 的实际转写计算奖励；MOPD 每 prompt 一条轨迹，独立部署
+同一 v0.4.0 权重的冻结教师。ASR、教师分别占用额外一张 H200。
+
+生产配置使用每 rank 一次 packed microbatch、20480 tokens 预算、FLOPs 均衡、
+distributed optimizer、256 MiB 权重桶，以及 `--no-offload-train --no-offload-rollout`。
+Omni KV pool 为 65536 tokens，max running requests=32，生成并发=16/副本。
+每组完成 5 次 optimizer update；表中排除最初两轮与末轮 checkpoint，记录两个
+完整稳态窗口的均值。生产测试关闭完整 rollout tensor dump；原始 Job、日志、
+逐样本统计、GPU 采样和完整 checkpoint 保留。诊断配置同时启用 durable replay
+恢复日志，生产配置未启用；checkpoint 分别采用 fully-reshardable 和 dp-reshardable
+optimizer 存储布局，两者的训练计数及参数/moments 总元素数均已检查。
+
+| 算法 | DP | Batch | 秒/步 | samples/s | tokens/s | 平均 pack tokens | GPU 平均利用率 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| GRPO | 32 | 2048 | 68.79 | 29.77 | 8297 | 17837 | 23.9% |
+| GRPO | 64 | 2048 | 77.32 | 26.49 | 7387 | 8924 | 9.5% |
+| GRPO | 64 | 4096 | 151.86 | 26.97 | 7506 | 17809 | 12.3% |
+| MOPD | 32 | 2048 | 45.74 | 44.77 | 12487 | 17849 | 33.0% |
+| MOPD | 64 | 4096 | 91.57 | 44.73 | 12431 | 17786 | 19.6% |
+
+所有 rank 的实际 `num_microbatches` 均为 `[1]`。完成 checkpoint 的 optimizer
+step、scheduler 消费样本数、302 个模型张量和完整 Adam moments 元素数均核验；每次学生发布的
+版本覆盖全部副本。MOPD 各次运行中 prompt_id 不重复，每条轨迹只参与一次
+optimizer update；旧学生与教师的评分前向仍按原生 OPD 流程执行。
+
+本数据平均 L 约 278，包含文本、参考音频与生成时间行。因此 B2048/DP64
+仅约 43% pack 填充，B4096 约 87%；24 路 RVQ 不乘入时间长度。增加 batch
+提高填充率，但整体吞吐还受 rollout CPU 处理、HTTP 转发和评分等待限制。
+
+保留完整 tensor 归档的受控对照中，DP32 GRPO B1024 约 64.62 s/step，
+单独把并发4提高到16约65.86 s/step，没有观察到收益；驻留与配套优化后
+B2048约90.08 s/step，samples/s提高约43%。DP32 MOPD从B1024约68.04 s/step
+到B2048约67.87 s/step，吞吐约翻倍。完整 tensor dump 本身在B1024下每轮
+约9–10秒、B2048下约16–20秒，故与上表生产结果分开记录。
+
+CPU修复包括NumPy2兼容、奖励服务Bearer鉴权、stage mapping配置检查、
+DP/VPP对齐后的packing、保持隔离的协议快照复制，以及客户端/Router按
+服务和worker拆分HTTP连接池。128条真实响应的解析结果和教师请求hash
+逐项一致；相关回归为231 passed、1 skipped。数值目标、教师权重和数据
+版本保持固定；本验收不测训练质量提升，也不建立新的跨引擎logprob误差保证。
+
+完整实验归档：`/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/scale-profile-20261012-193554`。
+`profile-report.html` 汇总CSV、阶段图、验证结果和保留Job清单；
+`analysis/failures-and-fixes.json` 记录启动、网络与配置修复。失败和重试
+Job也保留，未删除平台记录。
+
+### 利用率瓶颈与 HTTP 对照（2026-10-13）
+
+生产配置的 rollout/评分占整步 94%–98%；DP32 GRPO 的 learner 调用约1.35秒，
+权重发布约0.55秒。DP64/B4096 GRPO的一轮里，约第90秒之后学生GPU已基本
+无活动，rollout到第151秒才结束，客户端仍在处理生成响应与ASR积压。
+平均pack填充到87%只改善短暂的训练段，不能消除生成和评分等待。
+
+原生异步请求之后的JSON解码、协议解析、tensor转换、base64音频解码及
+WAV落盘仍有同步执行路径。同一rollout进程的CPU/事件循环限制了请求分发。
+DP32 GRPO decode日志平均只有1.33个running request，DP64/B4096只有1.19，
+P95均为2，远低于配置的每副本16并发。日志统计以实际decode事件为条件。
+
+使用真实生成WAV/轨迹独立压测：ASR约55–62条/秒，冻结教师约66–81条/秒，
+高于当前端到端吞吐。当前优先改善客户端调度和数据处理，再扩评分副本。
+
+同一组32张H200、B2048、五次更新，仅切换原生HTTP分发，稳态各取两轮：
+
+| HTTP方式 | 秒/步 | samples/s | GPU busy | rollout进程CPU秒/轮 | 事件循环延迟P95 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 本地 | 65.78 | 31.14 | 26.5% | 50.02 | 482 ms |
+| 分布式POST | 57.46 | 35.64 | 16.8% | 33.98 | 1.97 ms |
+
+`--use-distributed-post`在这组GRPO中提高吞吐约14.5%，但没有消除集中处理：
+少量事件循环阻塞仍达约5秒。平均decode batch从约1.34增至2.83；GPU busy
+虽下降，每条样本消耗的训推GPU秒仍从1.028降至0.898。因此同时用samples/s、
+GPU-seconds/sample、阶段耗时和batch统计判断效率，不能只优化nvidia-smi百分比。
+64卡与MoPD尚未测这个HTTP开关的收益，前表使用本地HTTP，不外推14.5%。
+
+后续优先按worker分散完整生成/解析/音频/评分流水线，保留GRPO组及权重版本
+屏障；随后减少大JSON与base64往返，使用紧凑tensor传输和worker生成的共享音频
+路径。教师服务已有continuous batching，可另测客户端多样本RPC减少HTTP开销。
+本轮保持MoPD轨迹一次消费、每rank一个microbatch，没有引入跨版本异步训练。
 
 ## 单环境 editable 镜像验收（2026-10-12）
 
@@ -163,4 +246,4 @@ native 302 个 tensor 到 HF 390 个 tensor 的完整映射使用真实 DCP 与�
 
 通用 initializer 重构通过 118 项加载、CLI 和架构配置组合用例，27 项模型用例及 124 项原 checkpoint/recovery/version 回归。测试覆盖 initializer 的来源与返回契约、master 参数同步、标准恢复优先、reference/HF 加载、无效显式路径、step 0、普通模型行为，以及无 CUDA driver 时配置生成可用而实际训练明确失败。配置失败记录与修复前 source snapshot 也保留，实际 CPU fresh/resume 命令预检通过后才提交 GPU 运行。
 
-GPU GRPO 使用明确标注的工程 reward，未调用真实 ASR、speaker embedding 或 JudgeCLAP 三服务联合评分，不能据此判断 WER/SIM/指令遵循收益。首轮还没有验收多 learner DP、长语音、全部 GPU 故障注入、Local 模型、colocate/offload 或局部片段指令奖励。
+上述历史首轮 GPU GRPO 使用明确标注的工程 reward，未调用真实 ASR、speaker embedding 或 JudgeCLAP 三服务联合评分，不能据此判断 WER/SIM/指令遵循收益。该历史首轮范围不覆盖多 learner DP 等扩展；后续共卡、多卡和真实服务验收见本文顶部。
