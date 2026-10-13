@@ -477,6 +477,7 @@ def test_mopd_template_routes_teachers_and_archives_without_waveform(args, monke
     groups = _template_groups(args, "mopd.example.jsonl", 1)
     candidates = [group[0] for group in groups]
     args.prism_reward_function_path = "examples.prism.hooks.zero_reward"
+    args.omni_return_audio = False
     args.rollout_sample_hook_path.append("slime_plugins.omni_rollout.score_teacher")
     models = {key: teacher_binding() | {"endpoint": f"http://{key}"} for key in ("zh_teacher", "en_teacher")}
     routes = {"chinese": "zh_teacher", "english": "en_teacher"}
@@ -515,6 +516,10 @@ def test_mopd_template_routes_teachers_and_archives_without_waveform(args, monke
     assert metrics["rollout/prism/domain/chinese/scored_count"] == 1
     assert metrics["rollout/prism/domain/english/scored_count"] == 1
     assert not list(artifacts.audio_archive_root(args).rglob("*.wav"))
+    assert not list(artifacts.audio_archive_root(args).rglob("prompt_text.txt"))
+    assert all(
+        json.loads(Path(item.metadata["prism_artifact"]["record_path"]).read_text())["prompt"] for item in candidates
+    )
 
 
 def test_mopd_quality_eval_generates_audio_uses_dataset_reward_and_skips_teacher(args, tmp_path, monkeypatch):

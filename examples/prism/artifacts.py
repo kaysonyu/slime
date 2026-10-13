@@ -38,20 +38,31 @@ def _resolved_leaf(path):
     return result.resolve() if result.is_symlink() else result
 
 
-@lru_cache(maxsize=1)
-def _io_executor():
-    # Bound concurrent metadata operations on shared filesystems.
-    return ThreadPoolExecutor(max_workers=4, thread_name_prefix="prism-archive")
+@lru_cache(maxsize=2)
+def _io_executor(preparing):
+    # Score completion must not queue behind all outstanding preparations.
+    return ThreadPoolExecutor(max_workers=8 if preparing else 4, thread_name_prefix="prism-archive")
 
 
-async def _run_io(function, *args):
-    pending = asyncio.get_running_loop().run_in_executor(_io_executor(), function, *args)
+async def _run_io(function, *args, preparing=False):
+    pending = asyncio.get_running_loop().run_in_executor(_io_executor(preparing), function, *args)
     try:
         return await asyncio.shield(pending)
     except asyncio.CancelledError:
         # Draining a rollout must also finish its already submitted durable writes.
         await asyncio.shield(pending)
         raise
+
+
+@lru_cache(maxsize=4096)
+def _make_directory(path):
+    Path(path).mkdir(parents=True, exist_ok=True)
+
+
+@lru_cache(maxsize=16)
+def _candidate_index(path):
+    # Flush every complete line; the bounded cache avoids reopening on every sample.
+    return Path(path).open("a", buffering=1)
 
 
 def audio_archive_root(args):
@@ -150,8 +161,15 @@ def _prepare_sample(args, sample, rollout_id, evaluation):
     else:
         group_index, candidate_index = sample.group_index, sample.index
     round_directory = directory
-    directory /= f"group_{path_component(group_index)}_{path_component(data_id)}"
-    directory.mkdir(parents=True, exist_ok=True)
+    audio_requested = getattr(args, "omni_return_audio", True)
+    if evaluation and getattr(args, "omni_eval_return_audio", None) is not None:
+        audio_requested = args.omni_eval_return_audio
+    directory /= (
+        f"group_{path_component(group_index)}_{path_component(data_id)}"
+        if audio_requested
+        else f"_records_{socket.gethostname()}_{os.getpid()}"
+    )
+    _make_directory(str(directory))
     record_id = uuid.uuid4().hex
     stem = f"gen_audio_s{path_component(candidate_index)}_{record_id}"
     source = metadata.get("omni_audio_path")
@@ -162,26 +180,29 @@ def _prepare_sample(args, sample, rollout_id, evaluation):
         target = directory / f"{stem}.wav"
         os.replace(source, target)
         metadata["omni_audio_path"] = str(target)
-    if not (directory / "prompt.json").exists():
-        _write_json(directory / "prompt.json", prompt)
-    text = prompt.get("transcript_target", sample.prompt)
-    if isinstance(text, str):
-        # Identical candidates share this prompt. Atomic JSON records are the
-        # authoritative source; this text file is a convenience for listening.
-        if not (directory / "prompt_text.txt").exists():
-            (directory / "prompt_text.txt").write_text(text)
-    for reference in prompt.get("references", []):
-        uri = reference.get("uri")
-        if isinstance(uri, str) and "://" not in uri:
-            reference_path = _resolved_leaf(uri)
-            if not reference_path.is_file():
-                continue
-            link = directory / f"ref_{path_component(reference['id'])}{reference_path.suffix}"
-            try:
-                link.symlink_to(reference_path)
-            except FileExistsError:
-                if not link.is_symlink() or (link.readlink() != reference_path and link.resolve() != reference_path):
-                    raise ValueError(f"Reference changed within an archived prompt group: {link}") from None
+    if audio_requested:
+        if not (directory / "prompt.json").exists():
+            _write_json(directory / "prompt.json", prompt)
+        text = prompt.get("transcript_target", sample.prompt)
+        if isinstance(text, str):
+            # Identical candidates share this prompt. Atomic JSON records are the
+            # authoritative source; this text file is a convenience for listening.
+            if not (directory / "prompt_text.txt").exists():
+                (directory / "prompt_text.txt").write_text(text)
+        for reference in prompt.get("references", []):
+            uri = reference.get("uri")
+            if isinstance(uri, str) and "://" not in uri:
+                reference_path = _resolved_leaf(uri)
+                if not reference_path.is_file():
+                    continue
+                link = directory / f"ref_{path_component(reference['id'])}{reference_path.suffix}"
+                try:
+                    link.symlink_to(reference_path)
+                except FileExistsError:
+                    if not link.is_symlink() or (
+                        link.readlink() != reference_path and link.resolve() != reference_path
+                    ):
+                        raise ValueError(f"Reference changed within an archived prompt group: {link}") from None
 
     reward_path = sample.custom_rm_path or args.prism_reward_function_path
     if reward_path == REWARD_HOOK:
@@ -205,14 +226,17 @@ def _prepare_sample(args, sample, rollout_id, evaluation):
     _write_json(metadata["prism_artifact"]["record_path"], _record(sample))
     # One append-only index per process avoids walking thousands of group directories.
     index = round_directory / f"{socket.gethostname()}-{os.getpid()}.candidates.jsonl"
-    with INDEX_LOCK, index.open("a") as stream:
+    with INDEX_LOCK:
+        stream = _candidate_index(str(index))
         stream.write(
             json.dumps(str(Path(metadata["prism_artifact"]["record_path"]).relative_to(round_directory))) + "\n"
         )
+        # A remote collector must see the append before this candidate is returned.
+        os.fsync(stream.fileno())
 
 
 async def prepare_sample(args, sample, *, rollout_id=None, evaluation=False):
-    await _run_io(_prepare_sample, args, sample, rollout_id, evaluation)
+    await _run_io(_prepare_sample, args, sample, rollout_id, evaluation, preparing=True)
 
 
 async def reward(args, sample, **kwargs):
