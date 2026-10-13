@@ -15,7 +15,7 @@ import torch
 
 def _restore_tensor(data, dtype, shape):
     if data.size == 0:
-        return torch.empty(shape, dtype=dtype)
+        return torch.empty(shape, dtype=dtype, device="cpu")
     return torch.from_numpy(data.copy()).view(dtype).reshape(shape)
 
 

@@ -7,8 +7,17 @@ from test_dp_schedule import make_args, make_tp
 
 from slime.data.batch_builder import BatchBuilder
 from slime.utils.data import process_rollout_data
+from slime.utils.tensor_serialization import deserialize_tensor_payload, serialize_tensor_payload
 
 NUM_GPUS = 0
+
+
+def test_empty_cpu_tensor_ignores_receiver_default_device():
+    payload = serialize_tensor_payload({"empty": torch.empty((0, 24), dtype=torch.bfloat16)})
+    with torch.device("meta"):
+        result = deserialize_tensor_payload(payload)["empty"]
+    assert result.device.type == "cpu"
+    assert result.shape == (0, 24) and result.dtype == torch.bfloat16
 
 
 @ray.remote
