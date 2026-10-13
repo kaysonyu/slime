@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import wave
 from contextlib import nullcontext
 from pathlib import Path
@@ -111,13 +112,17 @@ async def archive_and_score(args, item, *, rollout_id=7, evaluation=False, **kwa
     return item
 
 
-def test_full_archive_keeps_audio_reference_identity_and_nonselected_candidates(args):
+@pytest.mark.parametrize("legacy_archive", [False, True])
+def test_full_archive_keeps_audio_reference_identity_and_nonselected_candidates(args, legacy_archive):
     candidates = [sample(args, index) for index in range(4)]
 
     async def run():
         return await asyncio.gather(*(archive_and_score(args, item) for item in candidates))
 
     asyncio.run(run())
+    if legacy_archive:
+        for index in artifacts.audio_archive_root(args).rglob("*.candidates.jsonl"):
+            index.unlink()
     metrics = artifacts._summarize(args, 7, candidates[:2])
     record_file = Path(args.prism_artifact_dir) / "records/train/rollout_0000007.jsonl"
     records = [json.loads(line) for line in record_file.read_text().splitlines()]
@@ -155,6 +160,36 @@ def test_archive_retains_source_prompt_id(args):
     asyncio.run(archive_and_score(args, item))
     record = json.loads(Path(item.metadata["prism_artifact"]["record_path"]).read_text())
     assert record["data_id"] == "frozen-dataset-row-17"
+
+
+def test_cancelled_preparation_finishes_durable_candidate_record(args, monkeypatch):
+    item = sample(args)
+    started, finish = threading.Event(), threading.Event()
+    original = artifacts._prepare_sample
+
+    def delayed(*parameters):
+        started.set()
+        assert finish.wait(timeout=10)
+        return original(*parameters)
+
+    monkeypatch.setattr(artifacts, "_prepare_sample", delayed)
+
+    async def cancel():
+        pending = asyncio.create_task(artifacts.prepare_sample(args, item, rollout_id=7))
+        assert await asyncio.to_thread(started.wait, 10)
+        pending.cancel()
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+    asyncio.run(cancel())
+    metrics = artifacts._summarize(args, 7, [])
+    assert metrics["rollout/prism/not_selected/sample_count"] == 1
+    assert metrics["rollout/prism/not_selected/pending_ratio"] == 1
+    rows = [
+        json.loads(line) for line in (Path(args.prism_artifact_dir) / "records/train/rollout_0000007.jsonl").open()
+    ]
+    assert len(rows) == 1 and Path(rows[0]["audio_path"]).read_bytes() == b"original waveform"
 
 
 def test_per_dataset_reward_selection_and_kwargs_survive_archival(args):

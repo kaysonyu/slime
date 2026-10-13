@@ -11,21 +11,53 @@ import json
 import logging
 import math
 import os
+import socket
 import statistics
+import threading
 import uuid
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
 
 from examples.prism.experiment import path_component
 
 logger = logging.getLogger(__name__)
 REWARD_HOOK = "examples.prism.artifacts.reward"
+INDEX_LOCK = threading.Lock()
+
+
+@lru_cache(maxsize=128)
+def _resolved_directory(path):
+    return Path(path).resolve()
+
+
+def _resolved_leaf(path):
+    path = Path(path)
+    result = _resolved_directory(os.path.abspath(path.parent)) / path.name
+    return result.resolve() if result.is_symlink() else result
+
+
+@lru_cache(maxsize=1)
+def _io_executor():
+    # Bound concurrent metadata operations on shared filesystems.
+    return ThreadPoolExecutor(max_workers=4, thread_name_prefix="prism-archive")
+
+
+async def _run_io(function, *args):
+    pending = asyncio.get_running_loop().run_in_executor(_io_executor(), function, *args)
+    try:
+        return await asyncio.shield(pending)
+    except asyncio.CancelledError:
+        # Draining a rollout must also finish its already submitted durable writes.
+        await asyncio.shield(pending)
+        raise
 
 
 def audio_archive_root(args):
     """Isolate attempts even when an external audio storage root is reused."""
-    storage = Path(args.omni_audio_dir).resolve()
-    run = Path(args.prism_artifact_dir).resolve()
+    storage = _resolved_directory(os.path.abspath(args.omni_audio_dir))
+    run = _resolved_directory(os.path.abspath(args.prism_artifact_dir))
     if storage.is_relative_to(run):
         return storage
     digest = hashlib.sha256(str(run).encode()).hexdigest()[:12]
@@ -41,8 +73,9 @@ def _write_json(path, value):
     try:
         temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
         os.replace(temporary, path)
-    finally:
+    except BaseException:
         temporary.unlink(missing_ok=True)
+        raise
 
 
 def _record(sample, *, reward_value=None, reward_status="pending", error=None):
@@ -102,7 +135,7 @@ def _prepare_sample(args, sample, rollout_id, evaluation):
         fingerprint,
     )
     split = "eval" if evaluation else "train"
-    audio_root = Path(args.omni_audio_dir).resolve()
+    audio_root = _resolved_directory(os.path.abspath(args.omni_audio_dir))
     directory = audio_archive_root(args) / split / f"rollout_{rollout_id:07d}"
     dataset = metadata.get("eval_dataset_name") if evaluation else str(args.prompt_data)
     if evaluation:
@@ -116,33 +149,38 @@ def _prepare_sample(args, sample, rollout_id, evaluation):
         candidate_index = metadata["eval_sample_index"]
     else:
         group_index, candidate_index = sample.group_index, sample.index
+    round_directory = directory
     directory /= f"group_{path_component(group_index)}_{path_component(data_id)}"
     directory.mkdir(parents=True, exist_ok=True)
     record_id = uuid.uuid4().hex
     stem = f"gen_audio_s{path_component(candidate_index)}_{record_id}"
     source = metadata.get("omni_audio_path")
     if source:
-        source = Path(source).resolve(strict=True)
+        source = _resolved_leaf(source)
         if not source.is_relative_to(audio_root):
             raise ValueError("Generated audio must belong to omni_audio_dir before archival")
         target = directory / f"{stem}.wav"
         os.replace(source, target)
         metadata["omni_audio_path"] = str(target)
-    _write_json(directory / "prompt.json", prompt)
+    if not (directory / "prompt.json").exists():
+        _write_json(directory / "prompt.json", prompt)
     text = prompt.get("transcript_target", sample.prompt)
     if isinstance(text, str):
         # Identical candidates share this prompt. Atomic JSON records are the
         # authoritative source; this text file is a convenience for listening.
-        (directory / "prompt_text.txt").write_text(text)
+        if not (directory / "prompt_text.txt").exists():
+            (directory / "prompt_text.txt").write_text(text)
     for reference in prompt.get("references", []):
         uri = reference.get("uri")
-        if isinstance(uri, str) and "://" not in uri and Path(uri).is_file():
-            reference_path = Path(uri).resolve()
+        if isinstance(uri, str) and "://" not in uri:
+            reference_path = _resolved_leaf(uri)
+            if not reference_path.is_file():
+                continue
             link = directory / f"ref_{path_component(reference['id'])}{reference_path.suffix}"
             try:
                 link.symlink_to(reference_path)
             except FileExistsError:
-                if link.resolve() != reference_path:
+                if not link.is_symlink() or (link.readlink() != reference_path and link.resolve() != reference_path):
                     raise ValueError(f"Reference changed within an archived prompt group: {link}") from None
 
     reward_path = sample.custom_rm_path or args.prism_reward_function_path
@@ -165,10 +203,16 @@ def _prepare_sample(args, sample, rollout_id, evaluation):
     # and invokes the original function with its original scalar/batch shape.
     sample.custom_rm_path = REWARD_HOOK
     _write_json(metadata["prism_artifact"]["record_path"], _record(sample))
+    # One append-only index per process avoids walking thousands of group directories.
+    index = round_directory / f"{socket.gethostname()}-{os.getpid()}.candidates.jsonl"
+    with INDEX_LOCK, index.open("a") as stream:
+        stream.write(
+            json.dumps(str(Path(metadata["prism_artifact"]["record_path"]).relative_to(round_directory))) + "\n"
+        )
 
 
 async def prepare_sample(args, sample, *, rollout_id=None, evaluation=False):
-    await asyncio.to_thread(_prepare_sample, args, sample, rollout_id, evaluation)
+    await _run_io(_prepare_sample, args, sample, rollout_id, evaluation)
 
 
 async def reward(args, sample, **kwargs):
@@ -192,7 +236,7 @@ async def reward(args, sample, **kwargs):
     except BaseException as error:
         for item in samples:
             try:
-                await asyncio.to_thread(
+                await _run_io(
                     _write_json,
                     item.metadata["prism_artifact"]["record_path"],
                     _record(
@@ -205,7 +249,7 @@ async def reward(args, sample, **kwargs):
                 logger.exception("Failed to record a scoring failure")
         raise
     for item, value in zip(samples, values, strict=True):
-        await asyncio.to_thread(
+        await _run_io(
             _write_json,
             item.metadata["prism_artifact"]["record_path"],
             _record(item, reward_value=value, reward_status="success"),
@@ -367,9 +411,14 @@ def _summarize(args, rollout_id, samples, *, dataset=None, group_size=None):
         if "prism_artifact" not in sample.metadata:
             raise ValueError("Prism artifact logging requires prepare_sample on every candidate")
         selected_paths.add(sample.metadata["prism_artifact"]["record_path"])
+    indexes = list(source.glob("*.candidates.jsonl"))
+    if indexes:
+        paths = [source / json.loads(line) for index in indexes for line in index.read_text().splitlines()]
+    else:
+        paths = source.glob("*/gen_audio_s*.json")
     records = {
         record["record_id"]: record
-        for path in source.glob("*/gen_audio_s*.json")
+        for path in paths
         if str(path) not in selected_paths
         for record in [json.loads(path.read_text())]
         if record["run_dir"] == args.prism_artifact_dir
