@@ -212,6 +212,187 @@ def test_component_metrics_ignore_inactive_components_and_incomplete_groups(args
     assert "group_reward/sim/std_mean" not in metrics
 
 
+@pytest.mark.parametrize("category", [None, "base"])
+def test_fixed_reward_archives_the_executed_category(args, monkeypatch, category):
+    from test_tts_reward_plugin import Service, config
+
+    from slime_plugins import tts_reward
+
+    service = Service()
+    monkeypatch.setattr(tts_reward, "get", service.get)
+    monkeypatch.setattr(tts_reward, "post", service.post)
+    args.prism_reward_function_path = "examples.prism.rewards.voiceclone.reward"
+    args.omni_reward_config = config(wer=1, sim=1)
+    item = sample(args)
+    item.metadata["omni_prompt"]["reference_targets"] = {"timbre": "speaker"}
+    if category is None:
+        item.metadata.pop("reward_category")
+    else:
+        item.metadata["reward_category"] = category
+    asyncio.run(archive_and_score(args, item))
+    record = json.loads(Path(item.metadata["prism_artifact"]["record_path"]).read_text())
+    assert record["reward_category"] == "voiceclone"
+    assert record["requested_reward_category"] == category
+    assert set(record["reward_details"]["components"]) == {"wer", "sim"}
+    metrics = artifacts._summarize(args, 7, [item], group_size=1)
+    assert metrics["rollout/prism/reward_category/voiceclone/scored_count"] == 1
+
+
+def test_shared_audio_storage_keeps_attempts_and_statistics_separate(args, tmp_path):
+    first = sample(args)
+    asyncio.run(archive_and_score(args, first))
+    first_audio = Path(first.metadata["omni_audio_path"])
+    first_prompt = (first_audio.parent / "prompt_text.txt").read_text()
+    second_args = SimpleNamespace(**vars(args))
+    second_args.prism_artifact_dir = str(tmp_path / "another-experiment/job/running_round_0")
+    second = sample(second_args)
+    second.metadata["omni_prompt"]["transcript_target"] = "另一次实验使用不同文本。"
+    asyncio.run(archive_and_score(second_args, second))
+    metrics = artifacts._summarize(second_args, 7, [second], group_size=1)
+    assert metrics["rollout/prism/all/sample_count"] == 1
+    assert first_audio.parent != Path(second.metadata["omni_audio_path"]).parent
+    assert (first_audio.parent / "prompt_text.txt").read_text() == first_prompt
+    assert first_audio.read_bytes() == b"original waveform"
+
+
+def _template_groups(args, filename, group_size):
+    from slime.data.data_source import RolloutDataSource
+    from slime.utils.data import Dataset
+
+    path = REPO / "examples/prism/data" / filename
+    args.prompt_data = str(path)
+    args.n_samples_per_prompt = group_size
+    dataset = Dataset(str(path), tokenizer=None, processor=None, max_length=None, prompt_key="script")
+    assert len({item.metadata["id"] for item in dataset}) == len(dataset)
+    # Use the real grouping method without loading HF assets or starting Ray.
+    source = object.__new__(RolloutDataSource)
+    source.args = SimpleNamespace(n_samples_per_prompt=group_size, rollout_shuffle=False)
+    source.dataset = dataset
+    source.sample_offset = source.epoch_id = source.sample_group_index = source.sample_index = 0
+    return source.get_samples(len(dataset))
+
+
+@pytest.mark.parametrize(
+    "filename,reward_path,categories",
+    [
+        ("grpo-base.example.jsonl", "examples.prism.rewards.base.reward", ["base", "base"]),
+        ("grpo-voiceclone.example.jsonl", "examples.prism.rewards.voiceclone.reward", ["voiceclone", "voiceclone"]),
+        (
+            "grpo-instruction.example.jsonl",
+            "examples.prism.rewards.instruction.reward",
+            ["instruction", "instruction"],
+        ),
+        (
+            "mixrl.example.jsonl",
+            "examples.prism.rewards.reward",
+            ["base", "voiceclone", "instruction", "voiceclone_gated"],
+        ),
+    ],
+)
+def test_grpo_templates_route_native_groups_and_archive_actual_rewards(
+    args, tmp_path, monkeypatch, filename, reward_path, categories
+):
+    from test_omni_rollout_plugin import geometry, output
+    from test_tts_reward_plugin import Service, config
+
+    from slime_plugins import omni_rollout, tts_reward
+
+    service = Service()
+    monkeypatch.setattr(tts_reward, "get", service.get)
+    monkeypatch.setattr(tts_reward, "post", service.post)
+    args.prism_reward_function_path = reward_path
+    args.omni_reward_config = config(wer=1, sim=1, judge_clap=1)
+    groups = _template_groups(args, filename, 2)
+    audio = Path(args.omni_audio_dir)
+    audio.mkdir()
+    reference = tmp_path / "reference.wav"
+    reference.write_bytes(b"reference waveform")
+    candidates = [item for group in groups for item in group]
+    for item in candidates:
+        for ref in item.metadata["omni_prompt"].get("references", []):
+            ref["uri"] = str(reference)
+        payload = omni_rollout.build_generate_payload(args, item, {"max_new_tokens": 12})
+        assert payload["prompt"]["script"] == item.prompt
+        candidate = audio / f"sample-{item.index}.wav"
+        candidate.write_bytes(b"generated waveform")
+        omni_rollout.parse_rollout(output(), item, geometry())
+        item.metadata["omni_audio_path"] = str(candidate)
+
+    async def run():
+        with rollout_context(7):
+            await apply_rollout_sample_hooks(args, groups)
+        values = await artifacts.reward(args, candidates)
+        for item, value in zip(candidates, values, strict=True):
+            item.reward = value
+
+    asyncio.run(run())
+    components = {
+        "base": {"wer"},
+        "voiceclone": {"wer", "sim"},
+        "instruction": {"wer", "judge_clap"},
+        "voiceclone_gated": {"wer", "sim"},
+    }
+    for group_index, (group, category) in enumerate(zip(groups, categories, strict=True)):
+        assert {item.group_index for item in group} == {group_index}
+        for item in group:
+            record = json.loads(Path(item.metadata["prism_artifact"]["record_path"]).read_text())
+            assert record["reward_category"] == category
+            assert record["reward_function_path"] == reward_path
+            assert set(record["reward_details"]["components"]) == components[category]
+            assert record["data_id"] == item.metadata["id"]
+    metrics = artifacts._summarize(args, 7, candidates)
+    assert metrics["rollout/prism/all/sample_count"] == len(candidates)
+    assert metrics["rollout/prism/selected/complete_group_count"] == len(groups)
+
+
+def test_mopd_template_routes_teachers_and_archives_without_waveform(args, monkeypatch):
+    from test_omni_rollout_plugin import geometry, output, teacher_binding, teacher_output
+
+    from slime_plugins import omni_rollout
+
+    groups = _template_groups(args, "mopd.example.jsonl", 1)
+    candidates = [group[0] for group in groups]
+    args.prism_reward_function_path = "examples.prism.hooks.zero_reward"
+    args.rollout_sample_hook_path.append("slime_plugins.omni_rollout.score_teacher")
+    models = {key: teacher_binding() | {"endpoint": f"http://{key}"} for key in ("zh_teacher", "en_teacher")}
+    routes = {"chinese": "zh_teacher", "english": "en_teacher"}
+    args.omni_teacher_config = {"models": models, "by_domain": routes}
+    requests = []
+
+    async def score_teacher(_args, url, payload, **kwargs):
+        binding = next(binding for binding in models.values() if url == binding["endpoint"] + "/score_actions")
+        requests.append(url)
+        return {"version": 1, "results": [teacher_output(payload["samples"][0], binding)]}
+
+    monkeypatch.setattr(omni_rollout, "_request", score_teacher)
+    for item in candidates:
+        omni_rollout.build_generate_payload(args, item, {"max_new_tokens": 12})
+        omni_rollout.parse_rollout(output(), item, geometry())
+        item.metadata["omni_audio_path"] = None
+
+    async def run():
+        with rollout_context(7):
+            await apply_rollout_sample_hooks(args, groups)
+        values = await artifacts.reward(args, candidates)
+        assert values == [0.0, 0.0]
+        for item, value in zip(candidates, values, strict=True):
+            item.reward = value
+
+    asyncio.run(run())
+    assert requests == ["http://zh_teacher/score_actions", "http://en_teacher/score_actions"]
+    for item in candidates:
+        assert "policy_teacher_code_logprobs" in item.multimodal_train_inputs
+        assert "policy_teacher_stop_logprobs" in item.multimodal_train_inputs
+        record = json.loads(Path(item.metadata["prism_artifact"]["record_path"]).read_text())
+        assert record["audio_path"] is None and record["reward"] == 0
+        assert record["teacher"]["key"] == routes[item.metadata["domain"]]
+        assert record["teacher"]["weight_sha256"] == models[record["teacher"]["key"]]["weight_sha256"]
+    metrics = artifacts._summarize(args, 7, candidates)
+    assert metrics["rollout/prism/domain/chinese/scored_count"] == 1
+    assert metrics["rollout/prism/domain/english/scored_count"] == 1
+    assert not list(artifacts.audio_archive_root(args).rglob("*.wav"))
+
+
 def test_attempt_preparation_snapshots_and_refuses_to_overwrite(tmp_path):
     root = tmp_path / "attempt"
     config = tmp_path / "custom.yaml"

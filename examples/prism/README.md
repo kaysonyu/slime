@@ -8,6 +8,9 @@ Attention 沿用 Megatron 原生 `TEDotProductAttention`，使用框架默认的
 
 实际原 `train.py` 的 GPU 训练、保存、恢复与多副本验收范围及报告位置见 [VALIDATION.md](VALIDATION.md)。其中工程奖励与真实质量奖励的验收范围分别写明。
 
+固定 reward 的 GRPO、逐样本类别的 MixRL GRPO 和按 domain 路由教师的 MOPD，
+对应的数据模板、启动命令与保存目录对照见 [TRAINING_MODES.md](TRAINING_MODES.md)。
+
 | 训练方式 | 原生训练路径 | 额外输入 |
 | --- | --- | --- |
 | GRPO | prompt 组奖励优势 → native PPO clipping | WER、SIM、全局指令奖励服务 |
@@ -85,6 +88,8 @@ running_round_0/
 
 `OUTPUT_DIR` 保留原来的含义：显式设置时覆盖 **checkpoint 目录**；未设置时使用
 这一轮的 `checkpoints/`。`AUDIO_DIR` 同样可以把完整音频树放到其他共享存储。
+若该音频根位于本轮目录之外，归档会增加运行目录的末尾层级和路径摘要，隔离共用
+音频存储的不同实验与重启轮次；JSONL 汇总也只读取本次运行的记录。
 所有训练与 rollout 节点仍须能读取配置、音频及记录路径。
 
 训练中产生的音频全部保留，包括最终未进入训练批次的候选，不自动清理或抽样。
@@ -94,6 +99,9 @@ running_round_0/
 tensor 继续交给原 debug dump。原始数据的 `metadata.id`、`sample_id` 或
 `rollout_audio_id` 可用于可读目录名，未提供时使用 prompt 内容摘要。文件名经过
 路径处理并带有候选唯一标识，多个副本和特殊字符数据 ID 不会覆盖其他候选。
+
+`reward_category` 优先记录实际评分结果的类别，固定类别函数不要求数据预填类别；
+原输入标签另存为 `requested_reward_category`。MixRL 的分发仍由原输入类别决定。
 
 音频在评分前归档，每个候选先写入 pending 记录，评分完成或失败后原子更新。
 服务故障仍抛出原异常，不转换成数字奖励。完成一个 rollout 后生成 JSONL 汇总，

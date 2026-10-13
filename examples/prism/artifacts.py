@@ -22,6 +22,19 @@ logger = logging.getLogger(__name__)
 REWARD_HOOK = "examples.prism.artifacts.reward"
 
 
+def audio_archive_root(args):
+    """Isolate attempts even when an external audio storage root is reused."""
+    storage = Path(args.omni_audio_dir).resolve()
+    run = Path(args.prism_artifact_dir).resolve()
+    if storage.is_relative_to(run):
+        return storage
+    digest = hashlib.sha256(str(run).encode()).hexdigest()[:12]
+    return storage.joinpath(
+        *(path_component(part) for part in run.parts[-3:-1]),
+        f"{path_component(run.name)}-{digest}",
+    )
+
+
 def _write_json(path, value):
     path = Path(path)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -37,6 +50,7 @@ def _record(sample, *, reward_value=None, reward_status="pending", error=None):
     artifact = metadata["prism_artifact"]
     trace = metadata.get("omni_rollout") or {}
     prompt = metadata.get("omni_prompt") or {}
+    outcome = metadata.get("omni_reward") or {}
     return {
         "schema_version": 1,
         **artifact,
@@ -46,7 +60,8 @@ def _record(sample, *, reward_value=None, reward_status="pending", error=None):
         "text": prompt.get("transcript_target", sample.prompt),
         "language": prompt.get("language", metadata.get("language")),
         "domain": metadata.get("domain"),
-        "reward_category": metadata.get("reward_category"),
+        "reward_category": outcome.get("category") or metadata.get("reward_category"),
+        "requested_reward_category": metadata.get("reward_category"),
         "generation_status": sample.status.value,
         "finish_reason": metadata.get("omni_finish_reason"),
         "frames": metadata.get("omni_frames"),
@@ -82,7 +97,7 @@ def _prepare_sample(args, sample, rollout_id, evaluation):
     )
     split = "eval" if evaluation else "train"
     audio_root = Path(args.omni_audio_dir).resolve()
-    directory = audio_root / split / f"rollout_{rollout_id:07d}"
+    directory = audio_archive_root(args) / split / f"rollout_{rollout_id:07d}"
     dataset = metadata.get("eval_dataset_name") if evaluation else str(args.prompt_data)
     if evaluation:
         if dataset is None or any(
@@ -277,7 +292,7 @@ def compute_metrics(records, group_size):
 def _summarize(args, rollout_id, samples, *, dataset=None, group_size=None):
     evaluation = dataset is not None
     split = "eval" if evaluation else "train"
-    source = Path(args.omni_audio_dir) / split / f"rollout_{rollout_id:07d}"
+    source = audio_archive_root(args) / split / f"rollout_{rollout_id:07d}"
     if evaluation:
         source /= path_component(dataset)
         evaluation_ids = {sample.metadata["prism_artifact"]["evaluation_id"] for sample in samples}
@@ -289,6 +304,7 @@ def _summarize(args, rollout_id, samples, *, dataset=None, group_size=None):
         record["record_id"]: record
         for path in source.glob("*/gen_audio_s*.json")
         for record in [json.loads(path.read_text())]
+        if record["run_dir"] == args.prism_artifact_dir
     }
     selected = set()
     for sample in samples:
