@@ -108,6 +108,44 @@ actor，不依赖已有 Ray worker 的环境变量。`USE_WANDB=1` 可同时启�
 `WANDB_PROJECT`、`WANDB_GROUP` 沿用显式配置，默认 group 包含本轮运行名称。
 每个 `running_round` 使用独立日志目录，恢复时 step 沿用框架的训练进度。
 
+### 日常日志与诊断日志
+
+默认 `DIAGNOSTIC_LOGS=0`：slime 保留 INFO 级的训练、奖励、阶段耗时、checkpoint
+与完整权重发布摘要；Omni 与 router 使用 WARNING，HTTP 成功请求不打印，4xx
+保留为 WARNING、5xx 保留为 ERROR。逐 rank 显存和逐 bucket 权重更新在 DEBUG
+下查看；OOM 与分布式异常的显存信息仍打印 ERROR。重复的 checkpoint kwargs
+兼容性提示每个进程只打印一次，不合并其他 warning/error。
+
+```bash
+# 日常训练，使用默认日志策略
+bash examples/prism/run-grpo.sh
+
+# 新一轮诊断：打开推理批次、HTTP 访问、显存与 NCCL 详情
+DIAGNOSTIC_LOGS=1 RUNNING_ROUND=1 RL_LOAD=/runs/previous/checkpoints \
+  bash examples/prism/run-grpo.sh
+```
+
+| 设置 | 日常默认 | 诊断默认 |
+| --- | --- | --- |
+| `SLIME_LOG_LEVEL` | `INFO` | `DEBUG` |
+| `SGLANG_LOG_LEVEL` | `warning` | `debug` |
+| `SGLANG_LOG_LEVEL_HTTP` | `warning` | `info` |
+| `ROUTER_LOG_LEVEL` | `warn` | `debug` |
+| `NCCL_DEBUG` | `WARN` | `INFO` |
+| `RAY_DEDUP_LOGS` | `1` | `0` |
+
+显式环境变量和追加 CLI 参数仍然优先。单独排查 HTTP 可设置
+`SGLANG_LOG_LEVEL_HTTP=info`；NCCL 详情可以通过
+`NCCL_DEBUG_FILE=/shared/diagnostic/nccl.%h.%p.log` 写入独立文件，先创建这个共享
+目录。日志环境配置会传递给新建 Ray actors，而不依赖现有 cluster 的旧环境。
+Ray 自身的日志去重行为还取决于启动 cluster 的配置，主要降噪在实际日志源完成。
+
+Omni 解释器需要包含配套的 `--log-level-http` 和状态码过滤支持。这里的
+`--sglang-log-level` / `--sglang-log-level-http` 会传给 Omni pipeline，
+`--router-log-level` 会传给 Python router。旧性能实验脚本若显式写死
+`NCCL_DEBUG=INFO` 或 `RAY_DEDUP_LOGS=0`，这些显式设置会继续生效；新日常作业
+应去掉这些 override 或改为表中的日常值。归档中的脚本和运行中的进程不被修改。
+
 新增 `rollout/prism/` 与 `eval/<dataset>/prism/` 指标包含：
 
 - reward 及 WER/CER、SIM、JudgeCLAP 分项的原始值/变换后值统计、参与比例；

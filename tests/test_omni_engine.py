@@ -499,8 +499,9 @@ def test_unsupported_control_operations_are_explicit(omni_args, method, args):
 
 
 @pytest.mark.parametrize("stages_mapping", [False, True])
+@pytest.mark.parametrize("serving_log_level,http_log_level", [("warning", "warning"), ("debug", "info")])
 def test_launch_uses_reserved_gpu_layout_strict_port_and_clean_child_allocator(
-    omni_args, admin_server, monkeypatch, stages_mapping
+    omni_args, admin_server, monkeypatch, stages_mapping, serving_log_level, http_log_level
 ):
     from slime.backends.sglang_utils import omni_engine
 
@@ -511,6 +512,8 @@ def test_launch_uses_reserved_gpu_layout_strict_port_and_clean_child_allocator(
         with open(omni_args.omni_config, "w") as stream:
             yaml.safe_dump(config, stream)
     omni_args.omni_admin_key = "test-admin-key"
+    omni_args.sglang_log_level = serving_log_level
+    omni_args.sglang_log_level_http = http_log_level
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     monkeypatch.setenv("PYTORCH_ALLOC_CONF", "expandable_segments:True")
     for name in ("MASTER_ADDR", "MASTER_PORT", "RANK", "WORLD_SIZE", "LOCAL_RANK", "TORCHELASTIC_USE_AGENT_STORE"):
@@ -546,6 +549,10 @@ def test_launch_uses_reserved_gpu_layout_strict_port_and_clean_child_allocator(
         "127.0.0.1",
         "--port",
         str(admin_server.port),
+        "--log-level",
+        serving_log_level,
+        "--log-level-http",
+        http_log_level,
     ]
     assert environment["CUDA_VISIBLE_DEVICES"] == "3,4"
     assert environment["SGLANG_OMNI_STRICT_PORT"] == "1"

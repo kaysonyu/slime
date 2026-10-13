@@ -65,13 +65,34 @@ export PYTHONUNBUFFERED=1
 export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
 export NCCL_CUMEM_ENABLE=${NCCL_CUMEM_ENABLE:-0}
 export RAY_ADDRESS=${RAY_ADDRESS:-auto}
+case ${DIAGNOSTIC_LOGS:-0} in
+  0)
+    TASK_LOG_LEVEL=INFO
+    TASK_SERVING_LOG_LEVEL=warning
+    TASK_HTTP_LOG_LEVEL=warning
+    TASK_NCCL_LOG_LEVEL=WARN
+    TASK_RAY_DEDUP_LOGS=1
+    ;;
+  1)
+    TASK_LOG_LEVEL=DEBUG
+    TASK_SERVING_LOG_LEVEL=debug
+    TASK_HTTP_LOG_LEVEL=info
+    TASK_NCCL_LOG_LEVEL=INFO
+    TASK_RAY_DEDUP_LOGS=0
+    ;;
+  *) echo "DIAGNOSTIC_LOGS must be 0 or 1" >&2; exit 2 ;;
+esac
+export SLIME_LOG_LEVEL=${SLIME_LOG_LEVEL:-${TASK_LOG_LEVEL}}
+export NCCL_DEBUG=${NCCL_DEBUG:-${TASK_NCCL_LOG_LEVEL}}
+export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-${TASK_RAY_DEDUP_LOGS}}
 # Explicitly carry the model import path into remote Megatron workers.
 TASK_TRAIN_ENV=$("${TASK_TRAIN_PYTHON}" - <<'PY'
 import json
 import os
 print(json.dumps({key: os.environ[key] for key in (
-    "PYTHONPATH", "PYTHONUNBUFFERED", "CUDA_DEVICE_MAX_CONNECTIONS", "NCCL_CUMEM_ENABLE"
-)}))
+    "PYTHONPATH", "PYTHONUNBUFFERED", "CUDA_DEVICE_MAX_CONNECTIONS", "NCCL_CUMEM_ENABLE",
+    "SLIME_LOG_LEVEL", "NCCL_DEBUG", "NCCL_DEBUG_SUBSYS", "NCCL_DEBUG_FILE", "RAY_DEDUP_LOGS"
+) if key in os.environ}))
 PY
 )
 
@@ -103,6 +124,9 @@ TASK_ARGS=(
   --omni-config "${OMNI_CONFIG}"
   --omni-model-name student
   --omni-router-policy least_request
+  --router-log-level "${ROUTER_LOG_LEVEL:-${TASK_SERVING_LOG_LEVEL/warning/warn}}"
+  --sglang-log-level "${SGLANG_LOG_LEVEL:-${TASK_SERVING_LOG_LEVEL}}"
+  --sglang-log-level-http "${SGLANG_LOG_LEVEL_HTTP:-${TASK_HTTP_LOG_LEVEL}}"
   --hf-checkpoint "${HF_CHECKPOINT}"
   --model-name moss_tts_prism
   --custom-model-provider-path slime_plugins.models.prism.model_provider

@@ -362,8 +362,10 @@ def test_tensorboard_explicit_directory_beats_worker_environment_and_flushes(tmp
     assert calls == [("directory", str(tmp_path / "round1/tensorboard")), ("reward", 0.7, 17), "flush"]
 
 
-@pytest.mark.parametrize("mode,colocate", [("grpo", "0"), ("grpo", "1"), ("mopd", "0")])
-def test_actual_launcher_isolates_attempt_and_preserves_checkpoint_override(tmp_path, mode, colocate):
+@pytest.mark.parametrize(
+    "mode,colocate,diagnostic", [("grpo", "0", "0"), ("grpo", "1", "0"), ("mopd", "0", "0"), ("grpo", "0", "1")]
+)
+def test_actual_launcher_isolates_attempt_and_preserves_checkpoint_override(tmp_path, mode, colocate, diagnostic):
     from test_prism_argument_configuration import _synthetic_prism_config
 
     hf = tmp_path / "hf"
@@ -399,8 +401,20 @@ def test_actual_launcher_isolates_attempt_and_preserves_checkpoint_override(tmp_
         "OUTPUT_DIR": str(tmp_path / "explicit-checkpoints"),
         "USE_WANDB": "1",
         "COLOCATE": colocate,
+        "DIAGNOSTIC_LOGS": diagnostic,
     }
-    for key in ("RUN_DIR", "RL_LOAD", "PRISM_DRY_RUN", "AUDIO_DIR"):
+    for key in (
+        "RUN_DIR",
+        "RL_LOAD",
+        "PRISM_DRY_RUN",
+        "AUDIO_DIR",
+        "SLIME_LOG_LEVEL",
+        "NCCL_DEBUG",
+        "RAY_DEDUP_LOGS",
+        "SGLANG_LOG_LEVEL",
+        "SGLANG_LOG_LEVEL_HTTP",
+        "ROUTER_LOG_LEVEL",
+    ):
         environment.pop(key, None)
     result = subprocess.run(
         ["bash", str(REPO / f"examples/prism/run-{mode}.sh")],
@@ -415,6 +429,13 @@ def test_actual_launcher_isolates_attempt_and_preserves_checkpoint_override(tmp_
     root = tmp_path / "runs/experiment/job/running_round_2"
     assert options["save"] == [str(tmp_path / "explicit-checkpoints")]
     assert ("colocate" in options) == (colocate == "1")
+    assert options["sglang_log_level"] == ["debug" if diagnostic == "1" else "warning"]
+    assert options["sglang_log_level_http"] == ["info" if diagnostic == "1" else "warning"]
+    assert options["router_log_level"] == ["debug" if diagnostic == "1" else "warn"]
+    train_environment = json.loads(options["train_env_vars"][-1])
+    assert train_environment["SLIME_LOG_LEVEL"] == ("DEBUG" if diagnostic == "1" else "INFO")
+    assert train_environment["NCCL_DEBUG"] == ("INFO" if diagnostic == "1" else "WARN")
+    assert train_environment["RAY_DEDUP_LOGS"] == ("0" if diagnostic == "1" else "1")
     assert options["tensorboard_dir"] == [str(root / "tensorboard")]
     assert options["wandb_dir"] == [str(root / "wandb")]
     assert options["omni_audio_dir"] == [str(root / "rollout_audio")]

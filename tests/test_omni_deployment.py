@@ -1,5 +1,12 @@
 """CPU lifecycle tests for workers-first Omni deployment startup."""
 
+import importlib.util
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
 from argparse import Namespace
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -221,6 +228,8 @@ def test_workers_are_ready_before_named_routers_are_started(harness):
         _, configuration, initially_disabled, admin_key = process.args
         assert initially_disabled is disabled
         assert admin_key == "test-admin-key"
+        assert configuration["log_level"] == "warn"
+        assert configuration["log_level_http"] == "warning"
         assert configuration["workers"] == [
             {"url": harness.engines[number].url, "capabilities": OMNI_WORKER_CAPABILITIES} for number in numbers
         ]
@@ -233,6 +242,67 @@ def test_workers_are_ready_before_named_routers_are_started(harness):
     assert all(event[-1] is False for event in harness.events if event[0] == "router_live")
     assert all(group.router_ip == "127.0.0.1" for group in harness.groups)
     assert not any(event[0] in {"shutdown", "kill"} for event in harness.events)
+
+
+def test_router_receives_explicit_diagnostic_log_levels(harness):
+    harness.args.router_log_level = "debug"
+    harness.args.sglang_log_level_http = "info"
+    deployment.start_rollout_servers(harness.args, pg=object())
+    configuration = harness.processes[0].args[1]
+    assert configuration["log_level"] == "debug"
+    assert configuration["log_level_http"] == "info"
+
+
+@pytest.mark.parametrize("http_log_level", ["warning", "info"])
+def test_python_router_access_logging_with_real_http(tmp_path, http_log_level):
+    if importlib.util.find_spec("sglang_omni") is None:
+        pytest.skip("Install the paired Omni checkout to test the Python router process")
+    if importlib.util.find_spec("sglang_omni.serve.access_logging") is None:
+        pytest.skip("The paired Omni checkout must include status-aware access logging")
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    configuration = {
+        "host": "127.0.0.1",
+        "port": port,
+        "workers": [{"url": f"http://127.0.0.1:{port}", "capabilities": ["audio_output"]}],
+        "log_level": "warn",
+        "log_level_http": http_log_level,
+    }
+    output = tmp_path / "router.log"
+    with output.open("w") as stream, requests.Session() as client:
+        client.trust_env = False
+        process = subprocess.Popen(
+            [sys.executable, "-c", deployment.OMNI_ROUTER_PROGRAM, json.dumps([configuration, True])],
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+            env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+        )
+        try:
+            deadline = time.monotonic() + 30
+            while True:
+                assert process.poll() is None, output.read_text()
+                try:
+                    response = client.get(f"http://127.0.0.1:{port}/live", timeout=1)
+                    if response.status_code == 200:
+                        break
+                except requests.ConnectionError:
+                    pass
+                assert time.monotonic() < deadline, output.read_text()
+                time.sleep(0.05)
+            assert client.get(f"http://127.0.0.1:{port}/missing", timeout=2).status_code == 404
+            assert client.post(f"http://127.0.0.1:{port}/generate", json={}, timeout=2).status_code == 503
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+    logs = output.read_text()
+    assert ('"GET /live HTTP/1.1" 200' in logs) == (http_log_level == "info")
+    assert any('"GET /missing HTTP/1.1" 404' in line and "WARNING" in line for line in logs.splitlines())
+    assert any('"POST /generate HTTP/1.1" 503' in line and "ERROR" in line for line in logs.splitlines())
 
 
 @pytest.mark.parametrize("failure", ["partial_start", "init", "router_timeout"])

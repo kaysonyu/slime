@@ -216,6 +216,10 @@ class OmniEngine(RayActor):
             self.server_host,
             "--port",
             str(port),
+            "--log-level",
+            getattr(self.args, "sglang_log_level", None) or "warning",
+            "--log-level-http",
+            getattr(self.args, "sglang_log_level_http", None) or "warning",
         ]
         if self.args.offload_rollout:
             command.extend(["--enable-memory-saver", "true"])
@@ -357,7 +361,7 @@ class OmniEngine(RayActor):
         self.pending_version = None
         self.paused = False
         self.set_admission_disabled(bool(self.offload_tags))
-        logger.info(
+        logger.debug(
             "Omni replica rank=%s committed_version=%s url=%s", self.rank, self.committed_version, self.get_url()
         )
         return result

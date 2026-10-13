@@ -157,15 +157,21 @@ def start_rollout_servers(args, pg) -> tuple[dict[str, Any], list[Any]]:
 OMNI_ROUTER_PROGRAM = """
 import asyncio
 import json
+import logging
 import sys
 from contextlib import asynccontextmanager
 import httpx
 import uvicorn
 from sglang_omni_router.python.app import create_app
 from sglang_omni_router.python.config import RouterConfig
+from sglang_omni.serve.access_logging import configure_access_logging
 
 configuration, disabled = json.loads(sys.argv[1])
 connections_per_worker = configuration.pop("connections_per_worker", 128)
+log_level = configuration.pop("log_level", "warning")
+log_level = "warning" if log_level == "warn" else log_level
+log_level_http = configuration.pop("log_level_http", "warning")
+logging.basicConfig(level=log_level.upper())
 router_config = RouterConfig(**configuration)
 
 class WorkerTransport(httpx.AsyncBaseTransport):
@@ -209,7 +215,12 @@ async def lifespan(application):
 
 app.router.lifespan_context = lifespan
 # Match Omni workers: rollout CPU processing can outlive Uvicorn's short idle default.
-uvicorn.run(app, host=configuration['host'], port=configuration['port'], workers=1, timeout_keep_alive=120)
+server_config = uvicorn.Config(
+    app, host=configuration['host'], port=configuration['port'], workers=1,
+    timeout_keep_alive=120, log_level=log_level
+)
+configure_access_logging(log_level_http)
+uvicorn.Server(server_config).run()
 """
 
 
@@ -276,6 +287,8 @@ def start_omni_rollout_servers(args, pg) -> tuple[dict[str, Any], list[Any]]:
                 "policy": args.omni_router_policy,
                 "request_timeout_secs": args.sglang_router_request_timeout_secs,
                 "connections_per_worker": max(8, 2 * args.sglang_server_concurrency),
+                "log_level": getattr(args, "router_log_level", "warn"),
+                "log_level_http": getattr(args, "sglang_log_level_http", None) or "warning",
             }
             process = multiprocessing.Process(
                 target=launch_omni_router,
