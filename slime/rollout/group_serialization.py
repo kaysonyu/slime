@@ -46,11 +46,15 @@ class SerializedGroup:
         return deserialize_group, (serialize_group(self.group),)
 
 
+class _GroupPickler(pickle.CloudPickler):
+    # The C pickler reads the class table during construction. Keep the base
+    # table live so Ray serializers registered later remain visible as well.
+    dispatch_table = ChainMap({torch.Tensor: _reduce_tensor}, pickle.CloudPickler.dispatch_table)
+
+
 def serialize_group(group):
     stream = io.BytesIO()
-    pickler = pickle.CloudPickler(stream, protocol=5)
-    pickler.dispatch_table = ChainMap({torch.Tensor: _reduce_tensor}, pickler.dispatch_table)
-    pickler.dump(group)
+    _GroupPickler(stream, protocol=5).dump(group)
     # Ray transports this array as a buffer instead of walking the nested
     # sample graph again. No process-wide tensor serializer is registered.
     return np.frombuffer(stream.getvalue(), dtype=np.uint8)

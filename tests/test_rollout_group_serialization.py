@@ -10,13 +10,17 @@ NUM_GPUS = 0
 
 
 @pytest.mark.parametrize("dtype", [torch.int64, torch.int32, torch.float32, torch.float16, torch.bfloat16, torch.bool])
-def test_sample_tensors_round_trip_with_writable_isolated_storage(dtype):
+def test_sample_tensors_round_trip_with_writable_isolated_storage(dtype, monkeypatch):
+    def disallow_per_tensor_load(*args, **kwargs):
+        pytest.fail("CPU worker tensors must not use a per-storage torch.load")
+
     tensor = torch.arange(12).reshape(3, 4).to(dtype)
     sample = Sample(index=7, weight_versions=["2"], metadata={"nested": {"tensor": tensor}})
     sample.multimodal_train_inputs = {"input": tensor, "empty": torch.empty((0, 4), dtype=dtype)}
     sample.reward = {"asr": 0.75}
     payload = serialize_group([sample])
     payload.setflags(write=False)  # Ray's object-store arrays are read-only.
+    monkeypatch.setattr(torch, "load", disallow_per_tensor_load)
     left = deserialize_group(payload)[0]
     right = deserialize_group(payload)[0]
     restored = left.multimodal_train_inputs["input"]
