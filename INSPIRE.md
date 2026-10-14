@@ -2,6 +2,17 @@
 
 适用范围：账号 `kayson`，用户指定的 `CQ-科研驾驶舱` 工作空间，项目 `多模态自进化科学模型`。调度配额、可用 GPU 和平台状态每次从 Inspire Live 查询；本文件只记录共享资产及环境合同。
 
+四领域 MoPD、学生 v0.4.0 / native `iter_0100000` 的固定实验根目录为
+`/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism-v04-fourteacher-20261014-153352`。
+数据版本 `tts2.0-mopd/mixtures/v2-fourteacher-v04-nolen90` 包含 60 万条独立训练 prompt、
+4000 条保留评估 prompt，约 90% 不带长度控制；instruction/asmr/dialect/sing 的数量为
+25万/10万/15万/10万。原始 reference 复用既有音频，模型和数据来源见该目录 manifest。
+启动配置固定 32 H200、DP32/TP1、batch 2048、2000 次更新、每 250 次更新保存联合 checkpoint。
+`configs/eval.yaml` 在训练前和每 250 次更新对同一组无长度控制样本做阈值/随机停止比较，
+保存音频与逐帧停止概率。`configs/shared-service-watch.json` 显式登记冻结教师的消费者，
+仅在所有使用该教师的任务都结束后停止服务。单卡启动预检的 128 次生成、四教师评分，
+以及 64 条真实响应的评估归档回放记录保存在实验根目录 `analysis/`；不替代最终质量评测。
+
 运行时重构的固定验收产物位于
 `/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/runtime-refactor-20261013-182303`。
 入口为 `analysis/report.html`；每项配置、源码 SHA、checkpoint、归档及修正后的
