@@ -1,5 +1,67 @@
 # Prism 训练验收与性能记录
 
+## 兼容层清理与 2 卡回归（2026-10-14 UTC）
+
+删除三个 examples.prism 运行时转发模块及旧 reward 归档包装器，归档统一使用
+sample observer。调用方直接导入配置、checkpoint、policy 和 teacher 的定义模块；
+模型模块的公开导出从 30 项缩为 10 项，rollout 模块从 19 项缩为 4 项。
+Teacher 在 GPU 评分分块内选取学生实际执行的 stop/continue 分数，响应仅返回
+一维 selected_stop_logprobs，删除额外概率及客户端的概率回退和列选择。
+Prism 请求/结果升级到 version 2，HTTP batch envelope 保持 version 1。
+生成端的停止策略及 rollout trace 协议、checkpoint 恢复、显存卸载和权重发布逻辑
+均保持原实现。本轮要求 Slime 和 Omni teacher 一起升级。
+
+对照源码为 Slime bb9c1e84 / Omni 547f00e3；重构源码为 Slime f01ed5e1 /
+Omni c2f8c453。四个 case 使用干净、固定的独立 worktree；后续仅增加验收文档。
+当时没有空闲整节点，本轮使用同一组两张 H200，DP2、TP=PP=CP=1、每步 128
+条样本、每卡 20480 时间位置预算、一条 packed microbatch、resident cleanup 16。
+MoPD 为 128×1，GRPO 为 16×8；teacher 和 ASR 通过独立 Serving 部署，各使用
+一个 GPU 副本。没有把本轮小规模结果当作 32 卡性能复验。
+
+每个 case 完成 20 次更新。下表取同样的 rollout 3–18，共 16 个完整窗口，包含
+生成、评分、归档、训练、清理和 tensor 权重发布；排除前三步热身和最终 checkpoint。
+所有稳态窗口均保留。
+
+| 模式 | 基线秒/步 | 重构秒/步 | 步耗时变化 | 音频帧吞吐变化 |
+| --- | ---: | ---: | ---: | ---: |
+| MOPD | 4.827 | 4.819 | -0.17% | +0.25% |
+| GRPO | 6.501 | 6.538 | +0.57% | -0.69% |
+
+本轮表现接近：MoPD 约快 8 毫秒/步，GRPO 约慢 37 毫秒/步。GRPO 的变化主要在
+生成与评分阶段（5.111 → 5.155 秒）；训练为 1.036 → 1.032 秒，发布为
+0.314 → 0.311 秒。短跑只有一组配对，不能据此保证亚百分比级别零回退。
+四组共完成 80 次参数更新；每步检查所有 rank 的单 pack 条件，全部梯度和 loss
+有限，末步联合 checkpoint、数据游标、完整候选归档和评分服务身份检查均通过。
+
+真实 v0.4.0 模型为 24 RVQ 通道。Teacher 采用相同单请求输入进行新旧数值对照，
+覆盖自然停止、长度截断、零帧、128/512 帧及多条输入，code 和 selected stop
+logprob 的最大差值均为 0。128/512 帧测试的响应体缩小 8.16%–8.29%；HTTP
+中位耗时因形状而异，batch8/512 帧为 390 → 304 ms，但尾延迟存在明显波动，
+不能将其解释为稳定的整步加速。Teacher 探针在首次训练 rollout 前结束。
+
+首次跨服务混合 batch 的逐点比较失败。进一步同版本对照发现，旧版本自身在
+服务端组批变化时也会产生分数差异；固定单请求和匹配组批时新旧分数一致。
+重复 token 的合成输入中，旧版同一 stop 分数出现约 0.875 的变化。真实短轨迹的
+单请求新旧分数完全一致；跨批次的 RVQ 分数也存在变化，stop 差异约 4e-7。
+本轮没有修改 attention 或组批算法，也没有定位该既有批次敏感性的根因。
+原始失败日志和进一步的对照均保留，不声称任意 HTTP batch 都逐点等价。
+
+CPU 回归：Slime 344 passed / 1 skipped，Omni 62 passed / 6 skipped。
+Omni 的全仓 pre-commit 和 Slime 的改动文件检查通过。GPU Job
+slime-prism-cleanup-dp2-1014-a1 成功，全部 Job / Serving 条目保留。
+
+固定产物目录：
+
+```text
+/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/compat-cleanup-20261014-024941
+```
+
+analysis/training-comparison.json 保存逐阶段统计与全部配对窗口；
+analysis/teacher-benchmark.json 保存数值对照和 HTTP 计时；
+analysis/batch-grouping-observation.json 与 teacher-real-rollout-summary.json
+记录组批敏感性。每个 runs/<case>/verification.json、checkpoint/ 和 experiment/
+分别保存该 case 的验收结果、checkpoint 和候选/音频/指标。平台回执位于 platform/。
+
 ## 运行时重构与 32 卡回归（2026-10-13 UTC）
 
 本轮把 Prism 运行时从 examples 移入安装包，拆分模型辅助逻辑，并验证教师请求、

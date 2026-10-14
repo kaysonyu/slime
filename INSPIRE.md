@@ -8,6 +8,11 @@
 只读复核记录保留在该目录。具体性能数据和验收边界见
 `examples/prism/VALIDATION.md`；实际运行版本以每个 case 的 source pin 为准。
 
+兼容层清理的固定验收产物位于
+`/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/compat-cleanup-20261014-024941`。
+该轮使用成对升级的 Prism teacher version 2 协议；2 卡回归、真实评分对照及
+组批敏感性记录见 `examples/prism/VALIDATION.md`，没有替代此前的 32 卡验收。
+
 | 资产 | 固定位置 / 身份 |
 | --- | --- |
 | Native Prism 预训练 RUN | `/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/yangxiaogui/mossLite/RUNs/delivery/pretrain/prism_pretrain_1.7B_v0.4.0` |
