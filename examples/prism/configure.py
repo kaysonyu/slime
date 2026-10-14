@@ -17,7 +17,7 @@ from urllib.request import Request, urlopen
 import yaml
 
 from slime.backends.sglang_utils.omni_engine import validate_admin_result
-from slime_plugins.omni_rollout import PrismConfig
+from slime_plugins.prism.protocol import PrismConfig
 from slime_plugins.tts_reward import PROTOCOL
 
 

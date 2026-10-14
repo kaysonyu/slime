@@ -216,7 +216,7 @@ def test_split_metrics_preserve_objective_gradients_and_component_denominators(u
 
 def test_prism_extractor_integrates_with_native_policy_loss(monkeypatch):
     from slime.utils import misc
-    from slime_plugins.models.prism import extract_policy_log_probs
+    from slime_plugins.models.prism_policy import extract_policy_log_probs
 
     monkeypatch.setattr(misc, "load_function", lambda path: extract_policy_log_probs)
     args = arguments()

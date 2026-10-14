@@ -10,13 +10,13 @@ import pytest
 import torch
 from torch import nn
 
-from slime_plugins.models import prism
+from slime_plugins.models import prism, prism_checkpoint, prism_configuration, prism_policy, prism_topology
 
 NUM_GPUS = 0
 
 
 def _topology(counts=(1, 2), ranges=(), repetitions=(), reapply=False):
-    return prism.resolve_prism_topology(
+    return prism_topology.resolve_prism_topology(
         SimpleNamespace(
             n_vq=sum(counts),
             prism_loop_block_ranges=ranges,
@@ -53,7 +53,7 @@ def _carrier(frames=1, natural_stop=True, padding=0):
 
 
 def _prepare(carrier, boundaries=None, audio_start_token_id=151652):
-    return prism.prepare_policy_inputs(
+    return prism_policy.prepare_policy_inputs(
         **carrier,
         n_vq=3,
         speech_vocab_size=2,
@@ -226,18 +226,18 @@ def test_extractor_keeps_terminal_stop_separate_and_omits_tail_padding():
     output = torch.arange(4 * 4, dtype=torch.float32).reshape(1, 4, 4)
     mask = torch.tensor([[1, 1, 1], [0, 0, 0], [0, 0, 0]], dtype=torch.bool)
     batch = {"total_lengths": [2, 1], "multimodal_train_inputs": {"policy_code_mask": mask}}
-    result = prism.extract_policy_log_probs(SimpleNamespace(use_rollout_entropy=False), batch, output)
+    result = prism_policy.extract_policy_log_probs(SimpleNamespace(use_rollout_entropy=False), batch, output)
     assert [value.shape for value in result["policy_code_logprobs"]] == [(2, 3), (1, 3)]
     assert result["policy_stop_logprobs"][1].tolist() == [11]
     assert result["log_probs"][0].tolist() == [3]
     assert result["log_probs"][1].numel() == 0
     with pytest.raises(ValueError, match="entropy was requested"):
-        prism.extract_policy_log_probs(SimpleNamespace(use_rollout_entropy=True), batch, output)
+        prism_policy.extract_policy_log_probs(SimpleNamespace(use_rollout_entropy=True), batch, output)
 
 
 def test_entropy_and_selected_probability_match_categorical_gradient():
     logits = torch.tensor([[0.5, -0.7, 1.3]], requires_grad=True)
-    selected, entropy = prism.selected_logprob_and_entropy(logits, torch.tensor([1]), return_entropy=True)
+    selected, entropy = prism_policy.selected_logprob_and_entropy(logits, torch.tensor([1]), return_entropy=True)
     distribution = torch.distributions.Categorical(logits=logits)
     torch.testing.assert_close(selected, distribution.log_prob(torch.tensor([1])))
     torch.testing.assert_close(entropy, distribution.entropy())
@@ -263,7 +263,7 @@ def test_entropy_columns_follow_the_selected_score_layout(monkeypatch):
         "total_lengths": [2],
         "multimodal_train_inputs": {"policy_code_mask": carrier["policy_code_mask"]},
     }
-    results = prism.extract_policy_log_probs(SimpleNamespace(use_rollout_entropy=True), batch, output)
+    results = prism_policy.extract_policy_log_probs(SimpleNamespace(use_rollout_entropy=True), batch, output)
     # Real finite continue/stop log probabilities remain outside the legacy
     # Omni frame summary, while the action arrays retain both queried stops.
     assert output[0, 0, 3] < 0
@@ -310,16 +310,16 @@ def _hf_config():
 
 def test_artifact_config_preserves_depth_and_full_rope_semantics():
     config = _hf_config()
-    spec = prism.PrismModelSpec.from_hf_config(config)
+    spec = prism_configuration.PrismModelSpec.from_hf_config(config)
     assert spec.topology.co_site_groups == ((1,), (2, 3))
     assert spec.input_rvq_channels == (1, 2, 3)
     config["language_config"]["num_hidden_layers"] = 3
     with pytest.raises(ValueError, match="physical topology"):
-        prism.PrismModelSpec.from_hf_config(config)
+        prism_configuration.PrismModelSpec.from_hf_config(config)
     config["language_config"]["num_hidden_layers"] = 2
     config["language_config"]["rope_parameters"]["rope_type"] = "linear"
     with pytest.raises(ValueError, match="unscaled RoPE"):
-        prism.PrismModelSpec.from_hf_config(config)
+        prism_configuration.PrismModelSpec.from_hf_config(config)
 
 
 @pytest.mark.parametrize("frames", [0, 1])
@@ -335,7 +335,7 @@ def test_artifact_audio_start_must_match_the_native_moss_v2_protocol():
     config = _hf_config()
     config["audio_start_token_id"] = 151600
     with pytest.raises(ValueError, match="requires audio_start_token_id"):
-        prism.PrismModelSpec.from_hf_config(config)
+        prism_configuration.PrismModelSpec.from_hf_config(config)
 
 
 def test_checkpoint_selection_accepts_run_without_inspecting_training_state(tmp_path):
@@ -346,13 +346,13 @@ def test_checkpoint_selection_accepts_run_without_inspecting_training_state(tmp_
     (component / "model" / ".metadata").write_bytes(b"metadata")
     (component / "checkpoint.json").write_text(json.dumps({"schema_version": 2, "iteration": 20}))
     (tmp_path / "checkpoints" / "latest_checkpointed_iteration.txt").write_text("20")
-    selected, manifest = prism.select_native_checkpoint(tmp_path)
+    selected, manifest = prism_checkpoint.select_native_checkpoint(tmp_path)
     assert selected == component / "model"
     assert manifest["iteration"] == 20
-    pinned, _ = prism.select_native_checkpoint(component, 20)
+    pinned, _ = prism_checkpoint.select_native_checkpoint(component, 20)
     assert pinned == component / "model"
     with pytest.raises(ValueError, match="explicit native checkpoint"):
-        prism.select_native_checkpoint(component, 21)
+        prism_checkpoint.select_native_checkpoint(component, 21)
 
 
 @pytest.mark.parametrize("dtype,flag", [("bfloat16", "--bf16"), ("float16", "--fp16")])
@@ -364,7 +364,7 @@ def test_generated_megatron_cli_has_ordinary_architecture_flags_before_parse(tmp
     config["dtype"] = dtype
     config["embedding_head_usage"] = "tied_head_authoritative"
     (tmp_path / "config.json").write_text(json.dumps(config))
-    tokens = prism.prism_megatron_cli_args(tmp_path)
+    tokens = prism_configuration.prism_megatron_cli_args(tmp_path)
     parser = argparse.ArgumentParser()
     integer_flags = (
         "num-layers",
@@ -418,7 +418,7 @@ def test_generated_megatron_cli_rejects_unrepresentable_fractional_rope_base(tmp
     config["language_config"]["rope_parameters"]["rope_theta"] = 1000000.5
     (tmp_path / "config.json").write_text(json.dumps(config))
     with pytest.raises(ValueError, match="integer Prism RoPE base"):
-        prism.prism_megatron_cli_args(tmp_path)
+        prism_configuration.prism_megatron_cli_args(tmp_path)
 
 
 def test_plugin_initializer_reads_generic_source_and_pin_without_rl_progress(monkeypatch, tmp_path):
@@ -454,7 +454,7 @@ def test_plugin_initializer_reads_generic_source_and_pin_without_rl_progress(mon
         or SimpleNamespace(missing_keys=["kernel._extra_state"], unexpected_keys=[]),
     )
     args = SimpleNamespace(pretrained_checkpoint=str(component), ckpt_step=20, iteration=777)
-    assert prism.load_prism_pretrained([model], args) is None
+    assert prism_checkpoint.load_prism_pretrained([model], args) is None
     assert calls == ["identity", ("loaded", 2.0)]
     assert args.iteration == 777 and args.ckpt_step == 20
 
@@ -480,8 +480,8 @@ def test_cpu_config_helpers_survive_missing_cuda_library_but_training_fails_expl
     monkeypatch.setitem(sys.modules, module_name, cpu_module)
     module_spec.loader.exec_module(cpu_module)
     (tmp_path / "config.json").write_text(json.dumps(_hf_config()))
-    assert cpu_module.read_prism_spec(tmp_path).hidden_size == 16
-    generated = cpu_module.prism_megatron_cli_args(tmp_path)
+    assert prism_configuration.read_prism_spec(tmp_path).hidden_size == 16
+    generated = prism_configuration.prism_megatron_cli_args(tmp_path)
     assert generated[generated.index("--num-layers") + 1] == "2"
     assert "--qk-layernorm" in generated
     assert cpu_module._MEGATRON_IMPORT_ERROR is binary_error

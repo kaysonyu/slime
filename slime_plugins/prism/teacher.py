@@ -244,7 +244,7 @@ def teacher_request(sample):
         codes = trace["action_streams"][0]["actions"]
     return _copy_wire_data(
         dict(
-            version=1,
+            version=2,
             sample_id=sample_id,
             **replay,
             codes=codes,
@@ -261,7 +261,7 @@ def teacher_request_hash(request):
 
 
 def attach_teacher_scores(sample, request, result, binding):
-    """Convert teacher Bernoulli probabilities into the student's sampled action scores."""
+    """Align the teacher's selected-action scores with the student's trajectory."""
     identity = binding.get("model_identity")
     student = sample.metadata["omni_rollout"]["model_identity"]
     if not isinstance(identity, dict) or {k: v for k, v in identity.items() if k != "config_sha256"} != {
@@ -286,7 +286,7 @@ def attach_teacher_scores(sample, request, result, binding):
     if type(result.get("version")) is not int or type(result.get("temperature")) not in (int, float):
         raise ValueError("Prism teacher response version or temperature has invalid scalar types")
     expected = dict(
-        version=1,
+        version=2,
         sample_id=request["sample_id"],
         input_sha256=teacher_request_hash(request),
         temperature=1.0,
@@ -303,24 +303,10 @@ def attach_teacher_scores(sample, request, result, binding):
     f, q = sample.response_length, student["n_vq"]
     stops = f + int(request["finish_reason"] == "stop")
     scores = _tensor(result.get("code_logprobs"), (f, q), torch.float32, "teacher code logprobs")
-    probabilities = _tensor(result.get("stop_probabilities"), (stops,), torch.float64, "teacher stop probabilities")
-    if (scores > 1e-5).any() or ((probabilities < 0) | (probabilities > 1)).any():
-        raise ValueError("Teacher selected scores are invalid or stop probabilities are outside [0, 1]")
+    selected = _tensor(result.get("selected_stop_logprobs"), (stops,), torch.float32, "teacher selected stop logprobs")
+    if (scores > 1e-5).any() or (selected > 1e-5).any():
+        raise ValueError("Teacher selected logprobs must be nonpositive")
     mm = sample.multimodal_train_inputs
-    actions = mm["policy_stop_actions"][mm["policy_stop_mask"]]
-    if "stop_logprobs" in result:
-        stop_scores = _tensor(result["stop_logprobs"], (stops, 2), torch.float32, "teacher stop logprobs")
-        if (stop_scores > 1e-5).any() or not torch.allclose(
-            stop_scores.logsumexp(-1), torch.zeros(stops), atol=2e-5, rtol=0
-        ):
-            raise ValueError("Teacher stop logprobs must be normalized")
-        if not torch.allclose(stop_scores[:, 1].double().exp(), probabilities, atol=2e-5, rtol=2e-4):
-            raise ValueError("Teacher stop logprobs disagree with probabilities")
-        selected = stop_scores.gather(-1, actions.long().unsqueeze(-1)).squeeze(-1)
-    else:
-        selected = torch.where(actions.bool(), probabilities.log(), torch.log1p(-probabilities)).float()
-    if not torch.isfinite(selected).all():
-        raise ValueError("Selected teacher stop action has zero probability; the scorer must return stable logprobs")
     code_result = torch.zeros_like(mm["policy_rollout_code_logprobs"])
     stop_result = torch.zeros_like(mm["policy_rollout_stop_logprobs"])
     code_result[mm["policy_code_mask"].any(-1)] = scores

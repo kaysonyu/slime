@@ -113,7 +113,8 @@ def run(args: argparse.Namespace) -> dict:
     from slime.backends.sglang_utils.deployment import launch_omni_router
     from slime.backends.sglang_utils.omni_engine import OMNI_WORKER_CAPABILITIES, OmniEngine
     from slime.utils.types import Sample
-    from slime_plugins.omni_rollout import PrismConfig, build_generate_payload, parse_rollout
+    from slime_plugins.omni_rollout import build_generate_payload, parse_rollout
+    from slime_plugins.prism.protocol import PrismConfig
 
     config = PrismConfig.from_path(args.hf_checkpoint)
     engine_args = argparse.Namespace(

@@ -1,4 +1,4 @@
-"""Prism Omni rollout and frozen-teacher adapters for slime's existing Sample.
+"""Prism Omni generation and replay adapters for slime's existing Sample.
 
 The transformer time axis stays one dimensional. Typed audio carriers and
 selected actions are multimodal tensors; no RL objective lives in this module.
@@ -26,45 +26,20 @@ from slime_plugins.prism.protocol import (
     LAYOUT,
     LOGPROB_SEMANTICS,
     NONE,
-    REFERENCE,
-    REPLAY_FIELDS,
     STOP_SEMANTICS,
     TARGET,
     TEXT,
-    PrismConfig,
     _config,
     _copy_wire_data,
     _integer,
     _tensor,
 )
-from slime_plugins.prism.teacher import (
-    _teacher_endpoint,
-    attach_teacher_scores,
-    score_teacher,
-    teacher_request,
-    teacher_request_hash,
-)
 
 __all__ = [
-    "PrismConfig",
-    "TEXT",
-    "AUDIO",
-    "NONE",
-    "REFERENCE",
-    "TARGET",
-    "LAYOUT",
-    "LOGPROB_SEMANTICS",
-    "STOP_SEMANTICS",
-    "REPLAY_FIELDS",
     "parse_rollout",
     "build_generate_payload",
     "generate",
     "finalize_sample",
-    "teacher_request",
-    "teacher_request_hash",
-    "attach_teacher_scores",
-    "score_teacher",
-    "_teacher_endpoint",
 ]
 
 

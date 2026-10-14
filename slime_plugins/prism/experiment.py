@@ -58,8 +58,6 @@ def prepare_run(run_dir, command, *, identity, dry_run=False):
     # Custom YAML is applied after CLI parsing by slime, so it has precedence.
     effective = {key: values[-1] for key, values in options.items()} | config
     reward_path = effective.get("custom_rm_path")
-    if reward_path in {f"{ARTIFACTS}.reward", "examples.prism.artifacts.reward"}:
-        reward_path = config.get("prism_reward_function_path")
     if not isinstance(reward_path, str) or not reward_path:
         raise ValueError("Prism artifact recording requires an explicit custom reward function")
     hooks = config.get("rollout_sample_hook_path", options.get("rollout_sample_hook_path", []))
@@ -67,17 +65,8 @@ def prepare_run(run_dir, command, *, identity, dry_run=False):
         raise ValueError("rollout_sample_hook_path must be a list")
     config.update(
         prism_artifact_dir=str(root),
-        prism_reward_function_path=reward_path,
         custom_rm_path=reward_path,
-        rollout_sample_hook_path=[
-            p
-            for p in hooks
-            if p
-            not in {
-                f"{ARTIFACTS}.prepare_sample",
-                "examples.prism.artifacts.prepare_sample",
-            }
-        ],
+        rollout_sample_hook_path=hooks,
     )
     observers = config.get("rollout_sample_observer_path", options.get("rollout_sample_observer_path", []))
     if not isinstance(observers, list):

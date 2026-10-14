@@ -21,6 +21,7 @@ import torch
 from slime.utils.types import Sample
 from slime_plugins import omni_rollout as plugin
 from slime_plugins.prism import http_client as prism_http
+from slime_plugins.prism import protocol as prism_protocol
 from slime_plugins.prism import teacher as teacher_plugin
 
 NUM_GPUS = 0
@@ -39,7 +40,7 @@ def geometry():
         sample_rate=24000,
         stop_semantics="pre_frame_threshold_v1",
     )
-    return plugin.PrismConfig(2, 8, 32, 9, 0, 4, 24000, 128, (1,), identity)
+    return prism_protocol.PrismConfig(2, 8, 32, 9, 0, 4, 24000, 128, (1,), identity)
 
 
 def sample(index=7):
@@ -74,8 +75,8 @@ def output(frames=2, finish="stop"):
         request_id="request-1",
         model_identity=config.identity,
         admission_weight_version="step_1",
-        logprob_semantics=plugin.LOGPROB_SEMANTICS,
-        stop_semantics=plugin.STOP_SEMANTICS,
+        logprob_semantics=prism_protocol.LOGPROB_SEMANTICS,
+        stop_semantics=prism_protocol.STOP_SEMANTICS,
         sampling=dict(
             audio_temperature=1.0,
             audio_top_p=1.0,
@@ -85,7 +86,7 @@ def output(frames=2, finish="stop"):
             max_new_tokens=10,
         ),
         replay_inputs=dict(
-            layout=plugin.LAYOUT,
+            layout=prism_protocol.LAYOUT,
             prompt_rows=[[3, 0, 0], [4, 0, 0]],
             item_kind=[0, 0],
             audio_role=[0, 0],
@@ -162,7 +163,7 @@ def test_trace_keeps_time_axis_and_exact_terminal_stop(frames, finish):
     if frames:
         assert mm["target_history_retention_mask"][-1].tolist() == [True, False]
         torch.testing.assert_close(mm["successor_audio_codes"][1 : 1 + frames], mm["audio_codes"][2:])
-        assert mm["audio_role"][2:].tolist() == [plugin.TARGET] * frames
+        assert mm["audio_role"][2:].tolist() == [prism_protocol.TARGET] * frames
     item._validate_response_metadata_lengths()
     restored = Sample.from_dict(item.to_dict())
     assert restored.response_length == frames
@@ -173,17 +174,17 @@ def test_trace_and_teacher_request_keep_independent_exact_snapshots():
     response, item = output(), sample()
     plugin.parse_rollout(response, item, geometry())
     snapshot = copy.deepcopy(item.metadata["omni_rollout"])
-    request = plugin.teacher_request(item)
+    request = teacher_plugin.teacher_request(item)
     expected = dict(
-        version=1,
+        version=2,
         sample_id="2:7:request-1",
-        **{name: copy.deepcopy(snapshot["replay_inputs"][name]) for name in plugin.REPLAY_FIELDS},
+        **{name: copy.deepcopy(snapshot["replay_inputs"][name]) for name in prism_protocol.REPLAY_FIELDS},
         codes=copy.deepcopy(snapshot["action_streams"][0]["actions"]),
         finish_reason="stop",
         temperature=1.0,
     )
     assert request == expected
-    assert plugin.teacher_request_hash(request) == plugin.teacher_request_hash(expected)
+    assert teacher_plugin.teacher_request_hash(request) == teacher_plugin.teacher_request_hash(expected)
     response["meta_info"]["omni_rollout"]["replay_inputs"]["prompt_rows"][0][0] = 17
     response["meta_info"]["omni_rollout"]["action_streams"][0]["actions"][0][0] = 6
     assert item.metadata["omni_rollout"] == snapshot
@@ -403,17 +404,18 @@ def teacher_binding():
 
 def teacher_output(request, binding):
     return dict(
-        version=1,
+        version=2,
         sample_id=request["sample_id"],
-        input_sha256=plugin.teacher_request_hash(request),
+        input_sha256=teacher_plugin.teacher_request_hash(request),
         code_logprobs=[[-0.2, -0.3] for _ in request["codes"]],
-        stop_probabilities=[0.25] * (len(request["codes"]) + int(request["finish_reason"] == "stop")),
+        selected_stop_logprobs=[math.log(0.75)] * len(request["codes"])
+        + ([math.log(0.25)] if request["finish_reason"] == "stop" else []),
         finish_reason=request["finish_reason"],
         temperature=1.0,
         weight_version="frozen_teacher",
         teacher_weight_sha256=binding["weight_sha256"],
         model_identity=binding["model_identity"],
-        logprob_semantics=plugin.LOGPROB_SEMANTICS,
+        logprob_semantics=prism_protocol.LOGPROB_SEMANTICS,
         stop_semantics="pre_frame_threshold_v1",
     )
 
@@ -424,29 +426,29 @@ def test_cross_config_teacher_requires_verified_replay_assets(monkeypatch):
     hashes = {"tokenizer.json": "one", "tokenizer_config.json": "two", "special_tokens_map.json": "three"}
     student_config = replace(geometry(), tokenizer_sha256=hashes)
     item = plugin.parse_rollout(output(), sample(), student_config)
-    request, binding = plugin.teacher_request(item), teacher_binding()
+    request, binding = teacher_plugin.teacher_request(item), teacher_binding()
     binding["model_identity"]["config_sha256"] = "different-backbone"
     result = teacher_output(request, binding)
     with pytest.raises(ValueError, match="requires local checkpoint"):
-        plugin.attach_teacher_scores(item, request, result, binding)
+        teacher_plugin.attach_teacher_scores(item, request, result, binding)
     binding["checkpoint"] = "teacher-fixture"
     teacher_config = replace(student_config, identity=binding["model_identity"])
     monkeypatch.setattr(teacher_plugin, "_config", lambda path: teacher_config)
-    assert plugin.attach_teacher_scores(item, request, result, binding) is item
+    assert teacher_plugin.attach_teacher_scores(item, request, result, binding) is item
     monkeypatch.setattr(teacher_plugin, "_config", lambda path: replace(teacher_config, audio_start_token_id=5))
     with pytest.raises(ValueError, match="incompatible geometry"):
-        plugin.attach_teacher_scores(item, request, result, binding)
+        teacher_plugin.attach_teacher_scores(item, request, result, binding)
 
 
 @pytest.mark.parametrize("frames,finish", [(2, "stop"), (2, "length"), (0, "stop")])
 def test_teacher_scores_exact_student_prefix_and_actual_stop_actions(frames, finish):
     item = plugin.parse_rollout(output(frames, finish), sample(), geometry())
-    request, binding = plugin.teacher_request(item), teacher_binding()
+    request, binding = teacher_plugin.teacher_request(item), teacher_binding()
     result = teacher_output(request, binding)
     assert request["temperature"] == 1.0 and type(request["temperature"]) is float
     assert request["prompt_rows"] == [[3, 0, 0], [4, 0, 0]]
     assert "stop_decisions" not in request
-    plugin.attach_teacher_scores(item, request, result, binding)
+    teacher_plugin.attach_teacher_scores(item, request, result, binding)
     mm = item.multimodal_train_inputs
     expected = [math.log(0.75)] * frames + ([math.log(0.25)] if finish == "stop" else [])
     torch.testing.assert_close(mm["policy_teacher_stop_logprobs"][mm["policy_stop_mask"]], torch.tensor(expected))
@@ -461,76 +463,61 @@ def test_teacher_scores_exact_student_prefix_and_actual_stop_actions(frames, fin
         ("teacher_weight_sha256", "b" * 64),
         ("temperature", 0.7),
         ("sample_id", "wrong"),
-        ("version", 2),
+        ("version", 1),
     ],
 )
 def test_teacher_rejects_stale_or_mismatched_scores(field, value):
     item = plugin.parse_rollout(output(), sample(), geometry())
-    request, binding = plugin.teacher_request(item), teacher_binding()
+    request, binding = teacher_plugin.teacher_request(item), teacher_binding()
     result = teacher_output(request, binding)
     result[field] = value
     with pytest.raises(ValueError, match="differs"):
-        plugin.attach_teacher_scores(item, request, result, binding)
+        teacher_plugin.attach_teacher_scores(item, request, result, binding)
 
 
-@pytest.mark.parametrize("probability", [-0.1, 1.1, float("nan")])
-def test_teacher_invalid_probabilities_are_rejected_without_target_clipping(probability):
+@pytest.mark.parametrize("score", [0.1, float("nan"), float("inf"), -float("inf"), True])
+def test_teacher_invalid_selected_scores_are_rejected_without_clipping(score):
     item = plugin.parse_rollout(output(), sample(), geometry())
-    request, binding = plugin.teacher_request(item), teacher_binding()
+    request, binding = teacher_plugin.teacher_request(item), teacher_binding()
     result = teacher_output(request, binding)
-    result["stop_probabilities"][0] = probability
+    result["selected_stop_logprobs"][0] = score
     with pytest.raises(ValueError):
-        plugin.attach_teacher_scores(item, request, result, binding)
-
-
-@pytest.mark.parametrize(
-    "position,probability,raises",
-    [
-        pytest.param(0, 0.0, False, id="continue-certain"),
-        pytest.param(0, 1.0, True, id="continue-zero-probability"),
-        pytest.param(1, 1.0, False, id="stop-certain"),
-        pytest.param(1, 0.0, True, id="stop-zero-probability"),
-    ],
-)
-def test_teacher_endpoint_probability_is_conditioned_on_the_sampled_action(position, probability, raises):
-    item = plugin.parse_rollout(output(frames=1), sample(), geometry())
-    request, binding = plugin.teacher_request(item), teacher_binding()
-    result = teacher_output(request, binding)
-    result["stop_probabilities"][position] = probability
-    if raises:
-        with pytest.raises(ValueError, match="zero probability.*stable logprobs"):
-            plugin.attach_teacher_scores(item, request, result, binding)
-    else:
-        plugin.attach_teacher_scores(item, request, result, binding)
-        mm = item.multimodal_train_inputs
-        selected = mm["policy_teacher_stop_logprobs"][mm["policy_stop_mask"]]
-        assert selected[position].item() == 0.0
-        assert torch.isfinite(selected).all()
+        teacher_plugin.attach_teacher_scores(item, request, result, binding)
 
 
 @pytest.mark.parametrize("logits", [[0.0, 20.0], [200.0, 0.0]])
-def test_teacher_stable_stop_scores_survive_probability_saturation(logits):
+def test_teacher_selected_stop_scores_survive_probability_saturation(logits):
     item = plugin.parse_rollout(output(frames=1), sample(), geometry())
-    request, binding = plugin.teacher_request(item), teacher_binding()
+    request, binding = teacher_plugin.teacher_request(item), teacher_binding()
     result = teacher_output(request, binding)
     scores = torch.tensor([logits, logits]).log_softmax(-1)
-    result["stop_probabilities"] = scores[:, 1].exp().tolist()
-    result["stop_logprobs"] = scores.tolist()
-    plugin.attach_teacher_scores(item, request, result, binding)
+    expected = scores[torch.arange(2), torch.tensor([0, 1])]
+    result["selected_stop_logprobs"] = expected.tolist()
+    teacher_plugin.attach_teacher_scores(item, request, result, binding)
     inputs = item.multimodal_train_inputs
     selected = inputs["policy_teacher_stop_logprobs"][inputs["policy_stop_mask"]]
-    torch.testing.assert_close(selected, scores[torch.arange(2), torch.tensor([0, 1])])
+    torch.testing.assert_close(selected, expected)
     assert torch.isfinite(selected).all()
 
 
-@pytest.mark.parametrize("scores", [[[0.0, 0.0]] * 2, [[-1.0, -1.0]] * 2])
-def test_teacher_stable_stop_scores_require_a_normalized_distribution(scores):
+@pytest.mark.parametrize("scores", [None, [], [[-0.5, -0.5]] * 2, [-0.5] * 3])
+def test_teacher_selected_stop_scores_require_exact_trajectory_shape(scores):
     item = plugin.parse_rollout(output(frames=1), sample(), geometry())
-    request, binding = plugin.teacher_request(item), teacher_binding()
+    request, binding = teacher_plugin.teacher_request(item), teacher_binding()
     result = teacher_output(request, binding)
-    result["stop_logprobs"] = scores
-    with pytest.raises(ValueError, match="normalized"):
-        plugin.attach_teacher_scores(item, request, result, binding)
+    result["selected_stop_logprobs"] = scores
+    with pytest.raises(ValueError):
+        teacher_plugin.attach_teacher_scores(item, request, result, binding)
+
+
+def test_teacher_old_score_fields_do_not_replace_selected_scores():
+    item = plugin.parse_rollout(output(frames=1), sample(), geometry())
+    request, binding = teacher_plugin.teacher_request(item), teacher_binding()
+    result = teacher_output(request, binding)
+    result.pop("selected_stop_logprobs")
+    result.update(stop_probabilities=[0.25, 0.25], stop_logprobs=[[math.log(0.75), math.log(0.25)]] * 2)
+    with pytest.raises(ValueError, match="selected stop logprobs"):
+        teacher_plugin.attach_teacher_scores(item, request, result, binding)
 
 
 def test_real_hf_artifact_protocol_from_environment():
@@ -538,7 +525,7 @@ def test_real_hf_artifact_protocol_from_environment():
     checkpoint = os.environ.get("PRISM_HF_TEST_ARTIFACT")
     if not checkpoint:
         pytest.skip("Set PRISM_HF_TEST_ARTIFACT to inspect a real exported HF artifact")
-    config = plugin.PrismConfig.from_path(checkpoint)
+    config = prism_protocol.PrismConfig.from_path(checkpoint)
     response = output()
     trace = response["meta_info"]["omni_rollout"]
     trace["model_identity"] = config.identity
@@ -579,12 +566,12 @@ def test_teacher_domain_hook_reuses_score_endpoint_and_rejects_unmapped_domain(m
         return {"version": 1, "results": [teacher_output(payload["samples"][0], binding)]}
 
     monkeypatch.setattr(prism_http, "post", fake_post)
-    assert asyncio.run(plugin.score_teacher(args, item)) is item
+    assert asyncio.run(teacher_plugin.score_teacher(args, item)) is item
     assert calls[0][0] == "http://teacher/score_actions" and calls[0][1]["max_retries"] == 1
     assert item.metadata["omni_teacher_key"] == "a"
     item.metadata["domain"] = "unmapped"
     with pytest.raises(ValueError, match="Unmapped"):
-        asyncio.run(plugin.score_teacher(args, item))
+        asyncio.run(teacher_plugin.score_teacher(args, item))
     assert len(calls) == 1
 
 
@@ -640,7 +627,7 @@ def test_named_teacher_discovers_live_workers_then_scores_directly(monkeypatch):
     monkeypatch.setattr(prism_http, "post", fake_post)
     for _ in range(2):
         item = plugin.parse_rollout(output(), sample(), geometry())
-        asyncio.run(plugin.score_teacher(args, item))
+        asyncio.run(teacher_plugin.score_teacher(args, item))
         assert item.metadata["omni_teacher_deployment"] == "teacher_a"
         assert item.metadata["omni_teacher_endpoint"] + "/score_actions" == posts[-1]
         assert "policy_teacher_stop_logprobs" in item.multimodal_train_inputs
@@ -661,7 +648,7 @@ def test_teacher_binding_requires_one_valid_endpoint_or_deployment(monkeypatch, 
         teacher_plugin, "get", lambda *args, **kwargs: pytest.fail("Invalid binding made an HTTP request")
     )
     with pytest.raises(ValueError):
-        asyncio.run(plugin._teacher_endpoint(named_teacher_args(binding), sample(), binding))
+        asyncio.run(teacher_plugin._teacher_endpoint(named_teacher_args(binding), sample(), binding))
 
 
 @pytest.mark.parametrize("role", ["student-name", "update-true", "inferred-student", "unconfigured", "missing-router"])
@@ -687,7 +674,7 @@ def test_named_teacher_rejects_student_or_unconfigured_models_before_http(monkey
         teacher_plugin, "get", lambda *args, **kwargs: pytest.fail("Invalid role made an HTTP request")
     )
     with pytest.raises(ValueError):
-        asyncio.run(plugin._teacher_endpoint(args, sample(), binding))
+        asyncio.run(teacher_plugin._teacher_endpoint(args, sample(), binding))
 
 
 def test_named_teacher_resolves_explicit_frozen_model_from_yaml(monkeypatch, tmp_path):
@@ -700,7 +687,7 @@ def test_named_teacher_resolves_explicit_frozen_model_from_yaml(monkeypatch, tmp
         return {"workers": [worker()]} if url.endswith("/workers") else {"running": True}
 
     monkeypatch.setattr(teacher_plugin, "get", fake_get)
-    assert asyncio.run(plugin._teacher_endpoint(args, sample(), binding)) == "http://worker-a"
+    assert asyncio.run(teacher_plugin._teacher_endpoint(args, sample(), binding)) == "http://worker-a"
 
 
 @pytest.mark.parametrize(
@@ -715,7 +702,7 @@ def test_named_teacher_rejects_router_workers_that_are_not_healthy_and_routable(
     monkeypatch.setattr(teacher_plugin, "get", fake_get)
     binding = named_teacher_binding()
     with pytest.raises(ValueError, match="no healthy routable"):
-        asyncio.run(plugin._teacher_endpoint(named_teacher_args(binding), sample(), binding))
+        asyncio.run(teacher_plugin._teacher_endpoint(named_teacher_args(binding), sample(), binding))
 
 
 def test_named_teacher_probes_registration_health_and_uses_another_live_replica(monkeypatch):
@@ -730,7 +717,7 @@ def test_named_teacher_probes_registration_health_and_uses_another_live_replica(
 
     monkeypatch.setattr(teacher_plugin, "get", fake_get)
     binding = named_teacher_binding()
-    selected = asyncio.run(plugin._teacher_endpoint(named_teacher_args(binding), sample(), binding))
+    selected = asyncio.run(teacher_plugin._teacher_endpoint(named_teacher_args(binding), sample(), binding))
     assert len(probes) == 2 and selected + "/health" == probes[-1]
 
 
@@ -754,7 +741,7 @@ def test_named_teacher_keeps_frozen_identity_and_weight_pins_strict(monkeypatch,
     monkeypatch.setattr(prism_http, "post", fake_post)
     item = plugin.parse_rollout(output(), sample(), geometry())
     with pytest.raises(ValueError, match="identity, input hash, checksum"):
-        asyncio.run(plugin.score_teacher(args, item))
+        asyncio.run(teacher_plugin.score_teacher(args, item))
     assert "policy_teacher_stop_logprobs" not in item.multimodal_train_inputs
 
 
@@ -850,20 +837,20 @@ def test_eval_audio_override_does_not_change_training(override, expected):
 def test_eval_teacher_hook_can_skip_without_changing_training():
     args = types.SimpleNamespace(omni_eval_teacher_scoring=False, omni_teacher_config={"models": {}, "by_domain": {}})
     item = sample()
-    assert asyncio.run(plugin.score_teacher(args, item, evaluation=True)) is item
+    assert asyncio.run(teacher_plugin.score_teacher(args, item, evaluation=True)) is item
     with pytest.raises(ValueError, match="Unmapped"):
-        asyncio.run(plugin.score_teacher(args, item, evaluation=False))
+        asyncio.run(teacher_plugin.score_teacher(args, item, evaluation=False))
 
 
 @pytest.mark.parametrize("frames,finish", [(0, "stop"), (1, "stop"), (2, "length")])
 def test_compact_replay_reconstructs_the_same_teacher_request_and_training_tensors(frames, finish):
     item = plugin.parse_rollout(output(frames, finish), sample(), geometry())
-    expected = plugin.teacher_request(item)
+    expected = teacher_plugin.teacher_request(item)
     tensors = {name: tensor.clone() for name, tensor in item.multimodal_train_inputs.items()}
     plugin.finalize_sample(types.SimpleNamespace(omni_compact_replay=True), item)
     assert "replay_inputs" not in item.metadata["omni_rollout"]
     assert "action_streams" not in item.metadata["omni_rollout"]
-    assert plugin.teacher_request(item) == expected
+    assert teacher_plugin.teacher_request(item) == expected
     for name, tensor in tensors.items():
         torch.testing.assert_close(item.multimodal_train_inputs[name], tensor, rtol=0, atol=0)
 
@@ -901,9 +888,9 @@ def test_teacher_batches_are_bounded_and_match_results_by_sample_id(tmp_path, mo
 
     async def run():
         items = [plugin.parse_rollout(output(), sample(index), geometry()) for index in range(11)]
-        await asyncio.gather(*(plugin.score_teacher(args, item) for item in items))
+        await asyncio.gather(*(teacher_plugin.score_teacher(args, item) for item in items))
         path.write_text("invalid config after the binding was frozen")
-        await plugin.score_teacher(args, plugin.parse_rollout(output(), sample(20), geometry()))
+        await teacher_plugin.score_teacher(args, plugin.parse_rollout(output(), sample(20), geometry()))
         await teacher_plugin.close_teacher_clients(args)
         assert all(item.metadata["omni_teacher_status"] == "success" for item in items)
 
@@ -931,7 +918,7 @@ def test_cancelling_one_teacher_sample_keeps_its_batch_peer_alive(monkeypatch):
 
         monkeypatch.setattr(teacher_plugin, "_request", request)
         items = [plugin.parse_rollout(output(), sample(index), geometry()) for index in range(2)]
-        first, second = [asyncio.create_task(plugin.score_teacher(args, item)) for item in items]
+        first, second = [asyncio.create_task(teacher_plugin.score_teacher(args, item)) for item in items]
         await entered.wait()
         first.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -958,6 +945,6 @@ def test_compact_replay_preserves_reference_audio_edges():
         target_history_retention_mask=[[False, False]] * 4,
     )
     item = plugin.parse_rollout(response, sample(), geometry())
-    expected = plugin.teacher_request(item)
+    expected = teacher_plugin.teacher_request(item)
     plugin.finalize_sample(types.SimpleNamespace(omni_compact_replay=True), item)
-    assert plugin.teacher_request(item) == expected
+    assert teacher_plugin.teacher_request(item) == expected

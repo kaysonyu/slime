@@ -16,7 +16,8 @@ MixRL 支持注册在 `CATEGORY_REWARDS` 中的类别名，不从每行数据动
 
 示例默认的 grpo.yaml/mopd.yaml 不覆盖奖励入口。若额外的自定义 YAML 设置了
 `custom_rm_path`，它按框架原有规则覆盖 CLI；本轮 `config/experiment.yaml` 中的
-`prism_reward_function_path` 记录了实际委托的函数，可以用它核对最终选择。
+`custom_rm_path` 记录了最终选择。归档通过 sample observer 独立记录，每条记录的
+`reward_function_path` 保留该样本实际使用的函数，包括评估数据集的单独设置。
 
 ## 数据格式与可复制模板
 

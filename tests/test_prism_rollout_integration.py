@@ -12,7 +12,6 @@ import sys
 import types
 from argparse import Namespace
 
-import _cp_dist_helpers  # noqa: F401: shared CPU MCore global-state stub
 import pytest
 import torch
 
@@ -20,7 +19,8 @@ from slime.data.batch_builder import BatchBuilder
 from slime.observability.rollout_data_utils import tensorize_rollout_data_for_training
 from slime.utils.types import Sample
 from slime_plugins import omni_rollout
-from slime_plugins.models import prism
+from slime_plugins.models import prism_configuration, prism_policy
+from slime_plugins.prism import protocol as prism_protocol
 
 NUM_GPUS = 0
 
@@ -30,14 +30,14 @@ def config():
     """Optionally bind these wire/carrier checks to a real inference artifact."""
     checkpoint = os.environ.get("SLIME_TEST_PRISM_HF_CHECKPOINT")
     if checkpoint:
-        result = omni_rollout.PrismConfig.from_path(checkpoint)
-        spec = prism.read_prism_spec(checkpoint)
+        result = prism_protocol.PrismConfig.from_path(checkpoint)
+        spec = prism_configuration.read_prism_spec(checkpoint)
         assert result.n_vq == spec.topology.n_vq
         assert result.speech_vocab_size == spec.speech_vocab_size
         assert result.text_pad_idx == spec.text_pad_idx
         assert result.input_rvq_channels == spec.input_rvq_channels
         return result
-    return omni_rollout.PrismConfig(
+    return prism_protocol.PrismConfig(
         n_vq=3,
         speech_vocab_size=8,
         text_vocab_size=151700,
@@ -107,8 +107,8 @@ def trace(config, frames, finish, index):
         "request_id": f"request-{index}",
         "model_identity": config.identity,
         "admission_weight_version": "step_7",
-        "logprob_semantics": omni_rollout.LOGPROB_SEMANTICS,
-        "stop_semantics": omni_rollout.STOP_SEMANTICS,
+        "logprob_semantics": prism_protocol.LOGPROB_SEMANTICS,
+        "stop_semantics": prism_protocol.STOP_SEMANTICS,
         "sampling": {
             "audio_temperature": 1.0,
             "audio_top_p": 1.0,
@@ -117,7 +117,7 @@ def trace(config, frames, finish, index):
             "stop_sampling": True,
         },
         "replay_inputs": {
-            "layout": omni_rollout.LAYOUT,
+            "layout": prism_protocol.LAYOUT,
             "prompt_rows": rows,
             "item_kind": [0, 0, 1, 0, 0],
             "audio_role": [0, 0, 1, 0, 0],
@@ -244,7 +244,7 @@ def test_omni_samples_native_conversion_packing_and_stop_gradients(config, nativ
     assert batch["packed_seq_params"].cu_seqlens_q.tolist() == expected_boundaries
 
     mm = batch["multimodal_train_inputs"]
-    prepared = prism.prepare_policy_inputs(
+    prepared = prism_policy.prepare_policy_inputs(
         input_ids=batch["tokens"],
         **{
             key: mm[key]
@@ -296,7 +296,7 @@ def test_omni_samples_native_conversion_packing_and_stop_gradients(config, nativ
     output = torch.cat((mm["policy_rollout_code_logprobs"], mm["policy_rollout_stop_logprobs"][:, None]), dim=-1)
     output = torch.cat((output, torch.zeros(padded_rows - total_rows, config.n_vq + 1))).unsqueeze(0)
     output.requires_grad_()
-    scores = prism.extract_policy_log_probs(args, batch, output)
+    scores = prism_policy.extract_policy_log_probs(args, batch, output)
     view = build_policy_action_view(args, batch, scores)
     (-view.reduce(torch.cat(view.current))).backward()
     assert output.grad[0, zero_stop_position, config.n_vq].item() == (0 if remove_zero_frame else -1)

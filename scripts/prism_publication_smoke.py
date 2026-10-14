@@ -167,7 +167,7 @@ def publication(engines, context):
         hf_checkpoint=context["hf_checkpoint"],
         pretrained_checkpoint=context["native_checkpoint"],
         ckpt_step=options.get("native_step"),
-        custom_megatron_model_initializer_path="slime_plugins.models.prism.load_prism_pretrained",
+        custom_megatron_model_initializer_path="slime_plugins.models.prism_checkpoint.load_prism_pretrained",
         artifact_dir=str(output),
         numpy_overlay=None,
         omni_url=context["router_url"],
@@ -197,7 +197,7 @@ def verify_generated(context, response, sample):
     import torch
 
     from scripts.test_prism_gpu import compare_omni_scores, forward, make_batch
-    from slime_plugins.models.prism import extract_policy_log_probs
+    from slime_plugins.models.prism_policy import extract_policy_log_probs
 
     if _learner is None:
         raise RuntimeError("Run the publication hook before post-generation verification")

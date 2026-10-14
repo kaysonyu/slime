@@ -20,7 +20,8 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from slime.rollout.sample_hooks import apply_rollout_sample_hooks, rollout_context
+from slime.rollout.rm_hub import async_rm, batched_async_rm
+from slime.rollout.sample_hooks import apply_rollout_sample_hooks, notify_sample_observers, rollout_context
 from slime.utils.types import Sample
 from slime_plugins.prism import artifacts, experiment
 
@@ -54,8 +55,9 @@ def args(tmp_path):
     return SimpleNamespace(
         prism_artifact_dir=str(tmp_path / "running_round_0"),
         omni_audio_dir=str(tmp_path / "audio"),
-        prism_reward_function_path=f"{__name__}.score",
-        rollout_sample_hook_path=["slime_plugins.prism.artifacts.prepare_sample"],
+        custom_rm_path=f"{__name__}.score",
+        rollout_sample_hook_path=[],
+        rollout_sample_observer_path=["slime_plugins.prism.artifacts.observe"],
         prompt_data="training.jsonl",
         n_samples_per_prompt=2,
         prism_rollout_log_function_path=None,
@@ -106,8 +108,22 @@ def sample(args, index=0, *, frames=4, **metadata):
 
 async def archive_and_score(args, item, *, rollout_id=7, evaluation=False, **kwargs):
     with rollout_context(rollout_id):
-        await apply_rollout_sample_hooks(args, item, evaluation=evaluation)
-    item.reward = await artifacts.reward(args, item, **kwargs)
+        stage = "generation"
+        try:
+            await notify_sample_observers(args, item, event="generated", stage=stage, evaluation=evaluation)
+            stage = "sample_hooks"
+            await apply_rollout_sample_hooks(args, item, evaluation=evaluation)
+            stage = "reward"
+            if isinstance(item, list):
+                rewards = await batched_async_rm(args, item, **kwargs)
+                for sample, value in zip(item, rewards, strict=True):
+                    sample.reward = value
+            else:
+                item.reward = await async_rm(args, item, **kwargs)
+            await notify_sample_observers(args, item, event="completed", stage=stage, evaluation=evaluation)
+        except BaseException as error:
+            await notify_sample_observers(args, item, event="failed", stage=stage, error=error, evaluation=evaluation)
+            raise
     return item
 
 
@@ -193,7 +209,9 @@ def test_generated_waveform_is_written_directly_to_its_archive(args, monkeypatch
         )
     generated = Path(item.metadata["omni_audio_path"])
     assert generated.read_bytes() == content.getvalue()
-    asyncio.run(artifacts.prepare_sample(args, item, rollout_id=7, evaluation=evaluation))
+    asyncio.run(
+        artifacts.observe(args, item, event="generated", stage="generation", rollout_id=7, evaluation=evaluation)
+    )
     record = json.loads(Path(item.metadata["prism_artifact"]["record_path"]).read_text())
     assert record["audio_path"] == str(generated) and record["reward_status"] == "pending"
     assert generated.stem == Path(record["record_path"]).stem
@@ -223,7 +241,9 @@ def test_cancelled_preparation_finishes_durable_candidate_record(args, monkeypat
     monkeypatch.setattr(artifacts, "_prepare_sample", delayed)
 
     async def cancel():
-        pending = asyncio.create_task(artifacts.prepare_sample(args, item, rollout_id=7))
+        pending = asyncio.create_task(
+            artifacts.observe(args, item, event="generated", stage="generation", rollout_id=7)
+        )
         assert await asyncio.to_thread(started.wait, 10)
         pending.cancel()
         finish.set()
@@ -252,9 +272,8 @@ def test_batched_rewards_keep_original_shape(args):
     candidates = [sample(args, i) for i in range(2)]
 
     async def run():
-        with rollout_context(7):
-            await apply_rollout_sample_hooks(args, candidates)
-        assert await artifacts.reward(args, candidates) == [0.2, 0.6]
+        await archive_and_score(args, candidates)
+        assert [item.reward for item in candidates] == [0.2, 0.6]
 
     asyncio.run(run())
     assert all(
@@ -387,7 +406,7 @@ def test_fixed_reward_archives_the_executed_category(args, monkeypatch, category
     service = Service()
     monkeypatch.setattr(tts_reward, "get", service.get)
     monkeypatch.setattr(tts_reward, "post", service.post)
-    args.prism_reward_function_path = "examples.prism.rewards.voiceclone.reward"
+    args.custom_rm_path = "examples.prism.rewards.voiceclone.reward"
     args.omni_reward_config = config(wer=1, sim=1)
     item = sample(args)
     item.metadata["omni_prompt"]["reference_targets"] = {"timbre": "speaker"}
@@ -466,7 +485,7 @@ def test_grpo_templates_route_native_groups_and_archive_actual_rewards(
     service = Service()
     monkeypatch.setattr(tts_reward, "get", service.get)
     monkeypatch.setattr(tts_reward, "post", service.post)
-    args.prism_reward_function_path = reward_path
+    args.custom_rm_path = reward_path
     args.omni_reward_config = config(wer=1, sim=1, judge_clap=1)
     groups = _template_groups(args, filename, 2)
     audio = Path(args.omni_audio_dir)
@@ -488,11 +507,7 @@ def test_grpo_templates_route_native_groups_and_archive_actual_rewards(
         item.metadata["omni_audio_path"] = str(candidate)
 
     async def run():
-        with rollout_context(7):
-            await apply_rollout_sample_hooks(args, groups)
-        values = await artifacts.reward(args, candidates)
-        for item, value in zip(candidates, values, strict=True):
-            item.reward = value
+        await archive_and_score(args, candidates)
 
     asyncio.run(run())
     components = {
@@ -524,9 +539,9 @@ def test_mopd_template_routes_teachers_and_archives_without_waveform(args, monke
 
     groups = _template_groups(args, "mopd.example.jsonl", 1)
     candidates = [group[0] for group in groups]
-    args.prism_reward_function_path = "examples.prism.hooks.zero_reward"
+    args.custom_rm_path = "slime_plugins.prism.hooks.zero_reward"
     args.omni_return_audio = False
-    args.rollout_sample_hook_path.append("slime_plugins.omni_rollout.score_teacher")
+    args.rollout_sample_hook_path.append("slime_plugins.prism.teacher.score_teacher")
     models = {key: teacher_binding() | {"endpoint": f"http://{key}"} for key in ("zh_teacher", "en_teacher")}
     routes = {"chinese": "zh_teacher", "english": "en_teacher"}
     args.omni_teacher_config = {"models": models, "by_domain": routes}
@@ -546,12 +561,8 @@ def test_mopd_template_routes_teachers_and_archives_without_waveform(args, monke
         item.metadata["omni_audio_path"] = None
 
     async def run():
-        with rollout_context(7):
-            await apply_rollout_sample_hooks(args, groups)
-        values = await artifacts.reward(args, candidates)
-        assert values == [0.0, 0.0]
-        for item, value in zip(candidates, values, strict=True):
-            item.reward = value
+        await archive_and_score(args, candidates)
+        assert [item.reward for item in candidates] == [0.0, 0.0]
 
     asyncio.run(run())
     assert requests == ["http://zh_teacher/score_actions", "http://en_teacher/score_actions"]
@@ -586,8 +597,8 @@ def test_mopd_quality_eval_generates_audio_uses_dataset_reward_and_skips_teacher
     settings = yaml.safe_load((REPO / "examples/prism/eval.example.yaml").read_text())["eval"]
     args.eval_datasets = build_eval_dataset_configs(args, settings["datasets"], settings["defaults"])
     args.hf_checkpoint = "fixture"
-    args.prism_reward_function_path = "examples.prism.hooks.zero_reward"
-    args.rollout_sample_hook_path.append("slime_plugins.omni_rollout.score_teacher")
+    args.custom_rm_path = "slime_plugins.prism.hooks.zero_reward"
+    args.rollout_sample_hook_path.append("slime_plugins.prism.teacher.score_teacher")
     # This binding must never be consulted during quality eval.
     args.omni_teacher_config = {"models": {}, "by_domain": {}}
     args.omni_reward_config = config(wer=1)
@@ -661,7 +672,7 @@ def test_attempt_preparation_snapshots_and_refuses_to_overwrite(tmp_path):
     resolved = experiment.prepare_run(root, command, identity={"running_round": 1})
     assert resolved[-2:] == ["--custom-config-path", str(root / "config/experiment.yaml")]
     runtime = yaml.safe_load((root / "config/experiment.yaml").read_text())
-    assert runtime["prism_reward_function_path"] == "user.config.reward"
+    assert runtime["custom_rm_path"] == "user.config.reward"
     assert runtime["rollout_sample_hook_path"] == ["user.teacher.hook"]
     assert runtime["rollout_sample_observer_path"] == ["slime_plugins.prism.artifacts.observe"]
     assert runtime["custom_rm_path"] == "user.config.reward"
@@ -723,8 +734,7 @@ def test_native_generation_reward_and_tensorboard_pipeline(args, tmp_path, monke
     monkeypatch.setattr(SingletonMeta, "_instances", {})
     args.partial_rollout = args.group_rm = False
     args.custom_generate_function_path = "slime_plugins.omni_rollout.generate"
-    args.custom_rm_path = artifacts.REWARD_HOOK
-    args.prism_reward_function_path = "examples.prism.rewards.reward"
+    args.custom_rm_path = "examples.prism.rewards.reward"
     args.omni_reward_config = config(wer=1)
     args.hf_checkpoint = "fixture"
     args.sglang_router_ip, args.sglang_router_port = "127.0.0.1", 12345
@@ -869,12 +879,12 @@ def test_actual_launcher_isolates_attempt_and_preserves_checkpoint_override(tmp_
     assert options["omni_audio_dir"] == [str(root / "rollout_audio")]
     runtime = yaml.safe_load(Path(options["custom_config_path"][-1]).read_text())
     assert runtime["prism_artifact_dir"] == str(root)
-    assert runtime["prism_reward_function_path"] == (
+    assert runtime["custom_rm_path"] == (
         "slime_plugins.tts_reward.reward" if mode == "grpo" else "slime_plugins.prism.hooks.zero_reward"
     )
     assert runtime["omni_return_audio"] == (mode == "grpo")
     if mode == "mopd":
-        assert runtime["rollout_sample_hook_path"][-1] == "slime_plugins.omni_rollout.score_teacher"
+        assert runtime["rollout_sample_hook_path"][-1] == "slime_plugins.prism.teacher.score_teacher"
         assert options["omni_reward_config"] == [str(config)]
 
 

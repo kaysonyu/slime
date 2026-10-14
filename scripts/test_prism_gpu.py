@@ -35,7 +35,8 @@ def cli_args():
     parser.add_argument("--pretrained-checkpoint", required=True, help="Native RUN/checkpoint/iteration directory.")
     parser.add_argument("--ckpt-step", type=int)
     parser.add_argument(
-        "--custom-megatron-model-initializer-path", default="slime_plugins.models.prism.load_prism_pretrained"
+        "--custom-megatron-model-initializer-path",
+        default="slime_plugins.models.prism_checkpoint.load_prism_pretrained",
     )
     parser.add_argument("--artifact-dir", required=True)
     parser.add_argument("--numpy-overlay", help="Directory containing NumPy 1.x, prepended before importing Megatron.")
@@ -83,7 +84,7 @@ def setup(args, extra_flags):
     from megatron.training.arguments import parse_args, validate_args
     from megatron.training.global_vars import set_args
 
-    from slime_plugins.models.prism import prism_megatron_cli_args, read_prism_spec
+    from slime_plugins.models.prism_configuration import prism_megatron_cli_args, read_prism_spec
 
     if not np.__version__.startswith("1."):
         raise RuntimeError(f"Megatron requires NumPy 1.x; found {np.__version__}. Use --numpy-overlay.")
@@ -151,7 +152,8 @@ def input_samples(args, spec, output):
     import torch
 
     from slime.utils.types import Sample
-    from slime_plugins.omni_rollout import PrismConfig, build_generate_payload, parse_rollout
+    from slime_plugins.omni_rollout import build_generate_payload, parse_rollout
+    from slime_plugins.prism.protocol import PrismConfig
 
     if args.omni_url or args.trajectory_json:
         sample = Sample(index=0, group_index=0)
@@ -222,7 +224,7 @@ def input_samples(args, spec, output):
 def policy_args(runtime, args):
     values = vars(runtime).copy()
     values.update(
-        custom_megatron_log_prob_function_path="slime_plugins.models.prism.extract_policy_log_probs",
+        custom_megatron_log_prob_function_path="slime_plugins.models.prism_policy.extract_policy_log_probs",
         policy_stop_loss_weight=args.stop_loss_weight,
         advantage_estimator="grpo",
         loss_type="policy_loss",
@@ -335,7 +337,8 @@ def run(args, extra_flags):
     from slime.backends.megatron_utils.checkpoint import load_checkpoint
     from slime.backends.megatron_utils.loss import compute_advantages_and_returns, policy_loss_function
     from slime.backends.megatron_utils.policy_actions import store_old_action_scores
-    from slime_plugins.models.prism import extract_policy_log_probs, model_provider
+    from slime_plugins.models.prism import model_provider
+    from slime_plugins.models.prism_policy import extract_policy_log_probs
 
     runtime, spec, numpy_version = setup(args, extra_flags)
     output = Path(args.artifact_dir).resolve()

@@ -15,7 +15,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from slime_plugins.models import prism
+from slime_plugins.models import prism, prism_configuration
 
 NUM_GPUS = 0
 REPO = Path(__file__).resolve().parents[1]
@@ -190,7 +190,7 @@ def _assert_architecture(args, spec):
 def test_prism_cli_supplies_architecture_before_generic_hf_and_megatron_validation(monkeypatch, tmp_path):
     config = _synthetic_prism_config()
     checkpoint = _write_config(tmp_path, config)
-    spec = prism.read_prism_spec(checkpoint)
+    spec = prism_configuration.read_prism_spec(checkpoint)
     events = []
 
     def validate(args):
@@ -199,7 +199,9 @@ def test_prism_cli_supplies_architecture_before_generic_hf_and_megatron_validati
         assert args.bf16 and not args.fp16
 
     module = _load_backend(
-        monkeypatch, ["--hf-checkpoint", checkpoint, *prism.prism_megatron_cli_args(checkpoint)], validate
+        monkeypatch,
+        ["--hf-checkpoint", checkpoint, *prism_configuration.prism_megatron_cli_args(checkpoint)],
+        validate,
     )
     _synthetic_auto_config(monkeypatch, module, config)
     hf_validate = module._hf_validate_args
@@ -236,7 +238,7 @@ def test_real_prism_artifact_configures_actual_cli(monkeypatch, stale_cli):
     checkpoint = Path(configured) if configured else REPO.parent / "artifacts/prism17b-v04/hf-iter-0100000"
     if not (checkpoint / "config.json").is_file():
         pytest.skip("set SLIME_TEST_PRISM_HF_CHECKPOINT to a published Prism HF artifact")
-    spec = prism.read_prism_spec(checkpoint)
+    spec = prism_configuration.read_prism_spec(checkpoint)
     module = _load_backend(
         monkeypatch,
         [
@@ -245,9 +247,9 @@ def test_real_prism_artifact_configures_actual_cli(monkeypatch, stale_cli):
             "--custom-model-provider-path",
             "slime_plugins.models.prism.model_provider",
             "--custom-megatron-log-prob-function-path",
-            "slime_plugins.models.prism.extract_policy_log_probs",
+            "slime_plugins.models.prism_policy.extract_policy_log_probs",
             "--custom-megatron-model-initializer-path",
-            "slime_plugins.models.prism.load_prism_pretrained",
+            "slime_plugins.models.prism_checkpoint.load_prism_pretrained",
             "--pretrained-checkpoint",
             "native-run",
             "--ckpt-step",
@@ -257,7 +259,7 @@ def test_real_prism_artifact_configures_actual_cli(monkeypatch, stale_cli):
             "--actor-num-gpus-per-node",
             "4",
             *stale_cli,
-            *prism.prism_megatron_cli_args(checkpoint),
+            *prism_configuration.prism_megatron_cli_args(checkpoint),
         ],
         lambda args: _assert_architecture(args, spec),
     )
@@ -279,9 +281,9 @@ def test_real_prism_artifact_configures_actual_cli(monkeypatch, stale_cli):
     _assert_architecture(args, spec)
     assert args.attention_dropout == args.hidden_dropout == 0.0
     assert args.custom_model_provider_path == "slime_plugins.models.prism.model_provider"
-    assert args.custom_megatron_log_prob_function_path == "slime_plugins.models.prism.extract_policy_log_probs"
+    assert args.custom_megatron_log_prob_function_path == "slime_plugins.models.prism_policy.extract_policy_log_probs"
     assert args.pretrained_checkpoint == "native-run" and args.ckpt_step == 100000
-    assert args.custom_megatron_model_initializer_path == "slime_plugins.models.prism.load_prism_pretrained"
+    assert args.custom_megatron_model_initializer_path == "slime_plugins.models.prism_checkpoint.load_prism_pretrained"
     assert calls == ["moss_tts_prism"]
     assert not hasattr(args, "prism_pretrained_checkpoint") and not hasattr(args, "n_vq")
     assert args.world_size == 8 and args.rank == 0
@@ -350,7 +352,7 @@ def test_prism_keeps_existing_allgather_cp_guard(monkeypatch, tmp_path):
         [
             "--hf-checkpoint",
             checkpoint,
-            *prism.prism_megatron_cli_args(checkpoint),
+            *prism_configuration.prism_megatron_cli_args(checkpoint),
             "--allgather-cp",
             "--context-parallel-size",
             "2",
@@ -366,7 +368,7 @@ def test_prism_invalid_architecture_fails_before_generating_megatron_cli(tmp_pat
     config["language_config"]["num_hidden_layers"] = 3
     checkpoint = _write_config(tmp_path, config)
     with pytest.raises(ValueError, match="physical topology"):
-        prism.prism_megatron_cli_args(checkpoint)
+        prism_configuration.prism_megatron_cli_args(checkpoint)
 
 
 def test_prism_cli_override_keeps_generic_hf_mismatch_detection(monkeypatch, tmp_path):
@@ -374,7 +376,13 @@ def test_prism_cli_override_keeps_generic_hf_mismatch_detection(monkeypatch, tmp
     checkpoint = _write_config(tmp_path, config)
     module = _load_backend(
         monkeypatch,
-        ["--hf-checkpoint", checkpoint, *prism.prism_megatron_cli_args(checkpoint), "--hidden-size", "64"],
+        [
+            "--hf-checkpoint",
+            checkpoint,
+            *prism_configuration.prism_megatron_cli_args(checkpoint),
+            "--hidden-size",
+            "64",
+        ],
     )
     _synthetic_auto_config(monkeypatch, module, config)
     monkeypatch.setattr(

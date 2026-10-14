@@ -26,7 +26,6 @@ from slime_plugins.prism.experiment import path_component
 from slime_plugins.prism.metrics import compute_metrics
 
 logger = logging.getLogger(__name__)
-REWARD_HOOK = "slime_plugins.prism.artifacts.reward"
 INDEX_LOCK = threading.Lock()
 GROUP_LOCK = threading.Lock()
 INDEX_STREAMS = OrderedDict()
@@ -223,7 +222,7 @@ def audio_path(args, sample, *, evaluation=False):
     return Path(artifact["record_path"]).with_suffix(".wav")
 
 
-def _prepare_sample(args, sample, rollout_id, evaluation, wrap_reward=True):
+def _prepare_sample(args, sample, rollout_id, evaluation):
     directory, round_directory, fingerprint, audio_requested, artifact = _archive_location(
         args, sample, rollout_id, evaluation
     )
@@ -286,14 +285,8 @@ def _prepare_sample(args, sample, rollout_id, evaluation, wrap_reward=True):
                                 ) from None
                 group.fingerprint = fingerprint
 
-    reward_path = sample.custom_rm_path or args.prism_reward_function_path
-    if reward_path in {REWARD_HOOK, "examples.prism.artifacts.reward"}:
-        reward_path = metadata.get("prism_artifact", {}).get("reward_function_path", args.prism_reward_function_path)
+    reward_path = sample.custom_rm_path or args.custom_rm_path
     metadata["prism_artifact"] = {**artifact, "reward_function_path": reward_path}
-    # Per-dataset rewards retain precedence. The wrapper owns persistence only,
-    # and invokes the original function with its original scalar/batch shape.
-    if wrap_reward:
-        sample.custom_rm_path = REWARD_HOOK
     _write_json(metadata["prism_artifact"]["record_path"], _record(sample))
     # One append-only index per process avoids walking thousands of group directories.
     index = round_directory / f"{socket.gethostname()}-{os.getpid()}.candidates.jsonl"
@@ -309,15 +302,11 @@ def _prepare_sample(args, sample, rollout_id, evaluation, wrap_reward=True):
             entry[1] = 0
 
 
-async def prepare_sample(args, sample, *, rollout_id=None, evaluation=False):
-    await _run_io(_prepare_sample, args, sample, rollout_id, evaluation, preparing=True)
-
-
 async def observe(args, sample, *, event, stage, error=None, evaluation=False, rollout_id=None):
     if sample.metadata is None:
         sample.metadata = {}
     if "prism_artifact" not in sample.metadata:
-        await _run_io(_prepare_sample, args, sample, rollout_id, evaluation, False, preparing=True)
+        await _run_io(_prepare_sample, args, sample, rollout_id, evaluation, preparing=True)
     if event == "generated":
         return
     cancelled = isinstance(error, asyncio.CancelledError) or sample.status.value == "aborted"
@@ -342,48 +331,6 @@ async def flush(args):
 observe.flush = flush
 
 
-async def reward(args, sample, **kwargs):
-    from slime.utils.misc import load_function
-
-    samples = sample if isinstance(sample, list) else [sample]
-    paths = {item.metadata["prism_artifact"]["reward_function_path"] for item in samples}
-    if len(paths) != 1:
-        # Normal eval scores single samples. A mixed batched invocation still
-        # honors each sample's explicit reward selection and preserves order.
-        results = await asyncio.gather(*(reward(args, item, **kwargs) for item in samples), return_exceptions=True)
-        for result in results:
-            if isinstance(result, BaseException):
-                raise result
-        return results
-    try:
-        result = await load_function(paths.pop())(args, sample, **kwargs)
-        values = result if isinstance(sample, list) else [result]
-        if len(values) != len(samples):
-            raise ValueError("Reward result count differs from archived candidate count")
-    except BaseException as error:
-        for item in samples:
-            try:
-                await _run_io(
-                    _write_json,
-                    item.metadata["prism_artifact"]["record_path"],
-                    _record(
-                        item,
-                        reward_status="cancelled" if isinstance(error, asyncio.CancelledError) else "error",
-                        error=type(error).__name__,
-                    ),
-                )
-            except Exception:
-                logger.exception("Failed to record a scoring failure")
-        raise
-    for item, value in zip(samples, values, strict=True):
-        await _run_io(
-            _write_json,
-            item.metadata["prism_artifact"]["record_path"],
-            _record(item, reward_value=value, reward_status="success"),
-        )
-    return result
-
-
 def _summarize(args, rollout_id, samples, *, dataset=None, group_size=None):
     _flush_indexes()
     evaluation = dataset is not None
@@ -401,7 +348,7 @@ def _summarize(args, rollout_id, samples, *, dataset=None, group_size=None):
     selected_paths = set()
     for sample in samples:
         if "prism_artifact" not in sample.metadata:
-            raise ValueError("Prism artifact logging requires prepare_sample on every candidate")
+            raise ValueError("Prism artifact logging requires the observer on every candidate")
         selected_paths.add(sample.metadata["prism_artifact"]["record_path"])
     indexes = list(source.glob("*.candidates.jsonl"))
     if indexes:

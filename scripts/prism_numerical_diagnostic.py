@@ -112,7 +112,7 @@ def score_differences(actual, expected, prepared):
 
 def oracle_inputs(batch, spec):
     """Use exactly the native padded time dimension with padding attention hidden."""
-    from slime_plugins.models.prism import prepare_policy_inputs
+    from slime_plugins.models.prism_policy import prepare_policy_inputs
 
     if len(batch["total_lengths"]) != 1:
         raise ValueError("HF oracle comparisons currently require one trajectory")
@@ -242,7 +242,7 @@ def diagnose(context):
     from scripts.test_prism_gpu import forward, input_samples, make_batch
     from transformers import AutoModel
 
-    from slime_plugins.models.prism import read_prism_spec
+    from slime_plugins.models.prism_configuration import read_prism_spec
 
     args, wrapper = context["args"], context["model"]
     if not args.trajectory_json or args.omni_url:

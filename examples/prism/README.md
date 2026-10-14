@@ -54,7 +54,7 @@ HF 制品与 native DCP 必须对应同一个学生结构、执行计划、token
 脚本先由模型插件读取 HF 配置，生成普通 Megatron 架构参数，再进入原参数解析与 HF 校验。主包不判断 Prism 的模型类型。首次权重初始化使用通用接口：
 
 ```text
---custom-megatron-model-initializer-path slime_plugins.models.prism.load_prism_pretrained
+--custom-megatron-model-initializer-path slime_plugins.models.prism_checkpoint.load_prism_pretrained
 --pretrained-checkpoint <native RUN / checkpoint root / iteration>
 --ckpt-step <optional native iteration>
 ```
@@ -524,9 +524,11 @@ JSON
 
 ### Runtime boundaries and reproducible cluster runs
 
-Prism's installed runtime lives in `slime_plugins.prism`. The old
-`examples.prism.artifacts`, `experiment`, and `hooks` paths remain compatibility
-entry points. Sample observers receive `generated`, `completed`, and `failed`
+Prism's installed runtime lives in `slime_plugins.prism`. Launch the experiment
+with `python -m slime_plugins.prism.experiment`, use
+`slime_plugins.prism.hooks.zero_reward` for pure MoPD, and attach the frozen
+teacher through `slime_plugins.prism.teacher.score_teacher`.
+Sample observers receive `generated`, `completed`, and `failed`
 events; they do not replace the configured reward callable. Candidate indexes
 are flushed in batches and drained at the rollout boundary. Teacher failures
 retain their stage and status in candidate records.
@@ -536,9 +538,13 @@ The frozen teacher client loads each configuration once per process. Its
 `--omni-teacher-max-inflight` (16 per execution worker), and
 `--omni-teacher-max-attempts` (2) bound request aggregation and transient retries.
 Only fixed-action scoring retries transport errors and HTTP 429/502/503/504;
-identity and input-hash mismatches remain fatal. Teacher endpoints may return
-`stop_logprobs` for both binary actions; these preserve finite selected scores
-even when the accompanying compatibility probabilities round to zero or one.
+identity and input-hash mismatches remain fatal. Prism teacher requests and
+results use version 2. Each result contains one `selected_stop_logprobs` value
+per student stop/continue action, computed directly from FP32 logits. The teacher
+infers these actions from the supplied codes and finish reason: one continue
+per frame, plus a final stop only for a natural termination. No probability
+fallback or two-column response is accepted. The HTTP batch envelope remains
+version 1. Upgrade the Slime client and Omni teacher together.
 
 The launcher enables `--omni-compact-replay`: training tensors retain the exact
 replay inputs and actions, while completed samples discard duplicate wire lists.

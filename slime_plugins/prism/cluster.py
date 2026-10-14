@@ -376,7 +376,7 @@ def main() -> None:
                     [
                         python,
                         "-m",
-                        "examples.prism.experiment",
+                        "slime_plugins.prism.experiment",
                         "--run-dir",
                         str(output / "experiment"),
                         "--run-name",

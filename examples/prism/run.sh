@@ -103,7 +103,7 @@ trap 'rm -f -- "${TASK_ARCH_ARGS_FILE}"' EXIT
 "${TASK_TRAIN_PYTHON}" - "${HF_CHECKPOINT}" > "${TASK_ARCH_ARGS_FILE}" <<'PY'
 import sys
 
-from slime_plugins.models.prism import prism_megatron_cli_args
+from slime_plugins.models.prism_configuration import prism_megatron_cli_args
 
 for argument in prism_megatron_cli_args(sys.argv[1]):
     sys.stdout.buffer.write(argument.encode() + b"\0")
@@ -130,7 +130,7 @@ TASK_ARGS=(
   --hf-checkpoint "${HF_CHECKPOINT}"
   --model-name moss_tts_prism
   --custom-model-provider-path slime_plugins.models.prism.model_provider
-  --custom-megatron-log-prob-function-path slime_plugins.models.prism.extract_policy_log_probs
+  --custom-megatron-log-prob-function-path slime_plugins.models.prism_policy.extract_policy_log_probs
   --rollout-function-path slime.rollout.sglang_rollout.generate_rollout
   --custom-generate-function-path slime_plugins.omni_rollout.generate
   --custom-config-path "${TASK_EXAMPLE_DIR}/${TASK_MODE}.yaml"
@@ -220,7 +220,7 @@ else
     echo "Missing native Prism checkpoint: ${PRISM_PRETRAINED_CHECKPOINT}" >&2; exit 2;
   }
   TASK_ARGS+=(
-    --custom-megatron-model-initializer-path slime_plugins.models.prism.load_prism_pretrained
+    --custom-megatron-model-initializer-path slime_plugins.models.prism_checkpoint.load_prism_pretrained
     --pretrained-checkpoint "${PRISM_PRETRAINED_CHECKPOINT}"
   )
   if [[ -n ${PRISM_PRETRAINED_STEP:-} ]]; then
@@ -242,7 +242,7 @@ else
     --use-opd
     --opd-type sglang
     --opd-kl-coef "${OPD_KL_COEF:-1}"
-    --rollout-sample-hook-path slime_plugins.omni_rollout.score_teacher
+    --rollout-sample-hook-path slime_plugins.prism.teacher.score_teacher
     --omni-teacher-config "${TEACHER_CONFIG}"
     --custom-rm-path slime_plugins.prism.hooks.zero_reward
   )

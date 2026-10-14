@@ -24,24 +24,12 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from slime_plugins.models.prism_checkpoint import load_prism_pretrained, select_native_checkpoint
-from slime_plugins.models.prism_configuration import (
-    PrismModelSpec,
-    configure_prism_args,
-    prism_megatron_cli_args,
-    read_prism_spec,
-)
-from slime_plugins.models.prism_policy import (
-    extract_policy_log_probs,
-    prepare_policy_inputs,
-    selected_logprob_and_entropy,
-)
+from slime_plugins.models.prism_configuration import configure_prism_args
+from slime_plugins.models.prism_policy import prepare_policy_inputs, selected_logprob_and_entropy
 from slime_plugins.models.prism_topology import (
     PrismAudioRole,
-    PrismExecutionSite,
     PrismExecutionUnit,
     PrismItemKind,
-    PrismSiteRecord,
     ResolvedPrismTopology,
     normalize_prism_input_rvq_channels,
     normalize_prism_rvq_label_smoothing,
@@ -51,16 +39,6 @@ from slime_plugins.models.prism_topology import (
 )
 
 __all__ = [
-    "PrismItemKind",
-    "PrismAudioRole",
-    "PrismExecutionSite",
-    "PrismExecutionUnit",
-    "ResolvedPrismTopology",
-    "normalize_prism_rvq_label_smoothing",
-    "normalize_prism_input_rvq_channels",
-    "resolve_prism_topology",
-    "validate_prism_stop_gradient_layer",
-    "validate_prism_recompute_policy",
     "MossTTSPrismConfig",
     "language_model_embedding_with_weight",
     "LanguageModelEmbeddingWithPad",
@@ -69,18 +47,8 @@ __all__ = [
     "PrismMLPOnlyLayer",
     "prism_block_spec",
     "MossTTSPrismModel",
-    "selected_logprob_and_entropy",
     "vocab_parallel_entropy",
-    "prepare_policy_inputs",
-    "PrismModelSpec",
-    "read_prism_spec",
-    "prism_megatron_cli_args",
-    "configure_prism_args",
     "model_provider",
-    "select_native_checkpoint",
-    "load_prism_pretrained",
-    "extract_policy_log_probs",
-    "PrismSiteRecord",
 ]
 
 _MEGATRON_IMPORT_ERROR = None

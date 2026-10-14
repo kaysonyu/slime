@@ -236,7 +236,7 @@ def test_native_observer_records_teacher_failure_without_replacing_reward(monkey
     worker_args.prism_artifact_dir = str(tmp_path / "attempt")
     worker_args.omni_audio_dir = str(tmp_path / "audio")
     worker_args.omni_return_audio = False
-    worker_args.prism_reward_function_path = "original.reward"
+    worker_args.custom_rm_path = "original.reward"
     worker_args.prompt_data = "fixture"
     worker_args.omni_teacher_max_attempts = 1
     worker_args.omni_teacher_config = {"models": {"a": teacher_binding()}, "by_domain": {"chinese": "a"}}
