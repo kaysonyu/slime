@@ -14,6 +14,29 @@ _task_rollout_id = ContextVar("rollout_sample_hook_id", default=None)
 logger = logging.getLogger(__name__)
 
 
+class SampleRejected(Exception):
+    """An expected external scoring failure that makes this sample unusable.
+
+    Hooks must opt in explicitly; configuration and protocol errors still fail
+    the rollout. Keep arguments serializable for remote execution workers.
+    """
+
+    def __init__(self, reason: str, details: dict | None = None):
+        self.reason = reason
+        self.details = details or {}
+        super().__init__(reason, self.details)
+
+
+def sample_rejection_reason(samples):
+    from slime.rollout.base_types import iter_samples
+
+    for sample in iter_samples(samples):
+        rejection = (sample.metadata or {}).get("rollout_rejection")
+        if rejection:
+            return rejection["reason"]
+    return None
+
+
 def set_current_rollout_id(rollout_id: int | None) -> None:
     global _current_rollout_id
     _current_rollout_id = rollout_id

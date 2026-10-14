@@ -538,6 +538,22 @@ The frozen teacher client loads each configuration once per process. Its
 `--omni-teacher-max-inflight` (16 per execution worker), and
 `--omni-teacher-max-attempts` (2) bound request aggregation and transient retries.
 Only fixed-action scoring retries transport errors and HTTP 429/502/503/504;
+after those retries, HTTP/transport failures reject the affected sample. HTTP
+403 is rejected immediately. Rollout discards the affected prompt group and
+fetches replacements until the configured batch is full. For MoPD with one
+sample per prompt, only that sample is discarded. Rejected candidates retain
+their teacher, HTTP status, bounded response body and request ID in the archive;
+they never receive fabricated scores or enter training. The existing
+`rollout/dynamic_filter/drop_teacher_request_failed` count and
+`rollout/prism/teacher_failures/<teacher>/{count,ratio,http_<status>}` expose
+these failures (counts are samples for the latter).
+
+`--omni-teacher-max-consecutive-failures` (default 8) bounds consecutive failed
+HTTP batches for each teacher in each execution worker, across rollout rounds.
+A successful batch resets that teacher's counter. Reaching the limit reports a
+service outage and stops rollout so a persistently unavailable domain cannot
+be silently excluded. Fixed evaluation failures still propagate; evaluation
+does not drop failed cases from its denominator. Configuration, protocol,
 identity and input-hash mismatches remain fatal. Prism teacher requests and
 results use version 2. Each result contains one `selected_stop_logprobs` value
 per student stop/continue action, computed directly from FP32 logits. The teacher

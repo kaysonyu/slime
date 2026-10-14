@@ -359,10 +359,10 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> Rollout
             args,
             rollout_id,
             collected,
-            metrics if filters_enabled else None,
+            metrics if filters_enabled or dropped_count else None,
             controller=getattr(data_buffer, "controller", None),
         )
-    return output if filters_enabled or args.rollout_data_transport == "straw" else output.samples
+    return output if filters_enabled or dropped_count or args.rollout_data_transport == "straw" else output.samples
 
 
 def generate_rollout_fully_async(args, rollout_id, data_buffer, evaluation: bool = False):

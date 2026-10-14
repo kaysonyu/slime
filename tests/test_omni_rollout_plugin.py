@@ -575,6 +575,89 @@ def test_teacher_domain_hook_reuses_score_endpoint_and_rejects_unmapped_domain(m
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("failure,expected_attempts", [(403, 1), (503, 2), ("timeout", 2)])
+def test_teacher_request_failures_become_serializable_sample_rejections(monkeypatch, failure, expected_attempts):
+    import pickle
+
+    import httpx
+
+    from slime.rollout.sample_hooks import SampleRejected
+
+    binding = teacher_binding()
+    args = types.SimpleNamespace(
+        omni_teacher_config={"models": {"a": binding}, "by_domain": {"chinese": "a"}},
+        omni_teacher_batch_size=1,
+    )
+    calls = []
+
+    async def request(_args, url, payload, **kwargs):
+        calls.append(url)
+        if failure == "timeout":
+            raise TimeoutError("request timed out")
+        response = httpx.Response(failure, request=httpx.Request("POST", url), text="injected failure")
+        response.raise_for_status()
+
+    monkeypatch.setattr(teacher_plugin, "_request", request)
+
+    async def run():
+        item = plugin.parse_rollout(output(), sample(), geometry())
+        with pytest.raises(SampleRejected) as exc:
+            await teacher_plugin.score_teacher(args, item)
+        restored = pickle.loads(pickle.dumps(exc.value))
+        assert restored.reason == "teacher_request_failed"
+        assert restored.details["attempts"] == expected_attempts
+        assert restored.details.get("status_code") == (None if failure == "timeout" else failure)
+        assert item.metadata["omni_teacher_status"] == "error"
+        assert item.metadata["omni_teacher_attempts"] == expected_attempts
+        assert item.teacher_log_probs is None and item.reward is None
+        assert "policy_teacher_code_logprobs" not in item.multimodal_train_inputs
+        await teacher_plugin.close_teacher_clients(args)
+
+    asyncio.run(run())
+    assert len(calls) == expected_attempts
+
+
+def test_teacher_outage_limit_is_per_teacher_and_resets_only_on_its_success(monkeypatch):
+    import httpx
+
+    from slime.rollout.sample_hooks import SampleRejected
+
+    bindings = {key: {**teacher_binding(), "endpoint": f"http://teacher-{key}"} for key in ("a", "b")}
+    args = types.SimpleNamespace(
+        omni_teacher_config={"models": bindings, "by_domain": {"a": "a", "b": "b"}},
+        omni_teacher_batch_size=1,
+        omni_teacher_max_consecutive_failures=3,
+    )
+    status = 403
+
+    async def request(_args, url, payload, **kwargs):
+        if status != 200:
+            httpx.Response(status, request=httpx.Request("POST", url), text="denied").raise_for_status()
+        binding = bindings[url.split("teacher-")[1][0]]
+        return {"version": 1, "results": [teacher_output(row, binding) for row in payload["samples"]]}
+
+    monkeypatch.setattr(teacher_plugin, "_request", request)
+
+    async def run():
+        nonlocal status
+        sequence = [("a", 403), ("a", 403), ("a", 200), ("a", 403), ("a", 403), ("b", 200), ("a", 403)]
+        for index, (domain, status) in enumerate(sequence):
+            item = plugin.parse_rollout(output(), sample(index), geometry())
+            item.metadata["domain"] = domain
+            if index == len(sequence) - 1:
+                with pytest.raises(RuntimeError, match="teacher-a failed 3 consecutive"):
+                    await teacher_plugin.score_teacher(args, item)
+            elif status == 200:
+                await teacher_plugin.score_teacher(args, item)
+                assert item.metadata["omni_teacher_status"] == "success"
+            else:
+                with pytest.raises(SampleRejected):
+                    await teacher_plugin.score_teacher(args, item)
+        await teacher_plugin.close_teacher_clients(args)
+
+    asyncio.run(run())
+
+
 def named_teacher_binding():
     binding = teacher_binding()
     binding.pop("endpoint")

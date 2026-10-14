@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import time
 import weakref
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ import httpx
 import torch
 import yaml
 
+from slime.rollout.sample_hooks import SampleRejected
 from slime.utils.http_utils import _wrap_ipv6, get
 from slime_plugins.prism.http_client import _request
 from slime_plugins.prism.protocol import LOGPROB_SEMANTICS, REPLAY_FIELDS, _config, _copy_wire_data, _integer, _tensor
@@ -53,6 +55,23 @@ class ScoreReceipt:
     attempts: int
 
 
+def _request_failure(error, token, attempts, seconds):
+    """Archive bounded HTTP diagnostics without request headers or credentials."""
+    details = {"error_type": type(error).__name__, "attempts": attempts, "request_seconds": seconds}
+    if isinstance(error, httpx.HTTPStatusError):
+        response = error.response
+        body = response.text
+        if token:
+            body = body.replace(token, "<redacted>")
+        body = re.sub(r"(?i)Bearer\s+[^\s\"<>]+", "Bearer <redacted>", body)
+        details.update(status_code=response.status_code, response_body=body[:1024])
+        for header in ("x-request-id", "request-id", "x-correlation-id"):
+            if request_id := response.headers.get(header):
+                details["request_id"] = request_id[:256].replace(token, "<redacted>") if token else request_id[:256]
+                break
+    return details
+
+
 class TeacherClient:
     def __init__(self, args, configuration):
         self.args = copy.copy(args)
@@ -65,17 +84,20 @@ class TeacherClient:
         self.wait_seconds = float(getattr(args, "omni_teacher_batch_wait_ms", 2.0)) / 1000
         self.max_inflight = int(getattr(args, "omni_teacher_max_inflight", 16))
         self.attempts = int(getattr(args, "omni_teacher_max_attempts", 2))
+        self.max_consecutive_failures = int(getattr(args, "omni_teacher_max_consecutive_failures", 8))
         if (
             not 1 <= self.batch_size <= 64
             or not 0 <= self.wait_seconds <= 1
             or self.max_inflight < 1
             or self.attempts < 1
+            or self.max_consecutive_failures < 1
         ):
             raise ValueError("Invalid frozen teacher batch, wait, concurrency, or retry limit")
         self.semaphore = asyncio.Semaphore(self.max_inflight)
         self.pending = {}
         self.timers = {}
         self.tasks = set()
+        self.failures = {}
 
     async def score(self, endpoint, binding, request):
         route = (endpoint, binding.get("auth_token_env"), binding["weight_sha256"])
@@ -105,6 +127,7 @@ class TeacherClient:
 
     async def send(self, route, batch):
         endpoint, token_name, _ = route
+        started, attempt, token = time.perf_counter(), -1, None
         try:
             token = os.environ.get(token_name) if token_name else None
             if token_name and not token:
@@ -143,6 +166,7 @@ class TeacherClient:
             by_id = {row.get("sample_id"): row for row in results}
             if len(by_id) != len(batch) or set(by_id) != {item.request["sample_id"] for item in batch}:
                 raise ValueError("Prism teacher response sample identities differ")
+            self.failures[route] = 0
             for item in batch:
                 if not item.result.done():
                     item.result.set_result(
@@ -151,6 +175,18 @@ class TeacherClient:
                         )
                     )
         except BaseException as error:
+            if isinstance(error, (httpx.TransportError, httpx.HTTPStatusError, TimeoutError)):
+                details = _request_failure(error, token, attempt + 1, time.perf_counter() - started)
+                failures = self.failures[route] = self.failures.get(route, 0) + 1
+                if failures >= self.max_consecutive_failures:
+                    error = RuntimeError(
+                        f"Frozen teacher {endpoint} failed {failures} consecutive HTTP batches in this worker "
+                        f"(last error: {details['error_type']}, HTTP {details.get('status_code', 'unavailable')}). "
+                        "Stopping rollout to avoid silently removing this teacher's domain; "
+                        "restore the service before resuming from the last joint checkpoint."
+                    )
+                else:
+                    error = SampleRejected("teacher_request_failed", details)
             for item in batch:
                 if not item.result.done():
                     if isinstance(error, asyncio.CancelledError):
@@ -193,6 +229,7 @@ def teacher_client(args):
             ("omni_teacher_batch_wait_ms", 2.0),
             ("omni_teacher_max_inflight", 16),
             ("omni_teacher_max_attempts", 2),
+            ("omni_teacher_max_consecutive_failures", 8),
             ("omni_teacher_request_timeout_s", 120.0),
         )
     )
@@ -439,6 +476,11 @@ async def score_teacher(args, sample, *, evaluation=False, **kwargs):
     except BaseException as error:
         sample.metadata["omni_teacher_status"] = "cancelled" if isinstance(error, asyncio.CancelledError) else "error"
         sample.metadata["omni_teacher_error"] = type(error).__name__
+        if isinstance(error, SampleRejected):
+            sample.metadata["omni_teacher_error"] = error.details["error_type"]
+            sample.metadata["omni_teacher_failure"] = error.details
+            sample.metadata["omni_teacher_attempts"] = error.details["attempts"]
+            sample.metadata["omni_teacher_request_seconds"] = error.details["request_seconds"]
         raise
     sample.metadata["omni_teacher_status"] = "success"
     if "deployment" in binding:

@@ -24,11 +24,17 @@ def should_drop_dynamic_filter_output(
     return True
 
 
-def call_dynamic_filter(fn, *args, **kwargs):
+def call_dynamic_filter(fn, args, group, **kwargs):
+    from slime.rollout.sample_hooks import sample_rejection_reason
+
+    # Rejected hook outputs are missing required scores. They must not reach
+    # training, including when a custom filter would keep an undersized batch.
+    if reason := sample_rejection_reason(group):
+        return DynamicFilterOutput(keep=False, reason=reason)
     if fn is None:
         return DynamicFilterOutput(keep=True)
 
-    output = fn(*args, **kwargs)
+    output = fn(args, group, **kwargs)
 
     # compatibility for legacy version
     if not isinstance(output, DynamicFilterOutput):

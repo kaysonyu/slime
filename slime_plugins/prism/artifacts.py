@@ -155,6 +155,7 @@ def _record(sample, *, reward_value=None, reward_status="pending", error=None, f
         "reward_details": metadata.get("omni_reward"),
         "error": error,
         "failure_stage": failure_stage,
+        "rollout_rejection": metadata.get("rollout_rejection"),
         "remove_sample": sample.remove_sample,
     }
 
@@ -402,6 +403,17 @@ def _summarize(args, rollout_id, samples, *, dataset=None, group_size=None):
         if identity not in populations:
             populations[identity] = compute_metrics(subset, group_size or args.n_samples_per_prompt)
         metrics.update({f"{prefix}/{subset_name}/{key}": value for key, value in populations[identity].items()})
+    # Domain/teacher quality summaries above describe selected samples. Count
+    # failed teacher candidates separately so replacement cannot hide an outage.
+    for teacher in sorted({row["teacher_key"] for row in rows if row.get("teacher_key") is not None}):
+        candidates = [row for row in rows if row.get("teacher_key") == teacher]
+        failed = [row for row in candidates if row["teacher"].get("status") == "error"]
+        key = f"{prefix}/teacher_failures/{path_component(teacher)}"
+        metrics[f"{key}/count"] = len(failed)
+        metrics[f"{key}/ratio"] = len(failed) / len(candidates)
+        statuses = [row["teacher"].get("failure", {}).get("status_code") for row in failed]
+        for status in sorted({status for status in statuses if status is not None}):
+            metrics[f"{key}/http_{status}"] = statuses.count(status)
     _write_json(destination / f"{name}.metrics.json", metrics)
     return metrics
 

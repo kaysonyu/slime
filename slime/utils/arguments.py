@@ -81,6 +81,13 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 help="Maximum in-flight frozen teacher HTTP batches per rollout execution worker.",
             )
             parser.add_argument("--omni-teacher-max-attempts", type=int, default=2)
+            parser.add_argument(
+                "--omni-teacher-max-consecutive-failures",
+                type=int,
+                default=8,
+                help="Stop after this many consecutive failed HTTP batches per teacher per worker; "
+                "isolated request failures are excluded and replaced before training.",
+            )
             parser.add_argument("--omni-teacher-request-timeout-s", type=float, default=120.0)
             parser.add_argument("--omni-compact-replay", action=argparse.BooleanOptionalAction, default=False)
             parser.add_argument(

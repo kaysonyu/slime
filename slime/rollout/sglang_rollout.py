@@ -15,13 +15,15 @@ from tqdm import tqdm
 from slime.backends.sglang_utils.server_control import abort_servers_until_idle, get_live_router_workers
 from slime.data.transport import discard_rollout_group, publish_rollout_async
 from slime.observability.trace_utils import build_sglang_meta_trace_attrs, trace_function, trace_span
-from slime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput, finalize_rollout_groups
+from slime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput, finalize_rollout_groups, iter_samples
 from slime.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter, should_drop_dynamic_filter_output
 from slime.rollout.sample_hooks import (
+    SampleRejected,
     apply_rollout_sample_hooks,
     finalize_sample_representation,
     flush_sample_observers,
     notify_sample_observers,
+    sample_rejection_reason,
 )
 from slime.utils.async_utils import AsyncPacer, run
 from slime.utils.data import Dataset
@@ -405,6 +407,22 @@ async def generate_and_rm(
         await notify_sample_observers(args, sample, event="completed", stage=stage, evaluation=evaluation)
         await finalize_sample_representation(args, sample, generate_func)
         return sample
+    except SampleRejected as error:
+        # Return the failed candidate to the collector so it can record the
+        # rejection, release queue ownership and fetch a replacement. No reward
+        # or teacher score is fabricated, and the failed tensors are never
+        # admitted to a training batch.
+        for item in iter_samples(sample):
+            item.remove_sample = True
+            item.metadata = item.metadata or {}
+            item.metadata["rollout_rejection"] = {"reason": error.reason, **error.details}
+        await notify_sample_observers(args, sample, event="failed", stage=stage, error=error, evaluation=evaluation)
+        await finalize_sample_representation(args, sample, generate_func)
+        if evaluation:
+            # Fixed evaluation sets must not silently improve their reported
+            # scores by excluding requests that failed to obtain a teacher.
+            raise
+        return sample
     except BaseException as error:
         await notify_sample_observers(args, sample, event="failed", stage=stage, error=error, evaluation=evaluation)
         raise
@@ -456,7 +474,7 @@ async def generate_and_rm_group(
         raise
 
     # for the rm that need the whole group, we will do the rm here
-    if not state.aborted and args.group_rm:
+    if not state.aborted and args.group_rm and sample_rejection_reason(group) is None:
         try:
             with trace_span(group, "group_reward_model"):
                 rewards = await batched_async_rm(args, group)
