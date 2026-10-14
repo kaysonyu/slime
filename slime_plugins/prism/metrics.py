@@ -46,6 +46,17 @@ def compute_metrics(records, group_size):
             metrics.update({f"{field}/{key}": value for key, value in _statistics(values).items()})
             metrics[f"{field}/p50"] = _percentile(values, 0.5)
             metrics[f"{field}/p95"] = _percentile(values, 0.95)
+    duration_ratios = [
+        r["frames"] / r["source_target_frames"]
+        for r in records
+        if _number(r.get("frames")) and _number(r.get("source_target_frames")) and r["source_target_frames"] > 0
+    ]
+    if duration_ratios:
+        metrics["source_duration_ratio/p50"] = _percentile(duration_ratios, 0.5)
+        metrics["source_duration_ratio/p95"] = _percentile(duration_ratios, 0.95)
+        metrics["source_duration_ratio/over_2x_ratio"] = sum(value > 2 for value in duration_ratios) / len(
+            duration_ratios
+        )
     values = [r["reward"] for r in scored if _number(r["reward"])]
     if values:
         metrics.update({f"reward/{key}": value for key, value in _statistics(values).items()})

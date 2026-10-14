@@ -144,6 +144,8 @@ def _record(sample, *, reward_value=None, reward_status="pending", error=None, f
         "policy_version": metadata.get("omni_policy_version", metadata.get("policy_version")),
         "model_identity": trace.get("model_identity"),
         "sampling": trace.get("sampling"),
+        "source_target_frames": metadata.get("target_frames"),
+        "stop_diagnostics": metadata.get("omni_stop_diagnostics"),
         "request_id": trace.get("request_id"),
         "teacher": {
             name.removeprefix("omni_teacher_"): value
@@ -396,6 +398,14 @@ def _summarize(args, rollout_id, samples, *, dataset=None, group_size=None):
         for value in sorted({str(row[field]) for row in selected_rows if row.get(field) is not None}):
             namespace = "teacher" if field == "teacher_key" else field
             subsets[f"{namespace}/{path_component(value)}"] = [r for r in selected_rows if str(r.get(field)) == value]
+    for mode, enabled in (("controlled", True), ("free", False)):
+        candidates = [r for r in selected_rows if r["prompt"].get("tokens_control") is enabled]
+        if candidates:
+            subsets[f"length_control/{mode}"] = candidates
+            for domain in sorted({str(r["domain"]) for r in candidates if r.get("domain") is not None}):
+                subsets[f"domain/{path_component(domain)}/length_control/{mode}"] = [
+                    r for r in candidates if str(r.get("domain")) == domain
+                ]
     metrics = {}
     populations = {}
     for subset_name, subset in subsets.items():
