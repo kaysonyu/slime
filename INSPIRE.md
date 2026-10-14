@@ -87,3 +87,18 @@ Omni 诊断增强在远端 `perf/prism-timeline-20261013`。32 卡配对 Job
 入口为 `metrics-integration-report.html`；每次源码/config pin、训练和归档核验、性能数据、
 源码交付收据保存在 `configs/`、`runs/`、`analysis/`。性能结论及限制见
 `examples/prism/VALIDATION.md`，不从镜像构建版本推断运行源码版本。
+
+
+六领域 MoPD 数据与学生 v0.1.0 的资产合同：
+
+- 数据根目录：`/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/data/tts2.0-mopd`。
+  固定混合训练入口 `mixtures/v1/train.jsonl` 为 100 万条，`eval.jsonl` 为 6000 条；
+  各领域分片、Lance snapshot、原始 reference 路径和构造规则见该目录 README 与 manifest。
+- 模型导出、数据准备与校验脚本、六领域 smoke 记录、启动配置的固定根目录：
+  `/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism-mopd-1m-20261014-043616`。
+- 学生：`prism_pretrain_1.7B_v0.1.0/checkpoints/iter_0200000`，通过 native 模型初始化入口加载。
+  专用 instruction / asmr / dialect / sing 教师固定各自 v0.0.0 的 iter_0060000；
+  fullclone / multilingual 共用 v0.4.0 的 iter_0100000。所有服务采用同一 revision 6 runtime/tokenizer。
+- 32 卡、B2048、2000 步的可复现 manifest 为上述实验根目录下 `configs/train-32-2000.json`。
+  配置与实际校验见 `analysis/preflight-summary.json`；运行状态从平台 live 查询。
+  `scripts/watch-training.py` 管理本轮冻结教师生命周期，Job 与 Serving 条目始终保留。
