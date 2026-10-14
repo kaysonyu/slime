@@ -1,0 +1,617 @@
+# Prism GRPO 与多 domain MOPD
+
+这套示例使用原 `train.py`、Ray placement、rollout 分组、Megatron optimizer 和 checkpoint。学生生成仍走 Omni Python router；Megatron 在每批更新前重放轨迹并固定旧学生 logprob。Omni 返回的逐动作分数用于对齐检查，默认不作为 PPO 分母。
+
+首版固定 BF16、TP=PP=CP=1、关闭 sequence parallel，支持 learner DP 和多个完整 rollout 副本。Prism 的全部 RVQ 与 sampled stop 参与训练。模型输入按真实时间行 packing，策略目标按真实动作计算；自然结束的 terminal stop 与零帧 stop 不会丢失。
+
+Attention 沿用 Megatron 原生 `TEDotProductAttention`，使用框架默认的 `auto` 后端选择；`--attention-backend` 仍由原 Megatron 参数控制。模型使用原 TE layer spec，不再替换为自定义 FA4 wrapper。旧学生分数以 Megatron 重算为默认。训练持续报告逐动作平均绝对误差，以及 `mean_sample_train_rollout_logprob_max_abs_diff`：每条轨迹先取真实动作的最大误差，再由原 microbatch/DP 报表平均，因而该值不是全 DP 的 global max。两个来源的 RVQ/stop 分数均保留在训练 payload 和可选 debug dump 中。严格的跨引擎精度对齐作为独立工作处理；GPU 工程闭环通过不代表满足任意更紧的 logprob 容差。
+
+实际原 `train.py` 的 GPU 训练、保存、恢复与多副本验收范围及报告位置见 [VALIDATION.md](VALIDATION.md)。其中工程奖励与真实质量奖励的验收范围分别写明。
+
+固定 reward 的 GRPO、逐样本类别的 MixRL GRPO 和按 domain 路由教师的 MOPD，
+对应的数据模板、启动命令与保存目录对照见 [TRAINING_MODES.md](TRAINING_MODES.md)。
+
+| 训练方式 | 原生训练路径 | 额外输入 |
+| --- | --- | --- |
+| GRPO | prompt 组奖励优势 → native PPO clipping | WER、SIM、全局指令奖励服务 |
+| MOPD | native OPD advantage → native PPO clipping | 按 domain 路由的冻结 Prism 教师 |
+
+MOPD 的 RVQ 和 stop 都使用学生实际选择动作的 logprob，不使用完整 stop KL。每条语音的目标归约为 `mean(RVQ losses) + STOP_LOSS_WEIGHT × mean(stop losses)`。这采用 slime 的 OPD/PPO 目标，不要求重现旧 VoxRL 的不同蒸馏 surrogate。
+
+## 解释器与资产
+
+训练与 Omni 的 Python 入口通过以下变量选择，依赖兼容时使用同一个环境：
+
+- `TRAIN_PYTHON`：当前 slime、Ray、PyTorch、Megatron Core/training、Transformer Engine、FlashAttention 和对应训练依赖。
+- `OMNI_PYTHON`：当前 SGLang-Omni、Prism pipeline 和 Omni Python router。由 Ray actor 用这个解释器启动完整 pipeline。
+
+本项目的 Inspire 镜像 `slime-ttsrl:editable-v1` 将 slime、Megatron-LM 和 SGLang-Omni
+editable 安装在同一 `/opt/venvs/core` 环境中。使用该镜像时执行
+`source /opt/slime-ttsrl/env.sh`，两个入口都会指向 `/opt/venvs/core/bin/python`。
+固定镜像、源码目录和依赖版本见 [INSPIRE.md](../../INSPIRE.md)。
+
+训练与 Omni 的 NCCL、CUDA 和 PyTorch 组合需要能够互相传输 GPU tensor。所有 Ray 节点均须可读取模型、pipeline YAML、数据和音频引用。若 Megatron 未安装到训练环境，可用 `MEGATRON_ROOT` 指定其源码目录；脚本将其加入训练 workers 的 `PYTHONPATH`。
+
+新运行需要：
+
+```bash
+export TRAIN_PYTHON=/path/to/runtime/bin/python
+export OMNI_PYTHON=${TRAIN_PYTHON}
+export HF_CHECKPOINT=/assets/prism-student-hf
+export PRISM_PRETRAINED_CHECKPOINT=/assets/prism-native-dcp
+export CODEC_MODEL=/assets/moss-audio-tokenizer-v2
+export PROMPT_DATA=/data/prism-train.jsonl
+export OUTPUT_ROOT=/runs
+export RUN_NAME=prism-1p7b-grpo
+export JOB_TAG=voiceclone-first-run
+export RUNNING_ROUND=0
+# 可选：固定 native iteration；未指定时使用 importer 的 checkpoint 选择规则。
+export PRISM_PRETRAINED_STEP=100000
+```
+
+HF 制品与 native DCP 必须对应同一个学生结构、执行计划、tokenizer/codec 和参数精度。HF 制品提供 Omni 权重、processor、prompt protocol 和模型配置；native DCP initializer 只加载预训练模型，RL optimizer 从新状态开始。恢复 slime RL checkpoint 时使用 `RL_LOAD`，保留原 optimizer、scheduler 和训练进度。
+
+脚本先由模型插件读取 HF 配置，生成普通 Megatron 架构参数，再进入原参数解析与 HF 校验。主包不判断 Prism 的模型类型。首次权重初始化使用通用接口：
+
+```text
+--custom-megatron-model-initializer-path slime_plugins.models.prism_checkpoint.load_prism_pretrained
+--pretrained-checkpoint <native RUN / checkpoint root / iteration>
+--ckpt-step <optional native iteration>
+```
+
+initializer 接收 `(models, args)`，只加载模型权重并返回 `None`；框架负责同步低精度 optimizer 的 master 参数和设置新训练进度。mossLite 目录、manifest、分片布局与模型身份的识别全部留在插件中。`PRISM_PRETRAINED_CHECKPOINT`、`PRISM_PRETRAINED_STEP` 仍是示例脚本的环境变量，脚本将它们转换成上述通用参数；旧的 Prism 专属 checkpoint CLI 参数已移除。明确的 iteration 目录可以同时提供一致的 step，冲突会报错。
+
+显式 `--load` 始终优先于 initializer，并走原 Megatron/HF 加载路径。错误的显式路径不会回退成重新初始化。恢复脚本仅传 `--load`，不附带首次初始化的 hook、source 或 step。
+
+## 实验目录、音频与监控
+
+`run-grpo.sh` / `run-mopd.sh` 默认把一次运行放在
+`OUTPUT_ROOT/RUN_NAME/JOB_TAG/running_round_<RUNNING_ROUND>/`。`OUTPUT_ROOT`
+默认是当前目录的 `outputs`，`RUN_NAME` 默认是 `prism-grpo` 或 `prism-mopd`；
+未指定 `JOB_TAG` 时使用 UTC 时间与平台 job ID（本地运行使用进程 ID）。
+可以用 `RUN_DIR` 指定这一轮的完整目录。脚本拒绝覆盖已经启动过的轮次。
+
+```text
+running_round_0/
+├── config/                 # 启动选项、源码版本、配置快照、加载来源
+├── logs/driver.log         # driver 和转发到 driver 的 Ray 日志
+├── checkpoints/           # 原生 RL checkpoint 与数据源状态
+├── tensorboard/
+├── wandb/
+├── rollout_audio/
+│   ├── train/rollout_0000000/group_<group>_<data-id>/
+│   └── eval/rollout_0000000/<dataset>/<eval-id>/group_<prompt>_<data-id>/
+├── records/train/         # 每个 rollout 的 JSONL 与 metrics.json
+├── records/eval/          # 每个数据集、每次评估的 JSONL 与 metrics.json
+└── debug/                 # 按需启用原 rollout/train tensor dump
+```
+
+`OUTPUT_DIR` 保留原来的含义：显式设置时覆盖 **checkpoint 目录**；未设置时使用
+这一轮的 `checkpoints/`。`AUDIO_DIR` 同样可以把完整音频树放到其他共享存储。
+若该音频根位于本轮目录之外，归档会增加运行目录的末尾层级和路径摘要，隔离共用
+音频存储的不同实验与重启轮次；JSONL 汇总也只读取本次运行的记录。
+所有训练与 rollout 节点仍须能读取配置、音频及记录路径。
+
+训练中产生的音频全部保留，包括最终未进入训练批次的候选，不自动清理或抽样。
+请求波形时，每个 group 保存 `prompt.json`、`prompt_text.txt`、可读取的本地参考音频链接，
+以及每个候选的 WAV 和 JSON。相同 group 的公共文件只准备一次；不同候选的文件独立保存。
+不请求波形的 MOPD 将完整候选 JSON 放在本轮的 `_records_<host>_<pid>/` 分片中，
+prompt、文本和参考 URI 仍保存在每条记录内。JSON 记录 domain、reward category、语言、生成配置、
+结束原因、原始与变换后的奖励分项、评分服务身份、模型版本和教师身份；实际动作
+tensor 继续交给原 debug dump。原始数据的 `metadata.id`、`sample_id`、`prompt_id` 或
+`rollout_audio_id` 可用于可读目录名，未提供时使用 prompt 内容摘要。文件名经过
+路径处理并带有候选唯一标识，多个副本和特殊字符数据 ID 不会覆盖其他候选。
+
+`reward_category` 优先记录实际评分结果的类别，固定类别函数不要求数据预填类别；
+原输入标签另存为 `requested_reward_category`。MixRL 的分发仍由原输入类别决定。
+
+音频在评分前归档，每个候选先写入 pending 记录，评分完成或失败后原子更新。
+实验入口设置 `omni_audio_path_function_path`，让 Omni 客户端将 WAV 直接写入最终候选目录，
+避免共享盘上的中间移动；普通插件调用仍可使用原有音频根目录。
+服务故障仍抛出原异常，不转换成数字奖励。完成一个 rollout 后生成 JSONL 汇总，
+标记 `selected_for_training`；保留 `generation_rollout_id`、`training_rollout_id`
+和 `policy_version` 三个独立字段。若批次中途失败，已生成候选的单独 JSON/WAV
+仍可读取，JSONL 只代表已经完成汇总的批次。训练前后同一 rollout 编号的两次评估
+使用不同 `eval-id`，不会混合。
+
+每个进程追加本轮的 `*.candidates.jsonl` 索引，汇总通过索引保留未选中、失败和取消的候选，
+并复用返回样本已有的记录。旧版没有索引的归档仍可读取。文件准备和评分结果写入使用
+独立、有界的 I/O 队列；取消会等待已提交的写入完成。父目录解析、group 公共文件和相同
+样本集合的统计结果复用，避免共享盘上重复的目录遍历、路径解析和小文件操作。
+
+TensorBoard 默认启用（`USE_TENSORBOARD=0` 可关闭），使用仓库 requirements 中的
+`tensorboard`。日志目录通过实际 `--tensorboard-dir` 参数传给 learner 和 rollout
+actor，不依赖已有 Ray worker 的环境变量。`USE_WANDB=1` 可同时启用 W&B；
+`WANDB_PROJECT`、`WANDB_GROUP` 沿用显式配置，默认 group 包含本轮运行名称。
+每个 `running_round` 使用独立日志目录，恢复时 step 沿用框架的训练进度。
+
+### 日常日志与诊断日志
+
+默认 `DIAGNOSTIC_LOGS=0`：slime 保留 INFO 级的训练、奖励、阶段耗时、checkpoint
+与完整权重发布摘要；Omni 与 router 使用 WARNING，HTTP 成功请求不打印，4xx
+保留为 WARNING、5xx 保留为 ERROR。逐 rank 显存和逐 bucket 权重更新在 DEBUG
+下查看；OOM 与分布式异常的显存信息仍打印 ERROR。重复的 checkpoint kwargs
+兼容性提示每个进程只打印一次，不合并其他 warning/error。
+
+```bash
+# 日常训练，使用默认日志策略
+bash examples/prism/run-grpo.sh
+
+# 新一轮诊断：打开推理批次、HTTP 访问、显存与 NCCL 详情
+DIAGNOSTIC_LOGS=1 RUNNING_ROUND=1 RL_LOAD=/runs/previous/checkpoints \
+  bash examples/prism/run-grpo.sh
+```
+
+| 设置 | 日常默认 | 诊断默认 |
+| --- | --- | --- |
+| `SLIME_LOG_LEVEL` | `INFO` | `DEBUG` |
+| `SGLANG_LOG_LEVEL` | `warning` | `debug` |
+| `SGLANG_LOG_LEVEL_HTTP` | `warning` | `info` |
+| `ROUTER_LOG_LEVEL` | `warn` | `debug` |
+| `NCCL_DEBUG` | `WARN` | `INFO` |
+| `RAY_DEDUP_LOGS` | `1` | `0` |
+
+显式环境变量和追加 CLI 参数仍然优先。单独排查 HTTP 可设置
+`SGLANG_LOG_LEVEL_HTTP=info`；NCCL 详情可以通过
+`NCCL_DEBUG_FILE=/shared/diagnostic/nccl.%h.%p.log` 写入独立文件，先创建这个共享
+目录。日志环境配置会传递给新建 Ray actors，而不依赖现有 cluster 的旧环境。
+Ray 自身的日志去重行为还取决于启动 cluster 的配置，主要降噪在实际日志源完成。
+
+Omni 解释器需要包含配套的 `--log-level-http` 和状态码过滤支持。这里的
+`--sglang-log-level` / `--sglang-log-level-http` 会传给 Omni pipeline，
+`--router-log-level` 会传给 Python router。旧性能实验脚本若显式写死
+`NCCL_DEBUG=INFO` 或 `RAY_DEDUP_LOGS=0`，这些显式设置会继续生效；新日常作业
+应去掉这些 override 或改为表中的日常值。归档中的脚本和运行中的进程不被修改。
+
+新增 `rollout/prism/` 与 `eval/<dataset>/prism/` 指标包含：
+
+- reward 及 WER/CER、SIM、JudgeCLAP 分项的原始值/变换后值统计、参与比例；
+- 完整 prompt group 的奖励均值、组内标准差、p50/p90、零方差比例；
+- 零帧、截断、评分失败、待完成与取消比例；
+- 按 reward category、语言和 domain 分组的统计。
+
+训练统计的 `all`、`selected`、`not_selected` 分别表示已归档候选、选入训练的候选
+和其余候选。`not_selected` 包括过滤与过采样等原因，不等同于动态过滤失败；
+原有 `rollout/dynamic_filter/*` 原因计数继续保留。组内统计只计入完整、评分成功的
+group；未启用的奖励分项不当作零分。纯 MOPD 保持原有不生成波形的配置，记录
+实际轨迹与教师信息。
+
+Prism 指标的单位与分母如下；旧的有效指标名保留为兼容项：
+
+| 指标 | 口径 |
+| --- | --- |
+| `rollout/audio_frames/*` | 实际生成的目标音频帧数；旧 `response_len/*` 保留按 loss mask 计算的有效长度口径 |
+| `perf/rollout_audio_frames_per_gpu_sec` | 本次 rollout 收集到的目标帧数 / 耗时 / 学生 rollout GPU 数 |
+| `perf/rollout_samples_per_sec` | 本次 rollout 收集到的候选数 / 耗时 |
+| `perf/rollout_audio_seconds_per_sec` | 仅当全部候选有真实 WAV 时长（零帧为 0）时报告；不从未知 codec 帧率推算 |
+| `perf/train_sequence_rows_per_sec` | 整个训练批的序列行数 / actor 训练耗时，包含 prompt 和音频行，未除 GPU 数 |
+| `rollout/rvq_frame_logprob_mean` | 每帧 RVQ 通道 logprob 求和，再按样本平均；不含 stop |
+| `train/{rvq,stop}/pg_loss` | 未乘 stop 权重的损失分项，保留全训练 batch 分母；两者按 stop 权重组合后等于原策略损失 |
+| `train/{rvq,stop}/{clipfrac,ppo_kl_estimate,opd_logratio_mean,train_rollout_logprob_abs_diff}` | 先按样本内该类动作平均，再按有效样本平均；`active_samples`/`active_ratio` 给出分母和覆盖率 |
+| `rollout/prism/{domain,teacher}/<label>/{rvq,stop}/opd_logratio_mean` | 实际训练使用的冻结学生与教师分数差，按有效样本加权聚合；分组标签经过 URL 编码 |
+
+OPD log-ratio 是已采样动作上的统计，单批可以为负，不是完整词表的精确 KL。
+零帧样本仍参与 stop 训练；没有 RVQ 动作时不把 RVQ 诊断伪造为零。
+新增统计不改变 loss、梯度或采样。分组均值汇总分子与有效计数，不对各 GPU
+的均值再平均。熵分项只在原配置已要求计算熵时输出，不额外启动模型计算。
+
+`rollout/prism/` 与 `eval/<dataset>/prism/` 下的质量汇总还包括：
+
+- `frames/*`、`audio_seconds/*` 的均值、p50、p95，以及时长覆盖率；
+- `component/<name>/coverage_ratio`（有效评分数 / 当前样本范围）、`valid_ratio`
+  （有效评分数 / 该服务已有返回或已知失败数）、`error_ratio` 和无效音频比例；
+- `component/wer/language/<language>/corpus_error_rate`：总编辑错误数 / 总参考
+  字符或词数。保留原每条错误率均值，语言分母不混合，缺失评分不补零；
+- `component/judge_clap/attribute/<attribute>/mean` 与对应覆盖率；
+- reward category、语言、domain、teacher 分组。单候选的 MOPD/eval 不再报告
+  没有区分意义的组内 reward 零方差指标。
+
+异步预取时，上述 rollout 吞吐是收集窗口的交付速度，不是推理引擎的纯 decode
+吞吐；外部教师和评分服务的 GPU 不在学生 GPU 分母内。等待占比不是 GPU 空闲率。
+Prism 路径不再报告空文本重复率、未填充的缓存命中率、`reward==1` 的文本 pass@k
+和通用 LM 公式估算的 TFLOPS。没有新增 Prism TFLOPS 估算或声学复读检测。
+
+MOPD 可使用独立的音频质量 eval，配置见 [训练与评测说明](TRAINING_MODES.md#独立评测grpo-与-mopd-共用质量指标)。
+
+准备阶段合并用户实际选择的 `--custom-config-path`，保留原奖励、sample hook
+和日志 hook，生成当前轮次的配置后进入原 `train.py`。原奖励函数仍接收原来的
+单样本/批量输入及 kwargs。`config/launch.json` 记录启动选项、Git SHA/工作树状态、
+checkpoint 来源和配置文件 SHA256；可读快照屏蔽凭据，实际 `experiment.yaml`
+以仅文件所有者可读写的权限保存。它记录启动配置，不是源码或完整模型的备份。
+
+较大的调试数据使用原参数按需开启，例如：
+
+```bash
+bash examples/prism/run-grpo.sh \
+  --save-debug-rollout-data '/runs/debug/rollout-{rollout_id}.pt' \
+  --save-debug-train-data '/runs/debug/train-{rollout_id}.pt'
+```
+
+## JSONL 输入
+
+脚本使用 `--input-key script --metadata-key metadata`，不应用文本 chat template。实际 prompt 由 Omni processor 渲染。参见 [prompts.example.jsonl](prompts.example.jsonl)：
+
+```json
+{
+  "script": "你好，欢迎来到今天的节目。",
+  "metadata": {
+    "domain": "chinese",
+    "omni_prompt": {
+      "task_type": "Full VoiceClone",
+      "show_language": false,
+      "language": "zh",
+      "transcript_target": "你好，欢迎来到今天的节目。",
+      "global_instruction": {"Gender": "female"},
+      "references": {"audio1": "/assets/reference-zh.wav"}
+    }
+  }
+}
+```
+
+每行必须显式提供 `task_type` 和布尔 `show_language`。沿用 revision 6 的任务模板，
+`references` 直接写 `{"audio1": "/path/voice.wav", "audio2": "/path/style.wav"}`，
+单参考只写 `audio1`，无参考可省略或写 `{}`。槽位按 `audio1`、`audio2` 排序，
+不能跳过 `audio1` 或增加 `audio3`；音频值必须是非空路径/URI 字符串。
+`task_type` 决定参考属性，标准任务不必再写 `reference_targets`：Full VoiceClone
+的四项属性都取 `audio1`，Attribute Clone Triplet 的音色/口音取 `audio1`、
+韵律/情绪取 `audio2`。SIM 使用任务指定的音色参考。
+
+旧的 `[{"id": "speaker", "uri": "/path/voice.wav"}]` 列表仍可使用，按原列表位置
+映射到 processor 的音频槽位。旧数据若填写 `reference_targets`，仍要求它与任务
+实际映射一致。样本级 `metadata.id` 用于归档定位，与参考音频槽位无关。
+`transcript_target` 与 `language` 供 WER/CER 客户端使用，不传给 ASR 解码器。
+
+启用 JudgeCLAP 时，`global_instruction` 是实际交给 processor 的全局属性 object 或其 JSON 字符串。属性必须同时属于实际 Prism renderer 与 JudgeCLAP 支持的英文规范类别。第一版只评分全局属性，不把全局分数用于局部片段指令。空属性或普通自由文本不能作为这条 JudgeCLAP 路径的评分目标。
+
+MOPD 使用 `metadata.domain` 选择教师。domain 的采样比例由数据记录比例及数据源决定，不由教师响应速度决定。显式 domain 没有教师映射时会报错。
+
+## Ray 资源
+
+设置 `COLOCATE=1` 可让 learner 与完整学生 Omni pipeline 共用 GPU。例如在只有一张
+GPU 的 Ray cluster 上运行：
+
+```bash
+export COLOCATE=1
+export ACTOR_GPUS_PER_NODE=1 ROLLOUT_GPUS=1 GPUS_PER_NODE=1
+bash examples/prism/run-grpo.sh
+```
+
+需要使用支持 tensor 更新和显存释放的 Omni 版本。脚本传入原生 `--colocate`，由 slime
+默认启用 learner/rollout 的 offload，并选择原 `UpdateWeightFromTensor`，通过 CUDA IPC
+传递 SGLang flattened buckets。`--update-weight-transport nccl` 仍沿用原参数默认值，
+共卡时 factory 根据 `--colocate` 选择 tensor 路径。
+
+启用 rollout offload 时，Omni adapter 自动启用 pipeline 的 `enable_memory_saver`，释放 AR 权重、KV/graph 内存，
+并将参考编码器和 vocoder 的持久状态备份到 CPU。先恢复 weights、完成全部权重桶发布，
+再恢复 KV/graph，之后才开放下一轮生成。当前 SGLang 的 breakable prefill graph 不支持
+memory saver，因此启用 offload 的共卡运行使用 eager prefill 和 eager vocoder，AR decode graph 保留。
+外部冻结教师仍需要自己的资源。完整 RL checkpoint 的保存与恢复方式相同。
+
+主循环会在训练前确定本轮是否保存 checkpoint。保存轮次让 learner 在训练后保持 GPU
+驻留，完成保存后再 offload，省去一次保存前的换出、换入；由原 `SAVE_INTERVAL`
+控制，无需增加开关。有 critic 时只保留最后训练的角色，避免两个训练模型同时驻留。
+
+Prism 1.7B 在 H200 上也支持驻留共卡：`COLOCATE=1` 加
+`--no-offload-train --no-offload-rollout`，训练和生成仍按轮次切换，两份模型保留在 GPU。
+使用 [student-throughput.yaml](student-throughput.yaml) 并填写 codec 路径，可将每个 Omni
+副本的 KV 容量固定为 65,536 tokens，避免默认按显存比例预留过大的 KV pool。
+该配置支持 32 个运行请求；本次测试使用每副本 16 个生成并发。适用的硬件、权重、
+实际峰值和性能对照见 [VALIDATION.md](VALIDATION.md)。
+
+要让每个 DP rank 一步处理一个 pack，需启用动态 batch；单独设置
+`--micro-batch-size 1` 表示一个原始样本，不代表自动组成大 pack。例如 DP32 的
+GRPO 使用 4 个节点、每节点 8 卡，共 32 个学生 rollout 副本，并设置
+`PROMPTS_PER_BATCH=256`、`SAMPLES_PER_PROMPT=8`、`GLOBAL_BATCH_SIZE=2048`：
+
+```bash
+export COLOCATE=1 ACTOR_NODES=4 ACTOR_GPUS_PER_NODE=8 ROLLOUT_GPUS=32 GPUS_PER_NODE=8
+export PROMPTS_PER_BATCH=256 SAMPLES_PER_PROMPT=8 GLOBAL_BATCH_SIZE=2048
+export TRAIN_SEQ_LENGTH=20480 MAX_FRAMES=1024 ROLLOUT_CONCURRENCY_PER_REPLICA=16
+bash examples/prism/run-grpo.sh \
+  --use-dynamic-batch-size --max-tokens-per-gpu 20480 --balance-data --balance-by-flops \
+  --use-distributed-optimizer --rollout-data-transport object-store --rollout-execution-workers 16 \
+  --no-offload-train --no-offload-rollout --update-weight-buffer-size 268435456
+```
+
+该命令还需要前文的权重、数据、`OMNI_CONFIG`、`REWARD_CONFIG` 和已有 Ray cluster。
+`--rollout-execution-workers 16` 在 GPU 节点间分配 16 个 CPU actor，每个占用 1 CPU，
+执行完整 prompt group 的生成、协议解析、音频落盘、sample hook 和奖励。总生成并发
+仍由每副本并发乘副本数决定，再分给 workers；评分服务的 `max_inflight` 则是每个
+worker 独立的限额。例如 16 workers、ASR `max_inflight: 16` 对应最多 256 个在途评分。
+根据实际评分服务能力设置副本和并发；不要只增加训练卡而保持评分能力固定。
+
+32 H200 的 MoPD 全流程对照进一步验证了以下两个可选参数：
+
+```bash
+--rollout-gc-threshold 70000 --rollout-tensor-buffer
+```
+
+前者调整 rollout manager 和 group workers 的自动 GC 分配阈值，减少大批量结果解码
+期间的完整堆扫描；其他代际阈值保持原值，默认不调整。后者让 `object-store` 的
+训练分片复用 CPU tensor buffer 序列化，接收端仍得到普通字典和独立可写 tensor，
+并保留嵌套 ObjectRef 的 Ray 所有权；该参数不适用于 `straw` 或 `nixl`。
+两个参数均为 opt-in。教师示例 [teacher-score.yaml](teacher-score.yaml) 将评分 head
+分块设为 1024；128 个真实请求的 code logprobs 完全一致，stop probability 最大
+绝对差为 4.47e-7。完整配对 MoPD 平均步耗时 16.64→14.06 秒，GPU busy 约35%→41.2%；
+GC 单项的端到端收益较小。GRPO 的新增性能收益需要单独实测，详见 [VALIDATION.md](VALIDATION.md)。
+
+worker 结果中的普通 CPU tensor 使用批量 buffer 传输，接收端恢复独立可写内存，
+保留完整样本、元数据和 dtype。协调进程继续负责数据选择、过滤与排序，旧轮任务
+排空后才进入下一权重版本。评分错误会终止本轮；新池不把失败评分替换为零奖励。
+该选项默认 0，启用后不再另建 `--use-distributed-post` actors。
+32 卡的 CPU、评分副本和传输实测对照见 [VALIDATION.md](VALIDATION.md)。
+MOPD 使用 `SAMPLES_PER_PROMPT=1`、`PROMPTS_PER_BATCH=GLOBAL_BATCH_SIZE`，保持每条
+轨迹只参与一次 optimizer update。`L` 应计入文本、参考音频和生成时间行；24 路 RVQ
+不能再乘进序列长度。训练是否没有梯度累积，以实际 `num_microbatches=[1]` 为准。
+FLOPs packing 会先确定 DP/VPP 对齐后的最终 pack 数再均衡；仍需检查实际最大 pack
+长度，因为 FLOPs 均衡不是硬 token 上限。正常吞吐测试不启用 `--dump-details` 或
+`--save-debug-rollout-data`，完整 tensor 归档的 CPU/文件开销应单独计时。
+
+以下单机例子保留 GPU 0 给 learner、GPU 1 给一个完整学生 pipeline。教师和奖励服务使用其他 GPU 或其他机器，并在 Ray 管理的学生资源之外运行。
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 "$TRAIN_PYTHON" -m ray.scripts.scripts start \
+  --head --num-gpus=2 --num-cpus=16 \
+  --dashboard-port=8265 --disable-usage-stats
+export RAY_ADDRESS=auto
+export ACTOR_GPUS_PER_NODE=1
+export ROLLOUT_GPUS=1
+export GPUS_PER_NODE=2
+```
+
+Ray 默认 worker 的 Python 由启动 head/node 的解释器决定，因此使用上面的 `TRAIN_PYTHON` 模块入口启动；`PATH` 中的裸 `ray` 命令可能属于另一个环境。多节点时，各节点的 Ray 进程也须从兼容的训练环境启动。已有集群的 workers 必须具备同一训练环境所需的 Python 依赖；如果不匹配，应另建专用训练 cluster，脚本不会自动停止或替换现有集群。`OMNI_PYTHON` 仅用于独立启动 Omni pipeline 与 router，不能修复 learner worker 的环境。
+
+脚本连接已有 Ray cluster，不停止现有进程。一个 rollout GPU 对应一个完整 Prism pipeline；该 pipeline 内 preprocessing、AR 和 vocoder 共用这一张 rollout GPU。默认训练 GPU 与 rollout GPU 分离；`COLOCATE=1` 时使用共卡切换。
+
+增加学生副本时设置 `ROLLOUT_GPUS=2`，并让 Ray 提供 learner 加上两个 rollout GPU。生成仍调用一个 router，权重通过 NCCL 安装到两个 AR 接收者，全部安装成功后才开放下一轮生成。`ACTOR_NODES × ACTOR_GPUS_PER_NODE` 是 learner DP 大小；`GLOBAL_BATCH_SIZE` 必须能被它整除。跨节点时显式填写每节点的 `GPUS_PER_NODE`。
+
+## GRPO
+
+先启动符合 `voxrl.scoring.v1` 的冻结服务。这里沿用现有评分协议：Qwen3-ASR-1.7B 提供转写，ReDimNet2-B6 提供 speaker embedding，JudgeCLAP adapter 与其 Qwen2.5-Omni 基座提供全局属性评分。服务部署和模型环境独立于 learner；启用的服务需要 `/info`，以及对应的 `/score` 或 `/embed`。
+
+`configure.py` 从已运行服务的 `/info` 读取并固定 fingerprint，生成当前 run 的明确配置：
+
+```bash
+export RUN_CONFIG=/runs/prism-grpo-config
+"$TRAIN_PYTHON" -m examples.prism.configure \
+  --student "$HF_CHECKPOINT" --codec "$CODEC_MODEL" --output "$RUN_CONFIG" \
+  --reward wer http://asr-host:8101 0.6 \
+  --reward sim http://sim-host:8102 0.2 \
+  --reward judge_clap http://judge-host:8103 0.2
+export OMNI_CONFIG="$RUN_CONFIG/student.yaml"
+export REWARD_CONFIG="$RUN_CONFIG/rewards.yaml"
+export AUDIO_DIR=/shared/prism-grpo-audio
+NUM_ROLLOUT=1 bash examples/prism/run-grpo.sh
+```
+
+只使用 ASR 时，仅传入 `--reward wer "$ASR_ENDPOINT" 1`。模型部署需要 Bearer 鉴权时，
+再传 `--reward-auth-token-env INF_API_KEY`；工具只把环境变量名写入配置。
+训练进程及 rollout worker 的环境中须已设置该变量。评分服务的 `max_retries` 可显式
+设为 2 以重试瞬时连接失败；最终评分失败仍会终止本轮，不会替换成零奖励。
+
+上述权重只是示例，应按实验显式选择。只用 WER 与 SIM 时，省去 `--reward judge_clap ...`，无需提供可评分指令。配置 schema 参见 [rewards.example.yaml](rewards.example.yaml)。
+
+`audio_transport: path` 要求评分服务能读取生成音频和 SIM 参考音频的相同绝对路径。服务不共享文件系统时，可在生成配置时加 `--audio-transport upload`；rollout/评分客户端仍需能够读取本地参考文件。评分服务故障会抛出错误，不会静默变成 reward 0。零帧 sampled stop 是合法轨迹，音频奖励为明确的无音频结果，stop 仍参与组优势训练。
+
+GRPO 默认每个 prompt 生成四条、每批两个 prompt。可设置 `PROMPTS_PER_BATCH`、`SAMPLES_PER_PROMPT` 和 `GLOBAL_BATCH_SIZE`。组优势在完整 prompt group 上计算后再进入 DP 分片。
+
+同一批数据需要按样本选择不同奖励时，在每条 prompt 的 `metadata.reward_category` 中显式填写 `base`、`voiceclone` 或 `instruction`，并通过原自定义奖励入口启用分类路由：
+
+```bash
+export PROMPT_DATA=/data/prism-category-prompts.jsonl
+bash examples/prism/run-grpo.sh \
+  --custom-rm-path examples.prism.rewards.reward
+```
+
+`base`、`voiceclone`、`instruction` 分别在 `examples/prism/rewards/` 的独立文件中组合 WER/CER、SIM 和全局 JudgeCLAP，保留原加权和语义。修改类别文件即可改变公式。`voiceclone_gated` 提供非线性示例：原始 WER/CER 达到文件中的阈值后取 SIM，否则为零。每个类别只调用自己需要的服务；同一 prompt group 的候选使用相同类别，组优势仍按原 GRPO 处理。类别独立于 `domain` 和 Prism `task_type`，缺失或未知类别会报错。默认奖励入口继续接受原有未填写类别的数据。
+
+完整配置、输入约束及记录方式见 [REWARD_CATEGORIES.md](REWARD_CATEGORIES.md)，数据模板见 [category-prompts.example.jsonl](category-prompts.example.jsonl)。
+
+## 多 domain MOPD
+
+本示例把教师作为外部、冻结的 score-only Omni 服务管理。分别启动两个教师，例如在两个独立终端：
+
+```bash
+export TEACHER_ZH=/assets/prism-teacher-zh
+export TEACHER_EN=/assets/prism-teacher-en
+
+CUDA_VISIBLE_DEVICES=2 "$OMNI_PYTHON" -m sglang_omni.cli serve \
+  --config examples/prism/teacher-score.yaml --model-path "$TEACHER_ZH" \
+  --host 0.0.0.0 --port 8201
+
+# 另一个终端
+CUDA_VISIBLE_DEVICES=3 "$OMNI_PYTHON" -m sglang_omni.cli serve \
+  --config examples/prism/teacher-score.yaml --model-path "$TEACHER_EN" \
+  --host 0.0.0.0 --port 8202
+```
+
+待教师健康后，在训练环境运行：
+
+```bash
+export RUN_CONFIG=/runs/prism-mopd-config
+export RUN_NAME=prism-1p7b-mopd
+export JOB_TAG=domain-teachers-first-run
+"$TRAIN_PYTHON" -m examples.prism.configure \
+  --student "$HF_CHECKPOINT" --codec "$CODEC_MODEL" --output "$RUN_CONFIG" \
+  --teacher zh_teacher http://teacher-host:8201 "$TEACHER_ZH" \
+  --teacher en_teacher http://teacher-host:8202 "$TEACHER_EN" \
+  --domain chinese zh_teacher --domain english en_teacher
+export OMNI_CONFIG="$RUN_CONFIG/student.yaml"
+export TEACHER_CONFIG="$RUN_CONFIG/teachers.yaml"
+NUM_ROLLOUT=1 bash examples/prism/run-mopd.sh
+```
+
+教师配置 schema 参见 [teachers.example.yaml](teachers.example.yaml)。`configure.py` 从本地教师 artifact 构造 `model_identity`，核验服务返回的身份，并固定 `/model_info` 中的 `teacher_weight_sha256`。该值是教师启动时对已加载 tensor 计算的 checksum，不是某个 safetensors 文件的 hash；训练期间不逐步重新 hash 全模型。存在认证时，可用 `--teacher-auth-token-env ENV_NAME` 把环境变量名称写入配置；运行 rollout hook 的进程需要有该变量。
+
+教师可以比学生大，但必须有兼容的 Prism codec、动作空间、特殊 token、tokenizer 和 replay 语义。教师重放的是学生已经生成的相同 typed prompt 与动作前缀。MOPD 默认每个 prompt 一条轨迹、关闭波形输出，使用示例 `zero_reward` hook 提供零 task reward；原生 OPD 将教师相对旧学生的 selected-action 分数加入 advantage。`OPD_KL_COEF` 控制该项权重。
+
+固定 `endpoint` 指向实际 score worker，直接调用 `/score_actions`。学生 router 的 `/generate` 负载均衡继续沿用。
+
+也可以交给 slime 管理教师的 Ray 资源与生命周期。复制并填写 [managed-deployment.example.yaml](managed-deployment.example.yaml)，使用一张学生 rollout GPU、两张教师 GPU；两个教师必须设置 `update_weights: false` 并使用 score-only pipeline。教师绑定中用 `deployment: teacher_zh` 替代 `endpoint`，两者必须恰选一个。hook 从该 named router 的 `/workers` 找到可用冻结副本，再直连实际 worker 的 `/score_actions`，不会向 router 发送评分请求。
+
+需要事先固定教师身份与已加载 tensor checksum。可对已启动、使用相同制品和 score 配置的教师进行一次显式检查，并让配置工具写入 managed 字段：
+
+```bash
+"$TRAIN_PYTHON" -m examples.prism.configure \
+  --student "$HF_CHECKPOINT" --codec "$CODEC_MODEL" --output /runs/prism-managed-config \
+  --teacher zh_teacher http://teacher-host:8201 "$TEACHER_ZH" \
+  --teacher en_teacher http://teacher-host:8202 "$TEACHER_EN" \
+  --domain chinese zh_teacher --domain english en_teacher \
+  --deployment zh_teacher teacher_zh --deployment en_teacher teacher_en
+```
+
+把 managed deployment 模板中的 `omni_config` 和模型路径填为实际资产，确保 Ray 独占其管理的 GPU，再启动：
+
+```bash
+export OMNI_CONFIG=/runs/prism-managed-config/student.yaml
+export TEACHER_CONFIG=/runs/prism-managed-config/teachers.yaml
+export ROLLOUT_GPUS=3  # 包含学生与两个冻结教师
+export GPUS_PER_NODE=4 # 再加一张 learner GPU
+bash examples/prism/run-mopd.sh --sglang-config /runs/prism-managed-deployment.yaml
+```
+
+多个教师副本沿用相同绑定；hook 按 sample/group 编号确定性选择健康可用 worker。训练过程中不会自动信任新的教师 checksum，返回身份和固定绑定不一致时仍会报错。
+
+## 恢复、配置检查与首轮验收
+
+恢复时保持同一算法、采样和服务配置，使用 slime 的完整 RL checkpoint：
+
+```bash
+export RL_LOAD="$OUTPUT_ROOT/$RUN_NAME/$JOB_TAG/running_round_0/checkpoints"
+export RUNNING_ROUND=1
+bash examples/prism/run-grpo.sh
+# 或相应的 run-mopd.sh
+```
+
+若首次运行显式设置了 `OUTPUT_DIR`，则 `RL_LOAD` 指向该 checkpoint 目录，并为
+本次保存设置新的 `OUTPUT_DIR`（或取消该变量以使用本轮默认目录）。这里只显式
+恢复选定 checkpoint；脚本不扫描其他实验或自动重启平台作业。
+
+`NUM_ROLLOUT` 沿用原框架的总 rollout 上限，续训时需要大于 checkpoint 中已经完成的 rollout。恢复 `iter_0000000` 时，下一次训练为 rollout 1，恢复后的首次完整学生发布为版本 2；下一次更新后发布版本 3。已有更高 serving/recovery 版本会保留。新模型初始化仍从 rollout 0 与首次发布版本 1 开始。
+
+`PRISM_DRY_RUN=1 bash examples/prism/run-grpo.sh` 会检查必需输入并打印实际命令，不创建 GPU 作业。可在脚本末尾附加原 slime 参数，例如 `--save-debug-train-data '/runs/debug/train-{rollout_id}.pt'`。示例使用同步 `train.py` 和 `flush_cache_interval=1`；默认分卡，可设置 `COLOCATE=1` 启用共卡和 offload。未启用 TIS、reference KL、GSPO 或完整 stop KL。
+
+首个实际 GPU 验收应固定少量 prompt、短帧预算和 `NUM_ROLLOUT=1`，检查 native checkpoint 加载、所有 RVQ/stop 重放分数、梯度及完整权重发布，再增加 rollout 副本进行同样验证。CPU 接缝测试支持绑定 HF 配置而不加载权重：
+
+```bash
+SLIME_TEST_PRISM_HF_CHECKPOINT="$HF_CHECKPOINT" "$TRAIN_PYTHON" -m pytest \
+  tests/test_prism_rollout_integration.py tests/test_policy_actions.py \
+  tests/test_prism_model.py -q
+```
+
+仓库提供独立 GPU 工程验收入口。它先加载 native 学生并发布版本 1，再通过 Omni router 生成真实轨迹，核对更新前 logprob，执行一次 native policy objective/Megatron Adam 更新，发布版本 2，并核对更新后生成动作的 logprob。下面使用 learner GPU 0 和 Omni GPU 1；把 `--gpus` 改为 `1,2` 可在三张以上 GPU 上验证两个完整副本：
+
+```bash
+cat > /runs/prism-smoke-options.json <<'JSON'
+{"alignment_atol": 0.05, "alignment_rtol": 0, "learner_max_frames": 8, "learning_rate": 0.001}
+JSON
+
+"$TRAIN_PYTHON" -m scripts.test_prism_omni \
+  --hf-checkpoint "$HF_CHECKPOINT" --config "$OMNI_CONFIG" \
+  --python "$OMNI_PYTHON" --gpus 1 \
+  --artifact-dir /runs/prism-publication-smoke \
+  --native-checkpoint "$PRISM_PRETRAINED_CHECKPOINT" \
+  --mode publication \
+  --publication-hook scripts.prism_publication_smoke:publication \
+  --post-generation-hook scripts.prism_publication_smoke:verify_generated \
+  --publication-args-json /runs/prism-smoke-options.json \
+  --expected-version 2 --max-frames 8
+```
+
+`0.05` 是这里显式选定的 BF16 数值容差示例；结果会分别报告 RVQ 与 stop 的最大和平均误差。该工程检查使用一个明确的非零 advantage 来验证反向和权重更新，不调用实际 reward model，也不替代完整 prompt group 的 GRPO 或 domain 教师训练验收。独立脚本直接使用 engine 控制方法，没有执行 Ray placement；实际训练的资源生命周期仍由 `train.py` 管理。
+
+`--mode static` 可单独检查 HF artifact、pipeline、router 和真实 rollout 协议，省去两个 hook 及 native checkpoint。这个模式不发布 learner 权重，结果会明确记录这一点。原始 `/generate` JSON、typed replay、更新前后分数和清理状态均写入结果目录。
+
+### Runtime boundaries and reproducible cluster runs
+
+Prism's installed runtime lives in `slime_plugins.prism`. Launch the experiment
+with `python -m slime_plugins.prism.experiment`, use
+`slime_plugins.prism.hooks.zero_reward` for pure MoPD, and attach the frozen
+teacher through `slime_plugins.prism.teacher.score_teacher`.
+Sample observers receive `generated`, `completed`, and `failed`
+events; they do not replace the configured reward callable. Candidate indexes
+are flushed in batches and drained at the rollout boundary. Teacher failures
+retain their stage and status in candidate records.
+
+The frozen teacher client loads each configuration once per process. Its
+`--omni-teacher-batch-size` (default 8), `--omni-teacher-batch-wait-ms` (2 ms),
+`--omni-teacher-max-inflight` (16 per execution worker), and
+`--omni-teacher-max-attempts` (2) bound request aggregation and transient retries.
+Only fixed-action scoring retries transport errors and HTTP 429/502/503/504;
+after those retries, HTTP/transport failures reject the affected sample. HTTP
+403 is rejected immediately. Rollout discards the affected prompt group and
+fetches replacements until the configured batch is full. For MoPD with one
+sample per prompt, only that sample is discarded. Rejected candidates retain
+their teacher, HTTP status, bounded response body and request ID in the archive;
+they never receive fabricated scores or enter training. The existing
+`rollout/dynamic_filter/drop_teacher_request_failed` count and
+`rollout/prism/teacher_failures/<teacher>/{count,ratio,http_<status>}` expose
+these failures (counts are samples for the latter).
+
+`--omni-teacher-max-consecutive-failures` (default 8) bounds consecutive failed
+HTTP batches for each teacher in each execution worker, across rollout rounds.
+A successful batch resets that teacher's counter. Reaching the limit reports a
+service outage and stops rollout so a persistently unavailable domain cannot
+be silently excluded. Fixed evaluation failures still propagate; evaluation
+does not drop failed cases from its denominator. Configuration, protocol,
+identity and input-hash mismatches remain fatal. Prism teacher requests and
+results use version 2. Each result contains one `selected_stop_logprobs` value
+per student stop/continue action, computed directly from FP32 logits. The teacher
+infers these actions from the supplied codes and finish reason: one continue
+per frame, plus a final stop only for a natural termination. No probability
+fallback or two-column response is accepted. The HTTP batch envelope remains
+version 1. Upgrade the Slime client and Omni teacher together.
+
+The launcher enables `--omni-compact-replay`: training tensors retain the exact
+replay inputs and actions, while completed samples discard duplicate wire lists.
+The teacher request can still be reconstructed from those tensors. Pass
+`--no-omni-compact-replay` when a custom postprocessing hook needs the original
+wire trace. The native archive does not require that duplicate trace.
+
+Colocated Omni tensor updates carry a parameter-plan manifest and ordered bucket
+indices. Slime verifies the receiver's acknowledgement for each bucket; Omni
+keeps generation paused until the publication is complete. Upgrade both
+repositories together: this client requires publication acknowledgements from
+the Omni server and does not downgrade to an unchecked update. A failed update
+requires a fresh pause and a complete retry because the tensors are loaded in
+place. The manifest checks publication structure, not a full hash of tensor
+contents on every training step.
+
+Prism examples enable `--checkpoint-joint-commit`. A checkpoint is resumable only
+after its model and dataset cursor are committed together. An interrupted later
+save cannot supersede the last complete commit. Dataset state is required for
+ordinary resume; use Megatron's explicit `--finetune` mode to load a model and
+start a new dataset run. New cursor snapshots verify the dataset content hash
+and sampling configuration. The existing straw commit format is unchanged.
+When upgrading a legacy checkpoint without a joint commit, use a new output
+directory for `--save`. Reusing its old root is rejected: an interrupted first
+joint save must not invalidate the original legacy recovery boundary. Resuming
+an existing joint checkpoint may keep the same output root.
+
+`logs/phases.jsonl` records explicit driver phase boundaries using a monotonic
+clock; `config/resolved-args.json` records the final redacted arguments. The
+`RESIDENT_CLEANUP_INTERVAL` environment variable controls full GC and allocator
+cleanup while the learner remains resident. Its conservative default is 1;
+measure peak memory and checkpoint/resume behavior before increasing it.
+
+A pinned multi-node GPU Job can run
+`python /absolute/slime/slime_plugins/prism/cluster.py /shared/configs/run.json`.
+Use `--dry-run` to validate the manifest without allocating GPU work. The JSON
+requires `source`, `source_commit`, `omni_source`, `omni_source_commit`,
+`auth_token_file`, `hf_checkpoint`, `pretrained_checkpoint`, `prompt_data`,
+`student_config`, `output`, `ready_file`, `nodes`, and `mode`, plus
+`teacher_config` for MoPD or `reward_config` for GRPO. Source and asset paths are
+shared absolute paths. Optional fields include `batch`, `rollouts`, `seed`,
+`concurrency`, `save_interval`, `load_checkpoint`, `extra_args`, `python`, and
+`omni_python`. `dependencies` can pin additional repositories by path and commit.
+The job records per-node GPU samples, validates GPU collectives and TensorBoard
+storage, and starts the ordinary Prism launcher on the Ray head. A fresh output
+path is required for every attempt.
+
+When changing `NUM_ROLLOUT` during resume, explicitly choose Megatron's optimizer
+scheduler policy. `--use-checkpoint-opt-param-scheduler` restores the checkpoint's
+scheduler settings and progress. It preserves the constant LR/WD recipe used by
+this example when extending the run. `--override-opt-param-scheduler` instead
+uses the new command's schedule settings while retaining progress; choose it
+only when intentionally changing that schedule. Leaving both flags unset
+requires the saved and requested schedule settings to match.

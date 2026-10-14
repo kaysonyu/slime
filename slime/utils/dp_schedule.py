@@ -59,6 +59,7 @@ def _pack_step_into_mbs(
     use_dynamic_batch_size: bool,
     max_per_bin: int | None,
     micro_batch_size: int | None,
+    align_to: int,
     balance_by_flops: bool = False,
 ) -> list[list[int]]:
     """Group a step's samples into mbs. Returns ``mbs[k]`` = local indices into ``step_lengths``."""
@@ -67,6 +68,9 @@ def _pack_step_into_mbs(
         if balance_by_flops:
             total_tokens = sum(step_lengths)
             num_mbs = max(1, (total_tokens + max_per_bin - 1) // max_per_bin)
+            # Balance the final number of bins, including DP/VPP alignment.
+            # Splitting balanced bins afterwards leaves some ranks half full.
+            num_mbs = ((num_mbs + align_to - 1) // align_to) * align_to
             if num_mbs >= len(step_lengths):
                 return [[i] for i in range(len(step_lengths))]
             workloads = _calculate_workloads(step_lengths, args)
@@ -161,6 +165,7 @@ def build_dp_schedule(
             use_dynamic_batch_size=args.use_dynamic_batch_size,
             max_per_bin=max_per_bin,
             micro_batch_size=getattr(args, "micro_batch_size", None),
+            align_to=align_to,
             balance_by_flops=args.balance_by_flops,
         )
 

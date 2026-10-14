@@ -1,0 +1,11 @@
+config_cls: MossTTSPrismPipelineConfig
+# Slime supplies the actual student path with --model-path.
+model_path: /assets/prism-student
+codec_model_path: /assets/moss-audio-tokenizer-v2
+enable_rl: true
+stages:
+  tts_engine:
+    engine:
+      max_running_requests: 32
+      max_total_tokens: 65536
+      cuda_graph_max_bs: 32

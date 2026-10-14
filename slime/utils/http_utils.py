@@ -148,11 +148,14 @@ def _next_actor():
 class _ShardedHTTPTransport(httpx.AsyncBaseTransport):
     """Reduce asyncio CPU stalls from httpcore's per-request connection scans.
 
-    Split this client's connection budget across pools of at most 128
+    Give each origin its connection budget across pools of at most 32
     connections, so each synchronous scan touches a small pool. The pools
-    operate concurrently: 128 is a per-pool limit, not a client-wide request
-    limit. Their connection limits sum to max_connections; requests assigned
+    operate concurrently: 32 is a per-pool limit, not a client-wide request
+    limit. Each origin's limits sum to max_connections; requests assigned
     to a full pool wait for a connection there.
+
+    Reward and teacher requests must not queue behind long-lived generation
+    sockets to a different origin. Their hooks still bound scoring concurrency.
 
     Allow each pool to retain its entire connection budget as idle keep-alive
     connections, subject to the usual expiry. This avoids closing/reopening
@@ -161,29 +164,32 @@ class _ShardedHTTPTransport(httpx.AsyncBaseTransport):
     """
 
     def __init__(self, max_connections: int):
-        count = max(1, (max_connections + 127) // 128)
+        count = max(1, (max_connections + 31) // 32)
         size, remainder = divmod(max(1, max_connections), count)
-        tls = ssl.create_default_context()
-        self._transports = [
-            httpx.AsyncHTTPTransport(
-                verify=tls,
-                trust_env=False,
-                limits=httpx.Limits(
-                    max_connections=size + (i < remainder),
-                    max_keepalive_connections=size + (i < remainder),
-                ),
-            )
-            for i in range(count)
-        ]
-        self._next = 0
+        self._pool_sizes = [size + (i < remainder) for i in range(count)]
+        self._tls = ssl.create_default_context()
+        self._transports = {}
+        self._next = {}
 
     async def handle_async_request(self, request):
-        transport = self._transports[self._next]
-        self._next = (self._next + 1) % len(self._transports)
+        origin = (request.url.scheme, request.url.host, request.url.port)
+        if origin not in self._transports:
+            self._transports[origin] = [
+                httpx.AsyncHTTPTransport(
+                    verify=self._tls,
+                    trust_env=False,
+                    limits=httpx.Limits(max_connections=size, max_keepalive_connections=size),
+                )
+                for size in self._pool_sizes
+            ]
+            self._next[origin] = 0
+        transports = self._transports[origin]
+        transport = transports[self._next[origin]]
+        self._next[origin] = (self._next[origin] + 1) % len(transports)
         return await transport.handle_async_request(request)
 
     async def aclose(self):
-        await asyncio.gather(*(transport.aclose() for transport in self._transports))
+        await asyncio.gather(*(transport.aclose() for group in self._transports.values() for transport in group))
 
 
 async def _post(client, url, payload, max_retries=60, headers=None, timeout=None, score_centering_top_k=None):
@@ -258,7 +264,7 @@ def init_http_client(args, *, concurrency: int | None = None):
         )
 
     # Optionally initialize distributed POST via Ray without changing interfaces
-    if args.use_distributed_post:
+    if args.use_distributed_post and not getattr(args, "rollout_execution_workers", 0):
         _init_ray_distributed_post(args)
         _distributed_post_enabled = True
 
@@ -364,8 +370,8 @@ async def post(url, payload, max_retries=60, headers=None, timeout=None, score_c
     )
 
 
-async def get(url, *, timeout=None):
-    response = await _http_client.get(url, timeout=timeout)
+async def get(url, *, timeout=None, headers=None):
+    response = await _http_client.get(url, timeout=timeout, headers=headers)
     try:
         response.raise_for_status()
         content = await response.aread()

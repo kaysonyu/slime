@@ -138,11 +138,34 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_con
     args = get_args()
     load_path = args.load
 
+    initializer_path = getattr(args, "custom_megatron_model_initializer_path", None)
+    # Explicit actor, reference and teacher loads keep their normal loader.
+    # The initializer only populates model weights for a fresh training run.
+    if load_path is None and initializer_path:
+        from slime.utils.misc import load_function
+
+        if not getattr(args, "pretrained_checkpoint", None):
+            raise ValueError("--custom-megatron-model-initializer-path requires --pretrained-checkpoint")
+        initializer = load_function(initializer_path)
+        if not callable(initializer):
+            raise TypeError(f"Model initializer {initializer_path!r} must be callable")
+        if initializer(ddp_model, args) is not None:
+            raise TypeError(f"Model initializer {initializer_path!r} must return None")
+        if optimizer is not None and (args.fp16 or args.bf16):
+            optimizer.reload_model_params()
+        return 0, 0
+
+    if load_path is None:
+        raise ValueError("model initialization requires --load or --custom-megatron-model-initializer-path")
+
     assert Path(load_path).exists() and _is_dir_nonempty(
         load_path
     ), f"{args.load=} does not exist or is an empty directory. Did you specify the wrong folder?"
 
     if _is_megatron_checkpoint(load_path):
+        # A selected checkpoint must never become random/model-only weights
+        # when Megatron cannot find its rank files or selected iteration.
+        args.exit_on_missing_checkpoint = True
         if getattr(args, "use_stateless_adam", False):
             # The master parameters are rebuilt from the saved model. There are
             # no Adam moments to load, and Megatron must skip its optimizer keys.
@@ -161,7 +184,7 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_con
             )
         if getattr(args, "use_stateless_adam", False) and not args.finetune and opt_param_scheduler is not None:
             checkpoint = Path(load_path)
-            if not re.fullmatch(r"iter_\d{7}", checkpoint.name):
+            if not re.fullmatch(r"iter_\d{7,}", checkpoint.name):
                 checkpoint /= f"iter_{result[0]:07d}"
             # Loading only the model without this file would silently restart
             # the learning-rate schedule. A missing payload is an invalid resume.
@@ -169,18 +192,21 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_con
                 torch.load(checkpoint / "opt_param_scheduler.pt", map_location="cpu", weights_only=True)
             )
         return result
-    else:
+    elif (Path(load_path) / "config.json").is_file():
         return _load_checkpoint_hf(
             ddp_model=ddp_model,
             optimizer=optimizer,
             args=args,
             load_path=load_path,
         )
+    raise ValueError(f"Explicit --load must identify a Megatron or HuggingFace checkpoint: {load_path}")
 
 
-def _is_megatron_checkpoint(path: str | Path) -> bool:
+def _is_megatron_checkpoint(path: str | Path | None) -> bool:
+    if path is None:
+        return False
     return (Path(path) / "latest_checkpointed_iteration.txt").is_file() or bool(
-        re.fullmatch(r"iter_\d{7}", Path(path).name)
+        re.fullmatch(r"iter_\d{7,}", Path(path).name)
     )
 
 

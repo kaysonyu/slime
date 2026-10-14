@@ -1,6 +1,10 @@
 import abc
 import copy
+import hashlib
 import logging
+import os
+import re
+import uuid
 from pathlib import Path
 
 import torch
@@ -59,6 +63,8 @@ class DataSource(abc.ABC):
 
 # TODO may further refactor data-loading part later
 class RolloutDataSource(DataSource):
+    dataset_identity: dict | None = None
+
     def __init__(self, args):
         self.args = args
         self.consumers = {}
@@ -99,6 +105,28 @@ class RolloutDataSource(DataSource):
                 self.dataset.shuffle(self.epoch_id)
         else:
             self.dataset = None
+        if isinstance(args.prompt_data, str) and Path(args.prompt_data).is_file():
+            digest = hashlib.sha256()
+            with Path(args.prompt_data).open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+            self.dataset_identity = {
+                "sha256": digest.hexdigest(),
+                **{
+                    name: getattr(args, name, None)
+                    for name in (
+                        "input_key",
+                        "metadata_key",
+                        "label_key",
+                        "tool_key",
+                        "apply_chat_template",
+                        "apply_chat_template_kwargs",
+                        "rollout_seed",
+                        "rollout_shuffle",
+                        "n_samples_per_prompt",
+                    )
+                },
+            }
 
     def get_samples(self, num_samples):
         # TODO further improve code
@@ -151,6 +179,7 @@ class RolloutDataSource(DataSource):
                 **self._restored_consumers,
                 **{name: consumer.state_dict() for name, consumer in self.consumers.items()},
             }
+            state["dataset_identity"] = self.dataset_identity
             return state
         finally:
             for consumer, was_paused in paused:
@@ -158,6 +187,9 @@ class RolloutDataSource(DataSource):
                     consumer.resume()
 
     def load_state_dict(self, state):
+        if state.get("dataset_identity") is not None and self.dataset_identity is not None:
+            if state["dataset_identity"] != self.dataset_identity:
+                raise ValueError("Dataset contents or sampling configuration changed since the checkpoint")
         for name, value in state.items():
             if name == "consumers":
                 self._restored_consumers = value
@@ -170,15 +202,27 @@ class RolloutDataSource(DataSource):
     def save(self, rollout_id):
         path = Path(self.args.save) / "rollout" / f"global_dataset_state_dict_{rollout_id}.pt"
         path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(self.state_dict(), path)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("xb") as stream:
+                torch.save(self.state_dict(), stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def load(self, rollout_id=None):
-        if self.args.load is None:
+        if self.args.load is None or getattr(self.args, "finetune", False):
             return
-        path = Path(self.args.load) / "rollout" / f"global_dataset_state_dict_{rollout_id}.pt"
+        root = Path(self.args.load)
+        if re.fullmatch(r"iter_\d{7,}", root.name):
+            root = root.parent
+        path = root / "rollout" / f"global_dataset_state_dict_{rollout_id}.pt"
         if not path.exists():
-            logger.info("Checkpoint %s does not exist.", path)
-            return
+            raise FileNotFoundError(
+                f"Dataset checkpoint is required for exact resume: {path}. Use --finetune for a new data run."
+            )
         self.load_state_dict(torch.load(path, weights_only=False))
 
     def __len__(self) -> int:

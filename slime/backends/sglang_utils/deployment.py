@@ -1,15 +1,21 @@
 """Launch and connect SGLang rollout deployments."""
 
+import json
 import logging
 import multiprocessing
+import os
 import random
 import time
 from typing import Any
+
+import ray
+import requests
 
 from slime.backends.sglang_utils.disaggregation import start_epd_server_groups, start_pd_server_groups
 from slime.backends.sglang_utils.engine_group import RolloutServer, ServerGroupPlacement
 from slime.backends.sglang_utils.external import start_external_rollout_servers
 from slime.backends.sglang_utils.sglang_config import resolve_sglang_config
+from slime.utils.cleanup import Cleanup
 from slime.utils.http_utils import _wrap_ipv6, find_available_port, get_host_info
 
 logger = logging.getLogger(__name__)
@@ -78,6 +84,8 @@ def _compute_megatron_num_gpus(args) -> int:
 
 def start_rollout_servers(args, pg) -> tuple[dict[str, Any], list[Any]]:
     """Start configured rollout servers without waiting for final engine initialization."""
+    if getattr(args, "rollout_backend", "sglang") == "sglang-omni":
+        return start_omni_rollout_servers(args, pg)
     if args.rollout_external:
         return start_external_rollout_servers(args, start_router=_start_router)
 
@@ -144,3 +152,203 @@ def start_rollout_servers(args, pg) -> tuple[dict[str, Any], list[Any]]:
 
     args.sglang_model_routers = {name: (server.router_ip, server.router_port) for name, server in servers.items()}
     return servers, pending_init_handles
+
+
+OMNI_ROUTER_PROGRAM = """
+import asyncio
+import json
+import logging
+import sys
+from contextlib import asynccontextmanager
+import httpx
+import uvicorn
+from sglang_omni_router.python.app import create_app
+from sglang_omni_router.python.config import RouterConfig
+from sglang_omni.serve.access_logging import configure_access_logging
+
+configuration, disabled = json.loads(sys.argv[1])
+connections_per_worker = configuration.pop("connections_per_worker", 128)
+log_level = configuration.pop("log_level", "warning")
+log_level = "warning" if log_level == "warn" else log_level
+log_level_http = configuration.pop("log_level_http", "warning")
+logging.basicConfig(level=log_level.upper())
+router_config = RouterConfig(**configuration)
+
+class WorkerTransport(httpx.AsyncBaseTransport):
+    def __init__(self):
+        self.pools = {}
+
+    async def handle_async_request(self, request):
+        origin = (request.url.scheme, request.url.host, request.url.port)
+        if origin not in self.pools:
+            self.pools[origin] = httpx.AsyncHTTPTransport(
+                trust_env=False,
+                limits=httpx.Limits(
+                    max_connections=connections_per_worker,
+                    max_keepalive_connections=connections_per_worker,
+                ),
+            )
+        return await self.pools[origin].handle_async_request(request)
+
+    async def aclose(self):
+        await asyncio.gather(*(pool.aclose() for pool in self.pools.values()))
+
+# Keep response relaying from repeatedly scanning every replica's connections.
+client = httpx.AsyncClient(
+    transport=WorkerTransport(), timeout=httpx.Timeout(router_config.request_timeout_secs), trust_env=False
+)
+health_client = httpx.AsyncClient(
+    timeout=httpx.Timeout(router_config.health_check_timeout_secs),
+    limits=httpx.Limits(max_connections=max(1, len(router_config.workers))),
+    trust_env=False,
+)
+app = create_app(router_config, client=client, health_client=health_client)
+original_lifespan = app.router.lifespan_context
+
+@asynccontextmanager
+async def lifespan(application):
+    async with client, health_client, original_lifespan(application):
+        if disabled:
+            for worker in application.state.workers:
+                worker.set_disabled(True)
+        yield
+
+app.router.lifespan_context = lifespan
+# Match Omni workers: rollout CPU processing can outlive Uvicorn's short idle default.
+server_config = uvicorn.Config(
+    app, host=configuration['host'], port=configuration['port'], workers=1,
+    timeout_keep_alive=120, log_level=log_level
+)
+configure_access_logging(log_level_http)
+uvicorn.Server(server_config).run()
+"""
+
+
+def launch_omni_router(python: str, configuration: dict, disabled: bool, admin_key: str | None) -> None:
+    environment = os.environ.copy()
+    environment.pop("SGLANG_OMNI_ADMIN_KEY", None)
+    if admin_key:
+        environment["SGLANG_OMNI_ADMIN_KEY"] = admin_key
+    command = [python, "-c", OMNI_ROUTER_PROGRAM, json.dumps([configuration, disabled])]
+    os.execvpe(python, command, environment)
+
+
+def start_omni_rollout_servers(args, pg) -> tuple[dict[str, Any], list[Any]]:
+    """Start complete pipelines before seeding their single-process Python router."""
+    if args.rollout_external:
+        raise ValueError("Omni rollout requires internally owned pipeline replicas")
+    from slime.backends.sglang_utils.omni_engine import OMNI_WORKER_CAPABILITIES
+
+    configuration = resolve_sglang_config(args)
+    placement = ServerGroupPlacement(
+        args=args,
+        pg=pg,
+        rollout_pg_offset=_compute_rollout_offset(args),
+        megatron_num_gpus=_compute_megatron_num_gpus(args),
+    )
+    servers = {}
+    port_cursors = {}
+    created_groups, router_processes = [], []
+    try:
+        for model_index, model in enumerate(configuration.models):
+            model.resolve(args)
+            groups, handles = [], []
+            for group_configuration in model.server_groups:
+                if group_configuration.worker_type not in {"regular", "placeholder"}:
+                    raise ValueError("Omni uses complete regular pipeline replicas, not PD/EPD server groups")
+                replica_gpus = group_configuration.num_gpus_per_engine
+                if (
+                    not replica_gpus
+                    or replica_gpus < 1
+                    or replica_gpus > args.num_gpus_per_node
+                    or group_configuration.num_gpus % replica_gpus
+                ):
+                    raise ValueError("Omni replica GPUs must fit one node and divide the group's GPU allocation")
+                group = placement.create(group_configuration, None, None)
+                created_groups.append(group)
+                pending, port_cursors = group.start_engines(port_cursors)
+                handles.extend(pending)
+                groups.append(group)
+            ray.get(handles)
+            workers = [
+                {"url": group.engine_urls[index], "capabilities": OMNI_WORKER_CAPABILITIES}
+                for group in groups
+                for index in range(0, len(group.all_engines), group.nodes_per_engine)
+            ]
+            if not workers:
+                raise ValueError("The Omni Python router requires at least one complete pipeline worker")
+            router_ip = _wrap_ipv6(get_host_info()[1])
+            router_port = args.sglang_router_port if model_index == 0 else None
+            router_port = router_port or find_available_port(random.randint(3000, 4000))
+            router_configuration = {
+                "host": router_ip.strip("[]"),
+                "port": router_port,
+                "workers": workers,
+                "policy": args.omni_router_policy,
+                "request_timeout_secs": args.sglang_router_request_timeout_secs,
+                "connections_per_worker": max(8, 2 * args.sglang_server_concurrency),
+                "log_level": getattr(args, "router_log_level", "warn"),
+                "log_level_http": getattr(args, "sglang_log_level_http", None) or "warning",
+            }
+            process = multiprocessing.Process(
+                target=launch_omni_router,
+                args=(args.omni_python, router_configuration, model.update_weights, args.omni_admin_key),
+            )
+            process.start()
+            router_processes.append(process)
+            deadline = time.monotonic() + getattr(args, "distributed_timeout_minutes", 10) * 60
+            with requests.Session() as client:
+                client.trust_env = False
+                while time.monotonic() < deadline:
+                    if not process.is_alive():
+                        raise RuntimeError(f"Omni router exited with code {process.exitcode}")
+                    try:
+                        response = client.get(f"http://{router_ip}:{router_port}/live", timeout=1)
+                        response.raise_for_status()
+                        break
+                    except requests.RequestException:
+                        time.sleep(0.1)
+                else:
+                    raise TimeoutError("Omni router startup timed out")
+            for group in groups:
+                group.router_ip, group.router_port = router_ip, router_port
+            ray.get(
+                [engine.attach_router.remote(router_ip, router_port) for group in groups for engine in group.engines]
+            )
+            servers[model.name] = RolloutServer(
+                server_groups=groups,
+                router_ip=router_ip,
+                router_port=router_port,
+                model_name=model.name,
+                update_weights=model.update_weights,
+            )
+            if model_index == 0:
+                args.sglang_router_ip, args.sglang_router_port = router_ip, router_port
+    except BaseException:
+        cleanup = Cleanup(args.rollout_cleanup_timeout)
+        shutdowns = []
+        engines = [engine for group in created_groups for engine in group.all_engines if engine is not None]
+        for engine in engines:
+            handle = cleanup.run("request Omni shutdown", engine.shutdown.remote)
+            if handle is not None:
+                shutdowns.append(handle)
+        if shutdowns:
+            cleanup.run(
+                "wait for Omni shutdown",
+                ray.wait,
+                shutdowns,
+                num_returns=len(shutdowns),
+                timeout=cleanup.remaining / 2,
+            )
+        for engine in engines:
+            cleanup.run("kill incomplete Omni actor", ray.kill, engine, no_restart=True)
+        for process in router_processes:
+            if process.is_alive():
+                cleanup.run("terminate incomplete Omni router", process.terminate)
+                cleanup.run("join incomplete Omni router", process.join, timeout=cleanup.remaining / 2)
+                if process.is_alive():
+                    cleanup.run("kill incomplete Omni router", process.kill)
+                    cleanup.run("reap incomplete Omni router", process.join, timeout=cleanup.remaining)
+        raise
+    args.sglang_model_routers = {name: (server.router_ip, server.router_port) for name, server in servers.items()}
+    return servers, []

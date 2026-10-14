@@ -3,7 +3,10 @@ import copy
 import importlib.util
 import json
 import logging
+import math
 import os
+import re
+import sys
 from typing import Any
 
 import yaml
@@ -37,6 +40,61 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
     def add_slime_arguments(parser):
         # Ray
         def add_cluster_arguments(parser):
+            parser.add_argument("--rollout-backend", choices=["sglang", "sglang-omni"], default="sglang")
+            parser.add_argument("--omni-config", help="SGLang-Omni pipeline YAML used by each rollout replica.")
+            parser.add_argument(
+                "--omni-python", help="Python interpreter containing SGLang-Omni; defaults to this interpreter."
+            )
+            parser.add_argument(
+                "--omni-router-policy", choices=["round_robin", "least_request", "random"], default="round_robin"
+            )
+            parser.add_argument(
+                "--omni-admin-key", help="Optional shared admin key for Omni workers and their router."
+            )
+            parser.add_argument(
+                "--omni-model-name",
+                default="student",
+                help="Named rollout deployment used by the Omni generation hook.",
+            )
+            parser.add_argument("--omni-audio-dir", help="Shared directory for generated reward audio.")
+            parser.add_argument(
+                "--omni-eval-return-audio",
+                action=argparse.BooleanOptionalAction,
+                default=None,
+                help="Override waveform generation only during Omni evaluation; otherwise inherit training.",
+            )
+            parser.add_argument(
+                "--omni-eval-teacher-scoring",
+                action=argparse.BooleanOptionalAction,
+                default=True,
+                help="Run the teacher sample hook during evaluation; disable for independent audio quality eval.",
+            )
+            parser.add_argument(
+                "--omni-teacher-config", help="YAML/JSON domain-to-frozen-teacher bindings for the Omni sample hook."
+            )
+            parser.add_argument("--omni-teacher-batch-size", type=int, default=8)
+            parser.add_argument("--omni-teacher-batch-wait-ms", type=float, default=2.0)
+            parser.add_argument(
+                "--omni-teacher-max-inflight",
+                type=int,
+                default=16,
+                help="Maximum in-flight frozen teacher HTTP batches per rollout execution worker.",
+            )
+            parser.add_argument("--omni-teacher-max-attempts", type=int, default=2)
+            parser.add_argument(
+                "--omni-teacher-max-consecutive-failures",
+                type=int,
+                default=8,
+                help="Stop after this many consecutive failed HTTP batches per teacher per worker; "
+                "isolated request failures are excluded and replaced before training.",
+            )
+            parser.add_argument("--omni-teacher-request-timeout-s", type=float, default=120.0)
+            parser.add_argument("--omni-compact-replay", action=argparse.BooleanOptionalAction, default=False)
+            parser.add_argument(
+                "--omni-reward-config", help="YAML/JSON WER, SIM and instruction reward service configuration."
+            )
+            parser.add_argument("--omni-request-timeout-s", type=float, default=600.0)
+            parser.add_argument("--omni-cancel-drain-timeout-s", type=float, default=600.0)
             parser.add_argument("--actor-num-nodes", type=int, default=1, help="Number of nodes for training actor")
             parser.add_argument(
                 "--actor-num-gpus-per-node", type=int, default=8, help="Number of gpus per node for training actor"
@@ -74,7 +132,8 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=False,
                 help=(
                     "Whether to colocate the inference engines and the actor. "
-                    "Turning this on will also set --offload to true."
+                    "CPU offload is enabled by default; use --no-offload-train and "
+                    "--no-offload-rollout to keep both models resident."
                 ),
             )
             parser.add_argument(
@@ -87,8 +146,8 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 "--offload-train",
                 action=argparse.BooleanOptionalAction,
                 help=(
-                    "Whether to offload the training actor to CPU during training. "
-                    "This will always be true when --colocate is set."
+                    "Whether to offload the training actor to CPU outside training. "
+                    "Enabled by default with --colocate; --no-offload-train keeps the learner resident."
                 ),
             )
             parser.add_argument(
@@ -96,7 +155,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 action=argparse.BooleanOptionalAction,
                 help=(
                     "Whether to offload the rollout generator to CPU during training. "
-                    "This will always be true when --colocate is set."
+                    "Enabled by default with --colocate; --no-offload-rollout keeps the generator resident."
                 ),
             )
 
@@ -255,6 +314,16 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "`def custom_model_provider(pre_process: bool, post_process: bool, vp_stage: int | None = None) -> GPTModel`. "
                     "Example: 'my_module.my_model_provider'."
                 ),
+            )
+            parser.add_argument(
+                "--custom-megatron-log-prob-function-path",
+                help="Model-specific selected-action extractor shared by forward-only scoring and the native policy loss.",
+            )
+            parser.add_argument(
+                "--policy-stop-loss-weight",
+                type=float,
+                default=1.0,
+                help="Relative sampled-stop loss weight for a multi-action policy.",
             )
             parser.add_argument(
                 "--recompute-loss-function",
@@ -528,6 +597,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--rollout-sample-observer-path",
+                action="append",
+                default=[],
+                help="Observe generated/completed/failed sample events without replacing reward functions.",
+            )
+            parser.add_argument(
                 "--custom-rollout-log-function-path",
                 type=str,
                 default=None,
@@ -605,6 +680,16 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "Shared directory for straw rollout payloads, mounted at the same absolute path on all nodes. "
                     "Defaults to <save>/rollout_data. Required for straw transport when --save is unset. "
                     "Files are retained for pending samples, checkpoints and debug archives."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-tensor-buffer",
+                action="store_true",
+                default=False,
+                help=(
+                    "Pack CPU tensors in object-store training partitions as buffers to avoid per-storage "
+                    "torch serialization. Receivers get ordinary dictionaries with independent writable tensors. "
+                    "Requires --rollout-data-transport object-store."
                 ),
             )
             parser.add_argument("--rollout-storage-profile", choices=["local", "juicefs"], default="local")
@@ -1433,6 +1518,27 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
         def add_network_arguments(parser):
             parser.add_argument("--http-proxy", type=str, default=None)
             parser.add_argument("--use-distributed-post", action="store_true", default=False)
+            parser.add_argument(
+                "--rollout-gc-threshold",
+                type=int,
+                default=None,
+                help=(
+                    "Generation-zero cyclic GC allocation threshold in the rollout manager and execution workers. "
+                    "A larger positive value reduces collection pauses for large batches at the cost of retaining "
+                    "temporary cycles longer. Other generations and automatic collection remain enabled; "
+                    "the default preserves Python's thresholds."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-execution-workers",
+                type=int,
+                default=0,
+                help=(
+                    "CPU processes for complete prompt-group generation, sample hooks and rewards in synchronous "
+                    "sglang_rollout. Zero executes locally. Generation concurrency is divided across workers; "
+                    "reward-service concurrency settings apply separately to each worker."
+                ),
+            )
             return parser
 
         def add_reward_model_arguments(parser):
@@ -1563,11 +1669,39 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             Add custom Megatron plugins arguments.
             This is a placeholder for any additional arguments that might be needed.
             """
-            # Custom arguments can be added here
+            parser.add_argument(
+                "--checkpoint-joint-commit",
+                action="store_true",
+                default=False,
+                help="Commit Megatron and built-in dataset checkpoints together before allowing resume.",
+            )
+            parser.add_argument(
+                "--resolved-config-path",
+                default=None,
+                help="Write the fully resolved, redacted driver arguments as JSON.",
+            )
+            parser.add_argument(
+                "--phase-trace-path", default=None, help="Append native driver phase timings as JSONL."
+            )
+            parser.add_argument(
+                "--resident-cleanup-interval",
+                type=int,
+                default=1,
+                help="Steps between full GC/allocator cleanup while training weights remain resident.",
+            )
             parser.add_argument(
                 "--custom-megatron-init-path",
                 type=str,
                 default=None,
+            )
+            parser.add_argument(
+                "--custom-megatron-model-initializer-path",
+                type=str,
+                default=None,
+                help=(
+                    "Model-only initializer callable(models, args), returning None. "
+                    "Used only without --load; reads --pretrained-checkpoint and --ckpt-step."
+                ),
             )
             parser.add_argument(
                 "--custom-megatron-before-log-prob-hook-path",
@@ -1705,6 +1839,7 @@ def _pre_parse_mode():
     """
     temp_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     temp_parser.add_argument("--train-backend", type=str, choices=["megatron"], default="megatron")
+    temp_parser.add_argument("--rollout-backend", choices=["sglang", "sglang-omni"], default="sglang")
     temp_parser.add_argument("--debug-rollout-only", action="store_true", default=False)
     temp_parser.add_argument("--debug-train-only", action="store_true", default=False)
     temp_parser.add_argument("--load-debug-rollout-data", type=str, default=None)
@@ -1757,7 +1892,7 @@ def parse_args(add_custom_arguments=None, *, return_restore_plan=False):
     if not args.debug_rollout_only:
         megatron_validate_args(args)
 
-    if not args.debug_train_only:
+    if not args.debug_train_only and args.rollout_backend == "sglang":
         sglang_validate_args(args)
 
     return (args, restore_plan) if return_restore_plan else args
@@ -1884,6 +2019,32 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
     return eval_datasets
 
 
+def validate_omni_args(args):
+    """Check supported Omni deployment capabilities before creating any actors."""
+    if getattr(args, "rollout_backend", "sglang") != "sglang-omni":
+        return
+    args.omni_python = getattr(args, "omni_python", None) or sys.executable
+    for name in ("rollout_external",):
+        if getattr(args, name, False):
+            raise ValueError(f"The Omni backend does not support --{name.replace('_', '-')}.")
+    if (
+        getattr(args, "update_weight_mode", "full") != "full"
+        or getattr(args, "update_weight_transport", "nccl") != "nccl"
+    ):
+        raise ValueError("The Omni backend currently requires full NCCL weight updates.")
+    if getattr(args, "check_weight_update_equal", False):
+        raise ValueError("Omni weights_checker reset semantics differ; --check-weight-update-equal is not supported.")
+    if not getattr(args, "debug_train_only", False):
+        config = getattr(args, "omni_config", None)
+        if not config or not os.path.isfile(config):
+            raise ValueError("--rollout-backend=sglang-omni requires an existing --omni-config pipeline YAML.")
+        args.omni_config = os.path.abspath(config)
+    for name in ("omni_request_timeout_s", "omni_cancel_drain_timeout_s"):
+        value = getattr(args, name, 600.0)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"--{name.replace('_', '-')} must be positive and finite.")
+
+
 def slime_validate_args(args):
     from slime.utils.ppo_utils import get_pg_loss_type
     from slime.utils.score_centering import validate_score_centering_args
@@ -1947,25 +2108,42 @@ def slime_validate_args(args):
     from slime.data.checkpoint import resolve_checkpoint
 
     args, restore_plan = resolve_checkpoint(args)
+    initializer_path = getattr(args, "custom_megatron_model_initializer_path", None)
     load_is_megatron = (
         args.load is not None
-        and os.path.exists(args.load)
-        and os.path.exists(os.path.join(args.load, "latest_checkpointed_iteration.txt"))
+        and os.path.isdir(args.load)
+        and (
+            os.path.isfile(os.path.join(args.load, "latest_checkpointed_iteration.txt"))
+            or (
+                re.fullmatch(r"iter_\d{7,}", os.path.basename(os.path.normpath(args.load))) is not None
+                and bool(os.listdir(args.load))
+            )
+        )
     )
     load_is_hf = (
-        args.load is not None and os.path.isdir(args.load) and os.path.exists(os.path.join(args.load, "config.json"))
+        not load_is_megatron
+        and args.load is not None
+        and os.path.isdir(args.load)
+        and os.path.isfile(os.path.join(args.load, "config.json"))
     )
     if load_is_hf:
         from slime.backends.megatron_utils.hf_to_megatron import supports_hf_weight_loading
 
         load_is_hf = supports_hf_weight_loading(args.load)
+    if args.load is not None and not (load_is_megatron or load_is_hf):
+        raise ValueError(f"Explicit --load must identify a supported Megatron or HuggingFace checkpoint: {args.load}")
+    if args.load is not None:
+        args.exit_on_missing_checkpoint = True
     if not load_is_megatron:
         args.no_load_optim = True
         args.no_load_rng = True
         args.finetune = True
-        if not load_is_hf:
+        if args.load is None and initializer_path:
+            if not getattr(args, "pretrained_checkpoint", None):
+                raise ValueError("--custom-megatron-model-initializer-path requires --pretrained-checkpoint")
+        elif not load_is_hf:
             args.load = args.ref_load
-        if args.ref_ckpt_step is not None:
+        if args.ref_ckpt_step is not None and not (args.load is None and initializer_path):
             args.ckpt_step = args.ref_ckpt_step
         if args.start_rollout_id is None:
             args.start_rollout_id = 0
@@ -2007,6 +2185,13 @@ def slime_validate_args(args):
             continue
         if value <= 0:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
+
+    if getattr(args, "rollout_execution_workers", 0) < 0:
+        raise ValueError("--rollout-execution-workers must be nonnegative")
+    if getattr(args, "rollout_tensor_buffer", False) and args.rollout_data_transport != "object-store":
+        raise ValueError("--rollout-tensor-buffer requires --rollout-data-transport object-store")
+    if getattr(args, "rollout_gc_threshold", None) is not None and args.rollout_gc_threshold <= 0:
+        raise ValueError("--rollout-gc-threshold must be positive")
 
     if args.rollout_data_transport == "straw":
         from slime.data.transport import resolve_rollout_data_dir
@@ -2270,4 +2455,9 @@ def slime_validate_args(args):
                 "Trainer fault tolerance requires a unique --save-debug-rollout-data path containing {rollout_id}"
             )
 
+    validate_omni_args(args)
+    if getattr(args, "custom_megatron_log_prob_function_path", None):
+        from slime.backends.megatron_utils.policy_actions import validate_action_policy_args
+
+        validate_action_policy_args(args)
     return args, restore_plan
