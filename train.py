@@ -21,6 +21,18 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
 
         actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
 
+        merge_plan = None
+        if getattr(args, "im_mopd_config", None):
+            from slime_plugins.prism.iterative_merge import decide, load_plan
+
+            if not args.checkpoint_joint_commit or args.rollout_data_transport != "object-store":
+                raise ValueError("IM-MOPD requires ordinary joint model/dataset checkpoints")
+            merge_plan, _ = load_plan(args.im_mopd_config)
+            if any(step >= args.num_rollout for step in merge_plan.get("steps", [])):
+                raise ValueError("Every merge must leave further MOPD updates")
+            if args.start_rollout_id == 0:
+                actor_model.apply_task_vectors({"event": "initial", "adds": merge_plan.get("initial", {})})
+
         if args.offload_rollout and not release_train:
             ray.get(rollout_manager.onload_weights.remote())
 
@@ -97,6 +109,25 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
             with phases.measure("training_completed", rollout_id):
                 ray.get(rollout_manager.training_completed.remote(rollout_id))
 
+            merge_boundary = merge_plan is not None and rollout_id + 1 in merge_plan.get("steps", [])
+            if merge_boundary:
+                # Evaluate the current student, merge its FP32 master shards,
+                # then commit and publish before admitting the next trajectory.
+                with phases.measure("merge_publish_before_eval", rollout_id):
+                    merge_was_paused = ray.get(rollout_manager.pause_rollout_admission.remote())
+                    actor_model.update_weights()
+                with phases.measure("merge_eval", rollout_id):
+                    scores = ray.get(rollout_manager.eval.remote(rollout_id))
+                event = decide(merge_plan, rollout_id + 1, scores)
+                with phases.measure("task_vector_merge", rollout_id):
+                    state = actor_model.apply_task_vectors(event)
+                from pathlib import Path
+
+                from slime.data.checkpoint_boundary import write_checkpoint_json
+
+                write_checkpoint_json(Path(args.save).parent / "merges" / f"update-{rollout_id + 1}.json", state)
+                save_this_rollout = True
+
             if save_this_rollout:
                 with phases.measure("checkpoint", rollout_id):
                     save_checkpoint(
@@ -116,6 +147,8 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
                     ray.get(rollout_manager.onload_weights.remote())
             with phases.measure("pause_rollout_admission", rollout_id):
                 was_paused = ray.get(rollout_manager.pause_rollout_admission.remote())
+                if merge_boundary:
+                    was_paused = merge_was_paused
             with phases.measure("update_weights", rollout_id):
                 actor_model.update_weights()
             # Final evaluation uses the synchronized engines directly. Keep training
@@ -128,7 +161,9 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
                 with phases.measure("onload_kv", rollout_id):
                     ray.get(rollout_manager.onload_kv.remote())
 
-            if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
+            if not merge_boundary and should_run_periodic_action(
+                rollout_id, args.eval_interval, num_rollout_per_epoch
+            ):
                 with phases.measure("eval", rollout_id):
                     ray.get(rollout_manager.eval.remote(rollout_id))
 

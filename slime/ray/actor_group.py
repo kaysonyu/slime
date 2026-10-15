@@ -181,6 +181,12 @@ class RayTrainGroup:
             self.args.no_load_optim = self.args.no_save_optim
             self.args.no_load_rng = False
 
+    def apply_task_vectors(self, event):
+        states = ray.get([actor.apply_task_vectors.remote(event) for actor in self._actor_handlers])
+        if any(state != states[0] for state in states):
+            raise RuntimeError("Training ranks disagreed on task-vector merge state")
+        return states[0]
+
     def update_weights(self) -> None:
         """Publish actor weights; disk reload is coordinated after all ranks save."""
         if not self._full_disk_weight_update_enabled():

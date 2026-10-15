@@ -186,6 +186,10 @@ def build_policy_action_view(args: Namespace, batch: dict, scores: dict) -> Poli
         if frame_mask.shape != (batch["response_lengths"][i],):
             raise ValueError("Frame loss mask must retain the original response length")
         enabled = sample_masks[i].detach().to(dtype=selected.dtype)
+        if getattr(args, "opd_mask_truncated", False):
+            if not args.use_opd:
+                raise ValueError("opd_mask_truncated requires OPD")
+            enabled = enabled * (1 - batch["truncated"][i])
         if frame_mask.numel():
             if bool((frame_mask == 0).all()):
                 enabled = enabled * 0

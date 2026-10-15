@@ -335,6 +335,27 @@ def test_removed_trajectory_has_no_code_or_terminal_stop_gradient(frames):
     torch.testing.assert_close(metrics["pg_clipfrac"], torch.tensor(0.0))
 
 
+def test_opd_clips_action_advantages_and_masks_entire_truncated_trajectory():
+    args = arguments(use_opd=True, opd_kl_coef=1.0, opd_advantage_clip=5.0, opd_mask_truncated=True)
+    samples = [sample(advantage=0.0), sample(advantage=0.0, terminal=False)]
+    for item in samples:
+        for kind in ("code", "stop"):
+            old = item["mm"][f"policy_old_{kind}_logprobs"]
+            item["mm"][f"policy_teacher_{kind}_logprobs"] = old - 20
+    batch, output = batch_for(samples)
+    batch["truncated"] = [0, 1]
+    value, metrics = loss_module.policy_loss_function(args, batch, output, lambda x: x.sum())
+    gradients = torch.autograd.grad(value, [item["output"] for item in samples])
+    assert gradients[0].abs().sum() > 0
+    assert torch.equal(gradients[1], torch.zeros_like(gradients[1]))
+    view = build_policy_action_view(args, batch, extract(args, batch, output))
+    action_batch = {"teacher_log_probs": view.teacher}
+    loss_module.apply_opd_kl_to_advantages(args, action_batch, view.advantages, view.old)
+    assert all(torch.equal(adv, torch.full_like(adv, -5)) for adv in view.advantages)
+    # The loss reports sums; the DP reporter derives active_samples later.
+    assert metrics["stop/active_ratio"] == 1 and metrics["rvq/active_ratio"] == 1
+
+
 def test_native_all_zero_frame_mask_removes_terminal_stop_too():
     s = sample()
     batch, output = batch_for([s])

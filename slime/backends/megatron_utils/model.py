@@ -609,6 +609,7 @@ def train_one_step(
                     "total_lengths",
                     "response_lengths",
                     "loss_masks",
+                    *(["truncated"] if getattr(args, "opd_mask_truncated", False) else []),
                     "log_probs",
                     "ref_log_probs",
                     "values",

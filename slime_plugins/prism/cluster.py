@@ -38,6 +38,7 @@ def load_manifest(path: Path) -> dict:
         raise ValueError("Run mode must be grpo or mopd")
     for name, default in (
         ("nodes", 1),
+        ("gpus_per_node", 8),
         ("batch", 2048),
         ("rollouts", 18),
         ("save_interval", 10000),
@@ -46,7 +47,9 @@ def load_manifest(path: Path) -> dict:
         value = manifest.setdefault(name, default)
         if type(value) is not int or value < 1:
             raise ValueError(f"Run {name} must be a positive integer")
-    if manifest["batch"] % (manifest["nodes"] * 8):
+    if manifest["nodes"] > 1 and manifest["gpus_per_node"] != 8:
+        raise ValueError("Multi-node GPU jobs require full eight-GPU nodes")
+    if manifest["batch"] % (manifest["nodes"] * manifest["gpus_per_node"]):
         raise ValueError("Batch must be divisible by the data parallel size")
     for name in ("source", "omni_source", "hf_checkpoint", "pretrained_checkpoint", "output", "ready_file"):
         if not Path(manifest[name]).is_absolute():
@@ -87,6 +90,7 @@ def main() -> None:
     root = manifest_path.parent.parent
     rank = int(os.environ.get("RANK", "0"))
     nodes = int(os.environ.get("WORLD_SIZE", "1"))
+    gpus_per_node = manifest["gpus_per_node"]
     if nodes != manifest["nodes"]:
         raise RuntimeError(f"Allocated {nodes} nodes, expected {manifest['nodes']}")
     output = Path(manifest["output"])
@@ -210,7 +214,7 @@ def main() -> None:
         "--node-ip-address",
         ip,
         "--num-gpus",
-        "8",
+        str(gpus_per_node),
         "--num-cpus",
         str(manifest.get("cpus_per_node", 160)),
         "--object-store-memory",
@@ -244,7 +248,7 @@ def main() -> None:
                     raise RuntimeError("Ray head exited")
                 try:
                     ray.init(address=address, logging_level="ERROR")
-                    if int(ray.cluster_resources().get("GPU", 0)) == nodes * 8:
+                    if int(ray.cluster_resources().get("GPU", 0)) == nodes * gpus_per_node:
                         break
                 except (ConnectionError, RuntimeError):
                     pass
@@ -260,7 +264,7 @@ def main() -> None:
                 [
                     python,
                     str(Path(__file__).with_name("cluster_probe.py")),
-                    str(nodes * 8),
+                    str(nodes * gpus_per_node),
                     str(output / "nccl-probe.json"),
                 ],
                 env=env,
@@ -273,7 +277,7 @@ def main() -> None:
                     raise TimeoutError("Frozen service bindings not ready")
                 time.sleep(3)
             mode = manifest["mode"]
-            batch = manifest.get("batch", nodes * 8 * 32)
+            batch = manifest.get("batch", nodes * gpus_per_node * 32)
             samples = 8 if mode == "grpo" else 1
             env.update(
                 {
@@ -293,9 +297,9 @@ def main() -> None:
                     "USE_TENSORBOARD": "1",
                     "COLOCATE": "1",
                     "ACTOR_NODES": str(nodes),
-                    "ACTOR_GPUS_PER_NODE": "8",
-                    "ROLLOUT_GPUS": str(nodes * 8),
-                    "GPUS_PER_NODE": "8",
+                    "ACTOR_GPUS_PER_NODE": str(gpus_per_node),
+                    "ROLLOUT_GPUS": str(nodes * gpus_per_node),
+                    "GPUS_PER_NODE": str(gpus_per_node),
                     "PROMPTS_PER_BATCH": str(batch // samples),
                     "SAMPLES_PER_PROMPT": str(samples),
                     "GLOBAL_BATCH_SIZE": str(batch),
@@ -424,7 +428,7 @@ def main() -> None:
                     "started": started,
                     "elapsed_seconds": time.time() - started,
                     "mode": mode,
-                    "gpus": nodes * 8,
+                    "gpus": nodes * gpus_per_node,
                     "batch": batch,
                 },
             )

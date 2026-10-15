@@ -107,6 +107,18 @@ class MegatronTrainRayActor(TrainRayActor):
         self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id = initialize_model_and_optimizer(
             args, role
         )
+        self.task_vector_owner = None
+        if getattr(args, "im_mopd_config", None):
+            from slime_plugins.prism.iterative_merge import MergeOwner
+
+            if role != "actor" or args.use_critic or args.offload_train or args.release_train:
+                raise ValueError("IM-MOPD experiments require a resident actor without critic")
+            if any(
+                getattr(args, key, 1) != 1
+                for key in ("tensor_model_parallel_size", "pipeline_model_parallel_size", "context_parallel_size")
+            ):
+                raise ValueError("IM-MOPD Prism experiments require TP=PP=CP=1")
+            self.task_vector_owner = MergeOwner(args, loaded_rollout_id)
 
         vpp_size = mpu.get_virtual_pipeline_model_parallel_world_size() or 1
         if vpp_size > 1:
@@ -643,11 +655,27 @@ class MegatronTrainRayActor(TrainRayActor):
             # save must be durable rather than merely queued in the background.
             maybe_finalize_async_save(blocking=True)
 
+        if getattr(self, "task_vector_owner", None) is not None:
+            if not force_sync:
+                raise ValueError("Task-vector checkpoints require a synchronous joint commit")
+            if dist.get_rank() == 0:
+                self.task_vector_owner.save(self.args.save, rollout_id)
+            dist.barrier(group=get_gloo_group())
+
         if self.args.save_hf is not None and self.role == "actor":
             save_hf_model_to_path(self.args, Path(self.args.save_hf.format(rollout_id=rollout_id)), self.model)
 
         if self.args.offload_train:
             self.sleep()
+
+    def apply_task_vectors(self, event):
+        if self.task_vector_owner is None:
+            raise ValueError("Task-vector merging was not configured")
+        if self._is_offloaded:
+            raise ValueError("Task-vector merging requires resident master weights")
+        state = self.task_vector_owner.apply(self.model, self.optimizer, event)
+        self.weights_backuper.backup("actor")
+        return state
 
     @timer
     def update_weights(self) -> None:

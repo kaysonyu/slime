@@ -400,6 +400,8 @@ class RolloutManager:
             args=self.args,
         )
         log_eval_rollout_data(rollout_id, self.args, data, result.metrics)
+        if getattr(self.args, "im_mopd_config", None):
+            return {name: sum(result["rewards"]) / len(result["rewards"]) for name, result in data.items()}
 
     def save(self, rollout_id):
         # Keep admission frozen across source and builder snapshots. Source.save

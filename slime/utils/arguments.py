@@ -89,6 +89,11 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 "isolated request failures are excluded and replaced before training.",
             )
             parser.add_argument("--omni-teacher-request-timeout-s", type=float, default=120.0)
+            parser.add_argument(
+                "--im-mopd-config", help="Pinned Prism task vectors and fixed or validation-driven merge schedule."
+            )
+            parser.add_argument("--opd-advantage-clip", type=float, default=None)
+            parser.add_argument("--opd-mask-truncated", action="store_true", default=False)
             parser.add_argument("--omni-compact-replay", action=argparse.BooleanOptionalAction, default=False)
             parser.add_argument(
                 "--omni-reward-config", help="YAML/JSON WER, SIM and instruction reward service configuration."

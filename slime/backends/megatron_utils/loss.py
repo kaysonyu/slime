@@ -1,3 +1,4 @@
+import math
 from argparse import Namespace
 from collections.abc import Callable, Iterator
 from typing import Any
@@ -710,9 +711,15 @@ def apply_opd_kl_to_advantages(
     teacher_log_probs = [t.to(device=device) for t in teacher_log_probs]
 
     reverse_kls = []
+    advantage_clip = getattr(args, "opd_advantage_clip", None)
+    if advantage_clip is not None and (not math.isfinite(advantage_clip) or advantage_clip <= 0):
+        raise ValueError("opd_advantage_clip must be finite and positive")
     for i, adv in enumerate(advantages):
         reverse_kl = student_log_probs[i] - teacher_log_probs[i]
-        advantages[i] = adv - args.opd_kl_coef * reverse_kl
+        correction = -args.opd_kl_coef * reverse_kl
+        if advantage_clip is not None:
+            correction = correction.clamp(-advantage_clip, advantage_clip)
+        advantages[i] = adv + correction
         reverse_kls.append(reverse_kl)
 
     # Store reverse KL for logging
