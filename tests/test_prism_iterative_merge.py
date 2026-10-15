@@ -1,4 +1,7 @@
 import json
+import runpy
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -162,3 +165,104 @@ def test_inverse_prism_mapping_roundtrip_preserves_all_physical_weights():
     assert restored.keys() == values.keys()
     for key in values:
         torch.testing.assert_close(restored[key], values[key], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("start", [0, 2])
+def test_driver_commits_and_publishes_merges_before_the_next_trajectory(tmp_path, monkeypatch, start):
+    """Exercise the real driver; stale published weights make the next generation fail."""
+    monkeypatch.setitem(sys.modules, "slime.utils.arguments", SimpleNamespace(parse_args=None))
+    driver = runpy.run_path(str(Path(__file__).resolve().parents[1] / "train.py"))["train"]
+    plan = {
+        "vectors": {"sing": {}},
+        "initial": {"sing": 0.25},
+        "steps": [2],
+        "mode": "fixed",
+        "schedule": {"2": ["sing"]},
+        "delta": 0.3,
+    }
+    monkeypatch.setattr("slime_plugins.prism.iterative_merge.load_plan", lambda path: (plan, "digest"))
+    monkeypatch.setattr("ray.get", lambda value: value)
+    events = []
+    weights = {"model": 0, "published": None, "paused": True}
+    state = {"events": [] if start == 0 else [{"event": "initial"}, {"event": "update-2"}]}
+
+    def publish():
+        weights["published"] = weights["model"]
+        events.append("publish")
+
+    def merge(event):
+        assert weights["paused"]
+        state["events"].append(event)
+        weights["model"] += 10
+        events.append(event["event"])
+        return state
+
+    def train(rollout, data, **kwargs):
+        weights["model"] += 1
+        events.append(f"train-{rollout}")
+
+    def generate(rollout):
+        assert not weights["paused"]
+        assert weights["published"] == weights["model"]
+        events.append(f"generate-{rollout}")
+        return {}
+
+    def evaluate(rollout):
+        assert weights["published"] == weights["model"]
+        events.append(f"eval-{rollout}")
+        return {"sing": 0.1}
+
+    def pause():
+        previous = weights["paused"]
+        weights["paused"] = True
+        return previous
+
+    def resume(previous):
+        if not previous:
+            weights["paused"] = False
+
+    actor = SimpleNamespace(
+        update_weights=publish, apply_task_vectors=merge, async_train=train, clear_memory=lambda: None
+    )
+    manager = SimpleNamespace(
+        **{
+            key: SimpleNamespace(remote=function)
+            for key, function in {
+                "training_ready": lambda: resume(False),
+                "generate": generate,
+                "eval": evaluate,
+                "training_completed": lambda rollout: None,
+                "pause_rollout_admission": pause,
+                "resume_rollout_admission": resume,
+            }.items()
+        }
+    )
+    monkeypatch.setitem(driver.__globals__, "create_training_models", lambda *args: (actor, None))
+    monkeypatch.setitem(
+        driver.__globals__, "save_checkpoint", lambda args, rollout, *a, **kw: events.append(f"save-{rollout}")
+    )
+    args = SimpleNamespace(
+        release_train=False,
+        offload_train=False,
+        offload_rollout=False,
+        use_critic=False,
+        im_mopd_config="plan.json",
+        checkpoint_joint_commit=True,
+        rollout_data_transport="object-store",
+        start_rollout_id=start,
+        num_rollout=3,
+        eval_interval=2,
+        skip_eval_before_train=False,
+        save_interval=99,
+        save=str(tmp_path / "checkpoint"),
+        check_weight_update_equal=False,
+    )
+    driver(args, {}, manager, None, None)
+    assert [event["event"] for event in state["events"]] == ["initial", "update-2"]
+    if start == 0:
+        assert events.index("initial") < events.index("generate-0")
+        boundary = events[events.index("train-1") : events.index("generate-2") + 1]
+        assert boundary == ["train-1", "publish", "eval-1", "update-2", "save-1", "publish", "generate-2"]
+        assert json.loads((tmp_path / "merges/update-2.json").read_text()) == state
+    else:
+        assert "initial" not in events and "update-2" not in events

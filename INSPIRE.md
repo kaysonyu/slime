@@ -1,5 +1,14 @@
 # Prism RL 资产
 
+IM-MOPD 独立实验的固定产物目录为
+`/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism-immopd-20261015-044554`，
+适用账号 `kayson`、工作空间 `CQ-科研驾驶舱`、项目 `多模态自进化科学模型`。
+参考权重为四个专用教师共同来源的 v0.1.0 / iter_0200000；v0.4.0 保留为生产学生对照。
+`vectors/` 保存固定 FP32 物理参数增量及完整 source/payload SHA-256，`configs/` 保存实验计划，
+`analysis/` 保存真实 GPU 合并/恢复核验与初始化评估。实现、适用边界和复现入口见
+`examples/prism/IM_MOPD.md`。实验分支为 `experiment/prism-im-mopd`，每次 GPU Job 的
+Slime/Omni/Megatron pin 以其运行 manifest 为准，Job 和 Serving 条目始终保留。
+
 适用范围：账号 `kayson`，用户指定的 `CQ-科研驾驶舱` 工作空间，项目 `多模态自进化科学模型`。调度配额、可用 GPU 和平台状态每次从 Inspire Live 查询；本文件只记录共享资产及环境合同。
 
 四领域 MoPD、学生 v0.4.0 / native `iter_0100000` 的固定实验根目录为
