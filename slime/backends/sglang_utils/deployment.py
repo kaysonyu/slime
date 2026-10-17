@@ -4,6 +4,8 @@ import logging
 import multiprocessing
 import random
 import time
+from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 from slime.backends.sglang_utils.disaggregation import start_epd_server_groups, start_pd_server_groups
@@ -15,7 +17,13 @@ from slime.utils.http_utils import _wrap_ipv6, find_available_port, get_host_inf
 logger = logging.getLogger(__name__)
 
 
-def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool = False) -> tuple[str, int]:
+def _start_router(
+    args,
+    *,
+    has_pd_disaggregation: bool = False,
+    force_new: bool = False,
+    on_router_started: Callable[[multiprocessing.Process], None] | None = None,
+) -> tuple[str, int]:
     """Start sglang_router and return (router_ip, router_port)."""
     if not force_new and args.sglang_router_ip is not None:
         return args.sglang_router_ip, args.sglang_router_port
@@ -56,6 +64,8 @@ def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool 
     )
     process.daemon = True
     process.start()
+    if on_router_started is not None:
+        on_router_started(process)
     time.sleep(3)
     assert process.is_alive()
     logger.info(f"Router launched at {router_ip}:{router_port}, Prometheus port: {router_args.prometheus_port}")
@@ -76,12 +86,24 @@ def _compute_megatron_num_gpus(args) -> int:
     return args.actor_num_nodes * args.actor_num_gpus_per_node
 
 
-def start_rollout_servers(args, pg) -> tuple[dict[str, Any], list[Any]]:
-    """Start configured rollout servers without waiting for final engine initialization."""
-    if args.rollout_external:
-        return start_external_rollout_servers(args, start_router=_start_router)
+def start_rollout_servers(
+    args,
+    pg,
+    *,
+    on_router_started: Callable[[multiprocessing.Process], None] | None = None,
+) -> tuple[dict[str, Any], list[Any]]:
+    """Start rollout servers and register owned router processes immediately.
 
-    config = resolve_sglang_config(args)
+    SGLang returns pending engine initialization handles. Omni waits for complete
+    pipelines and router readiness before returning, with no pending handles.
+    """
+    start_router = (
+        partial(_start_router, on_router_started=on_router_started) if on_router_started is not None else _start_router
+    )
+    backend = getattr(args, "rollout_backend", "sglang")
+    if args.rollout_external and backend == "sglang":
+        return start_external_rollout_servers(args, start_router=start_router)
+
     placement = ServerGroupPlacement(
         args=args,
         pg=pg,
@@ -89,6 +111,12 @@ def start_rollout_servers(args, pg) -> tuple[dict[str, Any], list[Any]]:
         megatron_num_gpus=_compute_megatron_num_gpus(args),
     )
 
+    if backend == "sglang-omni":
+        from slime.backends.sglang_utils.omni_deployment import start_omni_rollout_servers
+
+        return start_omni_rollout_servers(args, placement, on_router_started=on_router_started)
+
+    config = resolve_sglang_config(args)
     servers: dict[str, RolloutServer] = {}
     pending_init_handles: list[Any] = []
     # Models initialize concurrently, so ports allocated to earlier models may
@@ -98,7 +126,7 @@ def start_rollout_servers(args, pg) -> tuple[dict[str, Any], list[Any]]:
     for model_idx, model_config in enumerate(config.models):
         model_config.resolve(args)
 
-        router_ip, router_port = _start_router(
+        router_ip, router_port = start_router(
             args,
             has_pd_disaggregation=model_config.has_pd_disaggregation,
             force_new=(model_idx > 0),

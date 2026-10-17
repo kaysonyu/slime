@@ -284,5 +284,48 @@ def test_http_transport_preserves_streams_timeouts_and_connection_budget(concurr
     asyncio.run(check())
 
 
+def test_scoring_origin_is_not_blocked_by_generation_connection_budget():
+    async def check():
+        generation_started = asyncio.Event()
+        release_generation = asyncio.Event()
+
+        async def respond(reader, writer, *, generation=False):
+            try:
+                await reader.readuntil(b"\r\n\r\n")
+                if generation:
+                    generation_started.set()
+                    await release_generation.wait()
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        async def generate(reader, writer):
+            await respond(reader, writer, generation=True)
+
+        generation = await asyncio.start_server(generate, "127.0.0.1", 0)
+        scoring = await asyncio.start_server(respond, "127.0.0.1", 0)
+        try:
+            async with httpx.AsyncClient(transport=http_utils._ShardedHTTPTransport(1)) as client:
+                url = f"http://127.0.0.1:{generation.sockets[0].getsockname()[1]}"
+                task = asyncio.create_task(client.post(url))
+                try:
+                    await asyncio.wait_for(generation_started.wait(), 2)
+                    url = f"http://127.0.0.1:{scoring.sockets[0].getsockname()[1]}"
+                    response = await asyncio.wait_for(client.post(url), 1)
+                    assert response.text == "OK" and not task.done()
+                finally:
+                    release_generation.set()
+                    await task
+        finally:
+            generation.close()
+            scoring.close()
+            await generation.wait_closed()
+            await scoring.wait_closed()
+
+    asyncio.run(check())
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

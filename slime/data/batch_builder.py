@@ -23,6 +23,7 @@ from slime.observability.rollout_data_utils import (
 from slime.utils.data import get_source
 from slime.utils.dp_schedule import build_dp_schedule
 from slime.utils.misc import Box, load_function
+from slime.utils.tensor_serialization import SerializedTensorPayload
 from slime.utils.types import Sample
 
 logger = logging.getLogger(__name__)
@@ -434,8 +435,27 @@ class BatchBuilder:
         if samples[0].train_metadata is not None:
             train_data["metadata"] = [sample.train_metadata for sample in samples]
 
+        # Ordinary text samples keep Slime's token training contract. Action
+        # streams are opt-in data supplied by the rollout/plugin itself.
+        if any(sample.policy_actions is not None for sample in samples):
+            from slime.utils.policy import validate_policy_actions
+
+            if len(set(rollout_ids)) != len(rollout_ids):
+                raise ValueError("Action-stream training currently requires one Sample per rollout outcome")
+            if not all(sample.policy_actions is not None for sample in samples):
+                raise ValueError("A training batch cannot mix implicit and explicit policy actions")
+            for sample in samples:
+                validate_policy_actions(sample.policy_actions, len(sample.tokens))
+            train_data["policy_actions"] = [sample.policy_actions for sample in samples]
+            train_data["policy_sample_masks"] = [
+                torch.tensor([not sample.remove_sample], dtype=torch.bool) for sample in samples
+            ]
         if any(sample.multimodal_train_inputs is not None for sample in samples):
             train_data["multimodal_train_inputs"] = [sample.multimodal_train_inputs for sample in samples]
+        train_data["policy_domains"] = [
+            sample.policy_domain or (sample.metadata or {}).get("domain") for sample in samples
+        ]
+        train_data["policy_teachers"] = [sample.policy_teacher for sample in samples]
 
         if samples[0].teacher_log_probs is not None:
             train_data["teacher_log_probs"] = [sample.teacher_log_probs for sample in samples]
@@ -467,6 +487,8 @@ class BatchBuilder:
         fields = [
             "tokens",
             "multimodal_train_inputs",
+            "policy_actions",
+            "policy_sample_masks",
             "response_lengths",
             "rewards",
             "truncated",
@@ -485,6 +507,8 @@ class BatchBuilder:
             "source_names",
             "prompt",
             "teacher_log_probs",
+            "policy_domains",
+            "policy_teachers",
         ]
         if transport == "straw":
             from straw.protocol import digest
@@ -526,6 +550,8 @@ class BatchBuilder:
                 tensorize_rollout_data_for_training(value)
             if transport == "nixl":
                 result.append(Box(ray.put(value, _tensor_transport="nixl")))
+            elif transport == "object-store" and getattr(self.args, "rollout_tensor_buffer", False):
+                result.append(Box(ray.put(SerializedTensorPayload(value))))
             elif transport in {"straw", "object-store"}:
                 result.append(Box(ray.put(value)))
             else:

@@ -3,7 +3,12 @@ import types
 
 import pytest
 
-from slime.rollout.sample_hooks import apply_rollout_sample_hooks, rollout_context, set_current_rollout_id
+from slime.rollout.sample_hooks import (
+    apply_rollout_sample_hooks,
+    close_sample_hooks,
+    rollout_context,
+    set_current_rollout_id,
+)
 from slime.utils.types import Sample
 
 NUM_GPUS = 0
@@ -68,6 +73,38 @@ def test_concurrent_groups_keep_their_own_rollout_hook_context():
         assert await asyncio.gather(generate(10), generate(11)) == [("seen", 10), ("seen", 11)]
 
     asyncio.run(exercise())
+
+
+def test_close_includes_training_and_eval_rewards_and_deduplicates_paths(monkeypatch):
+    from slime.rollout import sample_hooks
+
+    closed = []
+
+    def close(args):
+        closed.append(("sync", args.marker))
+
+    async def async_close(args):
+        closed.append(("async", args.marker))
+
+    hooks = {
+        "sample": types.SimpleNamespace(close=close),
+        "reward": types.SimpleNamespace(close=async_close),
+        "eval_reward": types.SimpleNamespace(close=close),
+        "no_close": types.SimpleNamespace(),
+    }
+    monkeypatch.setattr(sample_hooks, "load_function", hooks.__getitem__)
+    args = types.SimpleNamespace(
+        marker="owner",
+        rollout_sample_hook_path=["sample"],
+        rollout_sample_observer_path=["sample"],
+        custom_rm_path="reward",
+        eval_datasets=[
+            types.SimpleNamespace(custom_rm_path=path)
+            for path in (None, "reward", "eval_reward", "eval_reward", "no_close")
+        ],
+    )
+    asyncio.run(close_sample_hooks(args))
+    assert closed == [("sync", "owner"), ("async", "owner"), ("sync", "owner")]
 
 
 if __name__ == "__main__":

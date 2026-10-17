@@ -8,6 +8,7 @@ import torch
 
 from slime.data.tensor import TensorRef
 from slime.utils.misc import decode_int32_meta_array
+from slime.utils.policy import PolicyActions
 
 _TOP_P_TOKEN_ID_META_KEYS = ("top_p_token_ids", "top_p_kept_token_ids")
 _TOP_P_TOKEN_OFFSET_META_KEYS = ("top_p_token_offsets", "top_p_kept_token_offsets")
@@ -123,6 +124,11 @@ class Sample:
     multimodal_inputs: dict[str, Any] | None = None  # raw multimodal data, e.g. images, videos, etc.
     multimodal_train_inputs: dict[str, Any] | None = None  # processed multimodal data, e.g. pixel_values, etc.
     multimodal_train_input_id: str | None = None
+    policy_actions: PolicyActions | None = None
+    policy_domain: str | None = None
+    policy_teacher: str | None = None
+    output_modalities: tuple[str, ...] = ("text",)
+    output_units: dict[str, float] = field(default_factory=dict)
     apply_chat_template_kwargs: dict = field(default_factory=dict)
     # response
     response: str = ""

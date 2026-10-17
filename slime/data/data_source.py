@@ -1,6 +1,9 @@
 import abc
 import copy
 import logging
+import os
+import re
+import uuid
 from pathlib import Path
 
 import torch
@@ -101,19 +104,19 @@ class RolloutDataSource(DataSource):
             self.dataset = None
 
     def get_samples(self, num_samples):
-        # TODO further improve code
         if self.dataset is not None:
-            if self.sample_offset + num_samples <= len(self.dataset):
-                prompt_samples = self.dataset.samples[self.sample_offset : self.sample_offset + num_samples]
-                self.sample_offset += num_samples
-            else:
-                prompt_samples = self.dataset.samples[self.sample_offset :]
-                num_samples -= len(prompt_samples)
-                self.epoch_id += 1
-                if self.args.rollout_shuffle:
-                    self.dataset.shuffle(self.epoch_id)
-                prompt_samples += self.dataset.samples[:num_samples]
-                self.sample_offset = num_samples
+            if num_samples > 0 and len(self.dataset) == 0:
+                raise ValueError("Cannot sample prompts from an empty dataset")
+            prompt_samples = []
+            while len(prompt_samples) < num_samples:
+                if self.sample_offset == len(self.dataset):
+                    self.epoch_id += 1
+                    if self.args.rollout_shuffle:
+                        self.dataset.shuffle(self.epoch_id)
+                    self.sample_offset = 0
+                count = min(num_samples - len(prompt_samples), len(self.dataset) - self.sample_offset)
+                prompt_samples.extend(self.dataset.samples[self.sample_offset : self.sample_offset + count])
+                self.sample_offset += count
         else:
             prompt_samples = [Sample() for _ in range(num_samples)]
 
@@ -170,15 +173,27 @@ class RolloutDataSource(DataSource):
     def save(self, rollout_id):
         path = Path(self.args.save) / "rollout" / f"global_dataset_state_dict_{rollout_id}.pt"
         path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(self.state_dict(), path)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("xb") as stream:
+                torch.save(self.state_dict(), stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def load(self, rollout_id=None):
-        if self.args.load is None:
+        if self.args.load is None or getattr(self.args, "finetune", False):
             return
-        path = Path(self.args.load) / "rollout" / f"global_dataset_state_dict_{rollout_id}.pt"
+        root = Path(self.args.load)
+        if re.fullmatch(r"iter_\d{7,}", root.name):
+            root = root.parent
+        path = root / "rollout" / f"global_dataset_state_dict_{rollout_id}.pt"
         if not path.exists():
-            logger.info("Checkpoint %s does not exist.", path)
-            return
+            raise FileNotFoundError(
+                f"Dataset checkpoint is required for exact resume: {path}. Use --finetune for a new data run."
+            )
         self.load_state_dict(torch.load(path, weights_only=False))
 
     def __len__(self) -> int:

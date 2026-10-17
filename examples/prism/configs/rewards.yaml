@@ -1,0 +1,29 @@
+# Shared service bindings. GRPO uses WER only; MixRL selects components per sample category.
+# Fill endpoints and authentication only for the services used by your training/eval rewards.
+# URLs are service roots.
+services:
+  wer:
+    endpoint: https://replace-wer.invalid
+    auth_token_env: INF_API_KEY
+    audio_transport: path
+    max_inflight: 4
+    timeout_s: 300
+    max_retries: 2
+  sim:
+    endpoint: https://replace-sim.invalid
+    auth_token_env: INF_API_KEY
+    audio_transport: path
+    max_inflight: 4
+    timeout_s: 300
+    max_retries: 2
+  judge_clap:
+    endpoint: https://replace-judge-clap.invalid
+    auth_token_env: INF_API_KEY
+    audio_transport: path
+    max_inflight: 2
+    timeout_s: 300
+    max_retries: 2
+weights:
+  wer: 1.0
+  sim: 1.0
+  judge_clap: 1.0

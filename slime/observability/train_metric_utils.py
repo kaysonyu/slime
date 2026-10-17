@@ -1,4 +1,5 @@
 import logging
+import math
 from argparse import Namespace
 from copy import deepcopy
 
@@ -6,6 +7,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
+from slime.backends.megatron_utils.policy_actions import grouped_opd_metrics, policy_rollout_metrics
 from slime.observability import logging_utils
 from slime.observability.metric_utils import compute_pass_rate, compute_rollout_step
 from slime.observability.timer import Timer
@@ -56,7 +58,23 @@ def reduce_train_step_metrics(
     else:
         num_samples_or_tokens = step_global_batch_size
         cp_factor = 1
-    return {key: value * cp_factor / num_samples_or_tokens for key, value in zip(keys, values[1:], strict=False)}
+    result = {key: value * cp_factor / num_samples_or_tokens for key, value in zip(keys, values[1:], strict=False)}
+    for kind in [key.removesuffix("/active_ratio") for key in result if key.endswith("/active_ratio")]:
+        coverage = result.get(f"{kind}/active_ratio")
+        if coverage is None:
+            continue
+        result[f"{kind}/active_samples"] = round(coverage * step_global_batch_size)
+        for key in list(result):
+            if key.startswith(f"{kind}/") and key not in (
+                f"{kind}/pg_loss",
+                f"{kind}/active_ratio",
+                f"{kind}/active_samples",
+            ):
+                if coverage > 0:
+                    result[key] /= coverage
+                else:
+                    del result[key]
+    return result
 
 
 def rollout_log_metric_contribution(
@@ -100,14 +118,16 @@ def gather_and_reduce_log_dict(
         gathered = [None] * dp_size
         dist.gather_object(log_dict, gathered, dst=dp_src_rank, group=dp_group)
         reduced: dict = {}
-        for key in log_dict:
-            values = [item[key] for item in gathered]
+        for key in sorted({key for item in gathered for key in item}):
+            values = [item[key] for item in gathered if key in item]
             first = values[0]
             if isinstance(first, tuple) and len(first) == 2:
                 total_sum = sum(value[0] for value in values)
                 total_count = sum(value[1] for value in values)
                 reduced[key] = total_sum / total_count if total_count else 0.0
             else:
+                if len(values) != dp_size:
+                    raise ValueError(f"Sparse distributed metric {key!r} must carry a sum/count pair")
                 reduced[key] = sum(values) / dp_size
         return reduced
     dist.gather_object(log_dict, None, dst=dp_src_rank, group=dp_group)
@@ -162,6 +182,9 @@ def log_rollout_data(
         ignored_keys = {
             "tokens",
             "multimodal_train_inputs",
+            "policy_actions",
+            "policy_sample_masks",
+            "reuse_current_policy_scores",
             "loss_masks",
             "sample_indices",
             "rollout_ids",
@@ -177,7 +200,11 @@ def log_rollout_data(
             "micro_batch_indices",
             "source_names",
             "local_raw_reward",
+            "policy_domains",
+            "policy_teachers",
         }
+        if rollout_data.get("policy_actions"):
+            ignored_keys.add("partition")
         per_rollout_mean_keys = {
             "log_probs",
             "ref_log_probs",
@@ -221,6 +248,11 @@ def log_rollout_data(
             else:
                 raise ValueError(f"Unsupported type: {type(value)} for key: {key}")
 
+        if rollout_data.get("policy_actions"):
+            log_dict.update(policy_rollout_metrics(rollout_data))
+            log_dict.update(grouped_opd_metrics(args, rollout_data))
+        if "total_lengths" in log_dict:
+            log_dict["sequence_rows_mean"] = log_dict["total_lengths"]
         reduced_log_dict = gather_log_data("rollout", args, rollout_id, log_dict)
         if args.ci_test and reduced_log_dict is not None:
             if (
@@ -232,16 +264,29 @@ def log_rollout_data(
             ):
                 assert abs(reduced_log_dict["rollout/log_probs"] - reduced_log_dict["rollout/ref_log_probs"]) < 1e-8
             if "rollout/log_probs" in reduced_log_dict:
-                assert -1 < reduced_log_dict["rollout/log_probs"] < 0
+                value = reduced_log_dict["rollout/log_probs"]
+                if rollout_data.get("policy_actions"):
+                    assert math.isfinite(value) and value <= 1e-5
+                else:
+                    assert -1 < value < 0
             if "rollout/entropy" in reduced_log_dict:
-                assert 0 < reduced_log_dict["rollout/entropy"] < 1
+                value = reduced_log_dict["rollout/entropy"]
+                if rollout_data.get("policy_actions"):
+                    assert math.isfinite(value) and value >= -1e-5
+                else:
+                    assert 0 < value < 1
 
     if args.log_multi_turn:
         log_multi_turn_data(rollout_id, args, rollout_data)
-    if args.log_passrate:
+    if args.log_passrate and not rollout_data.get("policy_actions"):
         log_passrate(rollout_id, args, rollout_data)
 
-    if args.log_correct_samples and mpu.get_tensor_model_parallel_rank() == 0 and mpu.is_pipeline_last_stage():
+    if (
+        args.log_correct_samples
+        and not rollout_data.get("policy_actions")
+        and mpu.get_tensor_model_parallel_rank() == 0
+        and mpu.is_pipeline_last_stage()
+    ):
         response_lengths = rollout_data["response_lengths"]
         loss_masks = rollout_data["loss_masks"]
         total_lengths = rollout_data["total_lengths"]
@@ -362,6 +407,8 @@ def log_perf_data(
     rollout_id: int,
     args: Namespace,
     extra_metrics: dict | None = None,
+    *,
+    estimate_flops: bool = True,
 ) -> None:
     from megatron.core import mpu
 
@@ -381,19 +428,19 @@ def log_perf_data(
         log_dict.update(extra_metrics)
 
     if "perf/actor_train_time" in log_dict:
-        total_fwd_flops = (
-            calculate_fwd_flops(seqlens=timer_instance.seq_lens, args=args) / dist.get_world_size() / 1e12
-        )
-
-        if "perf/log_probs_time" in log_dict:
-            log_dict["perf/log_probs_tflops"] = total_fwd_flops / log_dict["perf/log_probs_time"]
-
-        if "perf/ref_log_probs_time" in log_dict:
-            log_dict["perf/ref_log_probs_tflops"] = total_fwd_flops / log_dict["perf/ref_log_probs_time"]
-
+        if estimate_flops:
+            total_fwd_flops = (
+                calculate_fwd_flops(seqlens=timer_instance.seq_lens, args=args) / dist.get_world_size() / 1e12
+            )
+            if "perf/log_probs_time" in log_dict:
+                log_dict["perf/log_probs_tflops"] = total_fwd_flops / log_dict["perf/log_probs_time"]
+            if "perf/ref_log_probs_time" in log_dict:
+                log_dict["perf/ref_log_probs_tflops"] = total_fwd_flops / log_dict["perf/ref_log_probs_time"]
+            if log_dict["perf/actor_train_time"] > 0:
+                log_dict["perf/actor_train_tflops"] = 3 * total_fwd_flops / log_dict["perf/actor_train_time"]
         if log_dict["perf/actor_train_time"] > 0:
-            log_dict["perf/actor_train_tflops"] = 3 * total_fwd_flops / log_dict["perf/actor_train_time"]
             log_dict["perf/actor_train_tok_per_s"] = sum(timer_instance.seq_lens) / log_dict["perf/actor_train_time"]
+            log_dict["perf/train_sequence_rows_per_sec"] = log_dict["perf/actor_train_tok_per_s"]
 
     if "perf/train_wait_time" in log_dict and "perf/train_time" in log_dict:
         total_time = log_dict["perf/train_wait_time"] + log_dict["perf/train_time"]

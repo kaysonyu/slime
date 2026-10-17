@@ -29,6 +29,8 @@ NOSET_VISIBLE_DEVICES_ENV_VARS_LIST = [
 RAY_DEFAULT_ENV_VARS = {
     # Ray's uvloop integration has caused intermittent async actor issues.
     "RAY_USE_UVLOOP": "0",
+    "SLIME_LOG_LEVEL": "INFO",
+    "NCCL_DEBUG": "WARN",
     # Let sglang's JIT loader (load_jit) find slime-hosted custom kernel .cuh
     # sources (e.g. glm5_router_gemm) and try-cache compile them, so they need
     # not be patched into the sglang source tree.
@@ -42,7 +44,12 @@ RAY_DEFAULT_ENV_VARS = {
 
 
 def add_default_ray_env_vars(env_vars: dict[str, str] | None = None) -> dict[str, str]:
-    return RAY_DEFAULT_ENV_VARS | (env_vars or {})
+    logging_environment = {
+        key: os.environ[key]
+        for key in ("SLIME_LOG_LEVEL", "NCCL_DEBUG", "NCCL_DEBUG_SUBSYS", "NCCL_DEBUG_FILE", "RAY_DEDUP_LOGS")
+        if key in os.environ
+    }
+    return RAY_DEFAULT_ENV_VARS | logging_environment | (env_vars or {})
 
 
 def ray_noset_visible_devices(env_vars=os.environ):

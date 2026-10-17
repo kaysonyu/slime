@@ -34,15 +34,24 @@ def test_reference_log_probs_use_full_vocab_while_actor_replays_top_p(monkeypatc
     monkeypatch.setattr(mpu, "get_tensor_model_parallel_rank", lambda: 0, raising=False)
 
     def fake_forward_only(
-        callback, args, model, data_iterator, _num_microbatches, *, store_prefix, use_rollout_top_p_replay
+        callback,
+        args,
+        model,
+        data_iterator,
+        _num_microbatches,
+        *,
+        store_prefix,
+        use_rollout_top_p_replay,
+        use_policy_score_extractor,
     ):
+        assert not use_policy_score_extractor
         kwargs = {}
         if use_rollout_top_p_replay:
             kwargs = {"top_p_token_ids": [[0, 1]], "top_p_token_offsets": [[0, 2]]}
         _, result = callback(
             model,
             args=args,
-            unconcat_tokens=data_iterator,
+            unconcat_tokens=data_iterator[0].tokens,
             total_lengths=[2],
             response_lengths=[1],
             **kwargs,
@@ -77,7 +86,8 @@ def test_reference_log_probs_use_full_vocab_while_actor_replays_top_p(monkeypatc
         logits = torch.tensor([probs, probs], dtype=torch.float32).log().unsqueeze(0)
         actor = SimpleNamespace(args=args, model=logits)
         replay_option = {} if replay is None else {"use_rollout_top_p_replay": replay}
-        result = compute_log_prob(actor, tokens, [1], store_prefix=prefix, **replay_option)
+        iterator = SimpleNamespace(rollout_data={}, tokens=tokens)
+        result = compute_log_prob(actor, [iterator], [1], store_prefix=prefix, **replay_option)
         return result[prefix + "log_probs"][0].item()
 
     actor_log_prob = log_prob([0.2, 0.2, 0.6], replay=None)
@@ -114,6 +124,51 @@ def test_reference_log_probs_use_full_vocab_while_actor_replays_top_p(monkeypatc
         and keyword.value.value is False
         for keyword in reference_calls[0].keywords
     )
+
+
+def test_actor_stores_frozen_reference_scores_on_each_action_stream(monkeypatch):
+    from slime.backends.megatron_utils.policy_actions import store_old_action_scores
+
+    monkeypatch.setattr(mpu, "is_pipeline_last_stage", lambda: True, raising=False)
+    reference = {
+        "rvq": torch.tensor([[-1.2, -0.3], [-0.7, -1.4]], requires_grad=True),
+        "stop": torch.tensor([-0.2, -0.6], requires_grad=True),
+    }
+    rollout_data = {"policy_actions": [{name: {} for name in reference}]}
+
+    def forward_only(_callback, _args, _model, _iterators, _microbatches, **kwargs):
+        assert kwargs == {
+            "store_prefix": "ref_",
+            "use_rollout_top_p_replay": False,
+            "use_policy_score_extractor": True,
+        }
+        return {f"ref_policy/{name}/log_probs": [value] for name, value in reference.items()}
+
+    method = _actor_methods()["compute_log_prob"]
+    isolated = ast.Module(
+        body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), method],
+        type_ignores=[],
+    )
+    namespace = {
+        "timer": lambda _name: nullcontext(),
+        "forward_only": forward_only,
+        "get_log_probs_and_entropy": get_log_probs_and_entropy,
+        "mpu": mpu,
+        "store_old_action_scores": store_old_action_scores,
+    }
+    exec(compile(ast.fix_missing_locations(isolated), "actor.py", "exec"), namespace)
+    result = namespace["compute_log_prob"](
+        SimpleNamespace(args=Namespace(), model=object()),
+        [SimpleNamespace(rollout_data=rollout_data)],
+        [1],
+        store_prefix="ref_",
+        use_rollout_top_p_replay=False,
+    )
+    assert result == {}
+    for name, value in reference.items():
+        stored = rollout_data["policy_actions"][0][name]["ref_log_probs"]
+        torch.testing.assert_close(stored, value)
+        assert not stored.requires_grad and stored.data_ptr() != value.data_ptr()
 
 
 @pytest.mark.parametrize("top_p", [1.0, 0.95])

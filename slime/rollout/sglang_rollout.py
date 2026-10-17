@@ -15,9 +15,15 @@ from tqdm import tqdm
 from slime.backends.sglang_utils.server_control import abort_servers_until_idle, get_live_router_workers
 from slime.data.transport import discard_rollout_group, publish_rollout_async
 from slime.observability.trace_utils import build_sglang_meta_trace_attrs, trace_function, trace_span
-from slime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput, finalize_rollout_groups
+from slime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput, finalize_rollout_groups, iter_samples
 from slime.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter, should_drop_dynamic_filter_output
-from slime.rollout.sample_hooks import apply_rollout_sample_hooks
+from slime.rollout.on_policy_distillation import TeacherRuntime, score_teacher
+from slime.rollout.sample_hooks import (
+    apply_rollout_sample_hooks,
+    finalize_sample_representation,
+    flush_sample_observers,
+    notify_sample_observers,
+)
 from slime.utils.async_utils import AsyncPacer, run
 from slime.utils.data import Dataset
 from slime.utils.eval_config import EvalDatasetConfig
@@ -117,6 +123,8 @@ class GenerateState(metaclass=SingletonMeta):
         # dp rank balancing
         self.dp_counts = [0] * (args.sglang_dp_size or 1)
         self.dp_rank = 0
+        self.executor = None
+        self.teacher_runtime = None
 
         self.reset()
 
@@ -135,24 +143,38 @@ class GenerateState(metaclass=SingletonMeta):
     def reset(self) -> None:
         self.remaining_batch_size = 0
         self.pendings = set()
+        self.completed = asyncio.Queue()
         self.aborted = False
         self.cancellable_tasks = set()
         self.active_server_generations = 0
 
     def submit_generate_tasks(self, samples: list[list[Sample]]) -> None:
         for group in samples:
-            self.pendings.add(
-                asyncio.create_task(
-                    # submit a group of samples as a single task.
-                    generate_and_rm_group(
-                        self.args,
-                        group,
-                        sampling_params=self.sampling_params.copy(),
-                        evaluation=False,
-                    )
+            if self.executor is not None:
+                coroutine = self.executor.generate(group, self.sampling_params.copy())
+            else:
+                # Submit a group of samples as a single task.
+                coroutine = generate_and_rm_group(
+                    self.args,
+                    group,
+                    sampling_params=self.sampling_params.copy(),
+                    evaluation=False,
                 )
-            )
+            task = asyncio.create_task(coroutine)
+            self.pendings.add(task)
+            task.add_done_callback(self.completed.put_nowait)
         self.remaining_batch_size += len(samples)
+
+    async def next_completed(self):
+        # Rebuilding asyncio.wait's callbacks for every completed group scans
+        # the entire batch repeatedly. Each task instead notifies us once.
+        if not self.pendings:
+            raise ValueError("No pending rollout groups")
+        done = {await self.completed.get()}
+        while not self.completed.empty():
+            done.add(self.completed.get_nowait())
+        self.pendings.difference_update(done)
+        return done
 
 
 async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, Any]) -> Sample:
@@ -325,55 +347,78 @@ async def generate_and_rm(
             }
         ]
 
-    # generate
-    async with state.semaphore:
-        await state.generation_pacer.wait()
-        if state.aborted:
-            sample.status = Sample.Status.ABORTED
+    stage = "generation"
+    try:
+        # generate
+        async with state.semaphore:
+            await state.generation_pacer.wait()
+            if state.aborted:
+                sample.status = Sample.Status.ABORTED
+                return sample
+
+            with state.dp_rank_context() as _:
+                custom_func_path = sample.generate_function_path or args.custom_generate_function_path
+                generate_func = load_function(custom_func_path) if custom_func_path is not None else generate
+
+                if custom_func_path is not None and "evaluation" in inspect.signature(generate_func).parameters:
+                    generate_call = generate_func(args, sample, sampling_params, evaluation=evaluation)
+                else:
+                    generate_call = generate_func(args, sample, sampling_params)
+
+                if getattr(generate_func, "abort_mode", None) == "request":
+                    sample = await _run_request_abortable_generate(state, sample, generate_call)
+                else:
+                    sample = await _run_server_abort_generate(state, generate_call)
+
+        sample = inherit_queue_context(queue_input, sample)
+        if any(item.status == Sample.Status.ABORTED for item in iter_samples(sample)):
+            await notify_sample_observers(args, sample, event="completed", stage="generation", evaluation=evaluation)
+            return sample
+        await notify_sample_observers(args, sample, event="generated", stage="generation", evaluation=evaluation)
+        stage = "sample_hooks"
+        sample = await apply_rollout_sample_hooks(args, sample, evaluation=evaluation)
+        stage = "teacher_scoring"
+        if getattr(args, "use_opd", False) and getattr(args, "opd_teacher_config", None) is not None:
+            if not evaluation or getattr(args, "opd_eval_teacher_scoring", True):
+                if state.teacher_runtime is None:
+                    state.teacher_runtime = TeacherRuntime(args)
+                sample = await score_teacher(args, sample, evaluation=evaluation, runtime=state.teacher_runtime)
+        sample = inherit_queue_context(queue_input, sample)
+
+        # for the rm that need the whole group, we will not do the rm here
+        if args.group_rm:
             return sample
 
-        with state.dp_rank_context() as _:
-            custom_func_path = sample.generate_function_path or args.custom_generate_function_path
-            generate_func = load_function(custom_func_path) if custom_func_path is not None else generate
+        stage = "reward"
+        if isinstance(sample, list):
+            samples = sample
+            if any(sample.status == Sample.Status.ABORTED for sample in samples):
+                await notify_sample_observers(args, samples, event="completed", stage=stage, evaluation=evaluation)
+                return samples
 
-            if custom_func_path is not None and "evaluation" in inspect.signature(generate_func).parameters:
-                generate_call = generate_func(args, sample, sampling_params, evaluation=evaluation)
-            else:
-                generate_call = generate_func(args, sample, sampling_params)
-
-            if getattr(generate_func, "abort_mode", None) == "request":
-                sample = await _run_request_abortable_generate(state, sample, generate_call)
-            else:
-                sample = await _run_server_abort_generate(state, generate_call)
-
-    sample = inherit_queue_context(queue_input, sample)
-    sample = await apply_rollout_sample_hooks(args, sample, evaluation=evaluation)
-    sample = inherit_queue_context(queue_input, sample)
-
-    # for the rm that need the whole group, we will not do the rm here
-    if args.group_rm:
-        return sample
-
-    if isinstance(sample, list):
-        samples = sample
-        if any(sample.status == Sample.Status.ABORTED for sample in samples):
+            samples_need_reward = [sample for sample in samples if sample.reward is None]
+            with trace_span(samples_need_reward, "reward_model"):
+                rewards = await batched_async_rm(args, samples_need_reward)
+            for sample, reward in zip(samples_need_reward, rewards, strict=False):
+                sample.reward = reward
+            await notify_sample_observers(args, samples, event="completed", stage=stage, evaluation=evaluation)
+            await finalize_sample_representation(args, samples, generate_func)
             return samples
+        else:
+            if sample.status == Sample.Status.ABORTED:
+                await notify_sample_observers(args, sample, event="completed", stage=stage, evaluation=evaluation)
+                return sample
+            # Some custom generate paths may have already filled the reward.
+            if sample.reward is None:
+                with trace_span(sample, "reward_model"):
+                    sample.reward = await async_rm(args, sample)
 
-        samples_need_reward = [sample for sample in samples if sample.reward is None]
-        with trace_span(samples_need_reward, "reward_model"):
-            rewards = await batched_async_rm(args, samples_need_reward)
-        for sample, reward in zip(samples_need_reward, rewards, strict=False):
-            sample.reward = reward
-        return samples
-    else:
-        if sample.status == Sample.Status.ABORTED:
-            return sample
-        # Some custom generate paths may have already filled the reward.
-        if sample.reward is None:
-            with trace_span(sample, "reward_model"):
-                sample.reward = await async_rm(args, sample)
-
-    return sample
+        await notify_sample_observers(args, sample, event="completed", stage=stage, evaluation=evaluation)
+        await finalize_sample_representation(args, sample, generate_func)
+        return sample
+    except BaseException as error:
+        await notify_sample_observers(args, sample, event="failed", stage=stage, error=error, evaluation=evaluation)
+        raise
 
 
 @trace_function(
@@ -411,14 +456,30 @@ async def generate_and_rm_group(
             asyncio.create_task(generate_and_rm(args, sample, current_sampling_params, evaluation=evaluation))
         )
 
-    group = await asyncio.gather(*tasks)
+    try:
+        group = await asyncio.gather(*tasks)
+    except BaseException:
+        # A failed sample must not leave siblings scoring or generating beyond
+        # this group's boundary, including when it executes in a remote worker.
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
     # for the rm that need the whole group, we will do the rm here
     if not state.aborted and args.group_rm:
-        with trace_span(group, "group_reward_model"):
-            rewards = await batched_async_rm(args, group)
-        for sample, reward in zip(group, rewards, strict=False):
-            sample.reward = reward
+        try:
+            with trace_span(group, "group_reward_model"):
+                rewards = await batched_async_rm(args, group)
+            for sample, reward in zip(group, rewards, strict=True):
+                sample.reward = reward
+        except BaseException as error:
+            await notify_sample_observers(
+                args, group, event="failed", stage="group_reward", error=error, evaluation=evaluation
+            )
+            raise
+        await notify_sample_observers(args, group, event="completed", stage="group_reward", evaluation=evaluation)
+        await finalize_sample_representation(args, group)
 
     return group
 
@@ -429,6 +490,9 @@ async def abort(args: Namespace, rollout_id: int) -> list[list[Sample]]:
     state = GenerateState(args)
     assert not state.aborted
     state.aborted = True
+
+    if getattr(state, "executor", None) is not None:
+        await state.executor.stop()
 
     cancellable_tasks = list(state.cancellable_tasks)
     state.cancellable_tasks.difference_update(cancellable_tasks)
@@ -476,6 +540,33 @@ async def abort(args: Namespace, rollout_id: int) -> list[list[Sample]]:
 async def generate_rollout_async(
     args: Namespace, rollout_id: int, data_source: Callable[[int], list[list[Sample]]]
 ) -> tuple[RolloutFnTrainOutput, list[list[Sample]]]:
+    state = GenerateState(args)
+    if getattr(args, "rollout_execution_workers", 0):
+        from slime.rollout.execution_pool import RolloutExecutionPool
+
+        if state.executor is None:
+            state.executor = RolloutExecutionPool(args)
+    try:
+        if getattr(state, "executor", None) is not None:
+            await state.executor.start(rollout_id)
+        output, aborted = await _generate_rollout_async(args, rollout_id, data_source)
+    except BaseException:
+        if getattr(state, "executor", None) is not None:
+            await state.executor.stop(suppress_errors=True)
+            await asyncio.gather(*state.pendings, return_exceptions=True)
+            state.reset()
+        raise
+    if getattr(state, "executor", None) is not None:
+        output.metrics = (output.metrics or {}) | state.executor.metrics
+    if state.teacher_runtime is not None:
+        await state.teacher_runtime.flush()
+    await flush_sample_observers(args)
+    return output, aborted
+
+
+async def _generate_rollout_async(
+    args: Namespace, rollout_id: int, data_source: Callable[[int], list[list[Sample]]]
+) -> tuple[RolloutFnTrainOutput, list[list[Sample]]]:
     """An example to implement the generate_rollout function for an rule based rm rollout generation.
 
     Args:
@@ -520,7 +611,7 @@ async def generate_rollout_async(
             state.submit_generate_tasks(samples)
 
         # wait for the generation to finish
-        done, state.pendings = await asyncio.wait(state.pendings, return_when=asyncio.FIRST_COMPLETED)
+        done = await state.next_completed()
         for task in done:
             group: list[Sample] = task.result()
 
@@ -694,6 +785,7 @@ async def eval_rollout_single_dataset(
 
     tasks = []
     # do multiple samples for eval prompts
+    eval_run_id = uuid.uuid4().hex
     sample_index = 0
     for _i, prompt_sample in enumerate(dataset.samples):
         for j in range(dataset_cfg.n_samples_per_eval_prompt):
@@ -702,6 +794,12 @@ async def eval_rollout_single_dataset(
             sample.index = sample_index
             sample_index += 1
             sample.metadata = dataset_cfg.inject_metadata(getattr(sample, "metadata", None))
+            sample.metadata.update(
+                eval_dataset_name=dataset_cfg.name,
+                eval_prompt_index=_i,
+                eval_sample_index=j,
+                eval_run_id=eval_run_id,
+            )
             sample.custom_rm_path = dataset_cfg.custom_rm_path
             sample.generate_function_path = getattr(dataset_cfg, "custom_generate_function_path", None)
             sampling_params = base_sampling_params
@@ -773,3 +871,16 @@ def generate_rollout(
     if aborted_samples:
         data_source.add_samples(aborted_samples)
     return output
+
+
+def close_rollout_execution():
+    state = GenerateState._instances.get(GenerateState)
+    if state is not None and state.executor is not None:
+        state.executor.close()
+        state.executor = None
+    if state is not None and state.teacher_runtime is not None:
+        run(state.teacher_runtime.close())
+        state.teacher_runtime = None
+
+
+generate_rollout.close = close_rollout_execution

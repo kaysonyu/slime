@@ -37,6 +37,8 @@ from .cp_utils import (
     slice_log_prob_with_cp,
 )
 
+from .policy_actions import get_policy_scores, validate_action_policy_args
+
 ROLLOUT_TOP_P_TOKEN_KEYS = (
     "rollout_top_p_token_ids",
     "rollout_top_p_token_offsets",
@@ -49,7 +51,7 @@ ROLLOUT_TOP_P_TOKEN_KEYS = (
 # the values are identical to a separate compute_log_prob pass, so we snapshot
 # them here at no extra forward. Keyed by GLOBAL rollout position so the writer
 # can put them back in sample order regardless of pipeline/microbatch order.
-_LOG_PROB_CAPTURE: "dict[int, torch.Tensor] | None" = None
+_LOG_PROB_CAPTURE: "dict[int, torch.Tensor | dict[str, torch.Tensor]] | None" = None
 
 
 def enable_log_prob_capture() -> None:
@@ -58,7 +60,7 @@ def enable_log_prob_capture() -> None:
     _LOG_PROB_CAPTURE = {}
 
 
-def drain_captured_log_probs() -> "dict[int, torch.Tensor]":
+def drain_captured_log_probs() -> "dict[int, torch.Tensor | dict[str, torch.Tensor]]":
     """Return captured ``{rollout_position: cp-local log_probs}`` and stop capturing."""
     global _LOG_PROB_CAPTURE
     captured = _LOG_PROB_CAPTURE or {}
@@ -66,8 +68,11 @@ def drain_captured_log_probs() -> "dict[int, torch.Tensor]":
     return captured
 
 
-def _maybe_capture_log_probs(batch: RolloutBatch, log_probs: list[torch.Tensor]) -> None:
+def _maybe_capture_log_probs(batch: RolloutBatch, log_probs: list[torch.Tensor | dict[str, torch.Tensor]]) -> None:
     """Snapshot per-sample CP-local ``log_probs`` keyed by global rollout position.
+
+    Action-stream callers supply dictionaries of row-aligned scores, so a dump
+    retains all action families, including terminal actions.
 
     No-op unless :func:`enable_log_prob_capture` is active and the micro-batch
     carries ``partition`` (only added to the training keys when dumping). First
@@ -83,7 +88,11 @@ def _maybe_capture_log_probs(batch: RolloutBatch, log_probs: list[torch.Tensor])
         return
     for position, log_prob in zip(positions, log_probs, strict=True):
         if position not in _LOG_PROB_CAPTURE:
-            _LOG_PROB_CAPTURE[position] = log_prob.detach().clone()
+            _LOG_PROB_CAPTURE[position] = (
+                {name: value.detach().clone() for name, value in log_prob.items()}
+                if isinstance(log_prob, dict)
+                else log_prob.detach().clone()
+            )
 
 
 def get_rollout_top_p_logprob_kwargs(args: Namespace, batch: dict[str, Any]) -> dict[str, Any]:
@@ -742,6 +751,16 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
             "total_lengths"). Modified in-place to add "advantages" and
             "returns" keys, each mapping to lists of tensors per sample.
     """
+    streams = rollout_data.get("policy_actions")
+    if streams:
+        if not mpu.is_pipeline_last_stage():
+            return
+        validate_action_policy_args(args)
+        device = next(iter(streams[0].values()))["valid_mask"].device
+        rewards = torch.as_tensor(rollout_data["rewards"], dtype=torch.float32, device=device)
+        prepare_action_advantages(args, rollout_data, rewards)
+        return
+
     rollout_log_probs: list[torch.Tensor] | None = rollout_data.get("rollout_log_probs")
     log_probs: list[torch.Tensor] | None = (
         rollout_log_probs if args.use_rollout_logprobs else rollout_data.get("log_probs")
@@ -894,6 +913,32 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
 
     rollout_data["advantages"] = advantages
     rollout_data["returns"] = returns
+
+
+def prepare_action_advantages(args, rollout_data, rewards):
+    """Freeze task and OPD advantages on the same actions used by training."""
+    inputs = rollout_data.get("policy_actions")
+    source = "rollout" if args.use_rollout_logprobs else "old"
+    bases, old, teacher, destinations = [], [], [], []
+    for streams, reward in zip(inputs, rewards, strict=True):
+        for name, stream in streams.items():
+            mask = stream["valid_mask"]
+            base = torch.as_tensor(reward, dtype=torch.float32, device=mask.device).detach()
+            bases.append(base.expand_as(mask))
+            destinations.append(stream)
+            if args.use_opd:
+                for prefix, scores in ((source, old), ("teacher", teacher)):
+                    key = f"{prefix}_log_probs"
+                    if key not in stream:
+                        raise ValueError(f"Missing selected {prefix} action scores for {name}")
+                    scores.append(stream[key].detach())
+    adjustments = {"teacher_log_probs": teacher}
+    if args.use_opd:
+        apply_opd_kl_to_advantages(args, adjustments, bases, old)
+    for i, (stream, advantage) in enumerate(zip(destinations, bases, strict=True)):
+        stream["advantages"] = advantage.detach().clone()
+        if args.use_opd:
+            stream["opd_reverse_kl"] = adjustments["opd_reverse_kl"][i].detach().clone()
 
 
 def vanilla_tis_function(
@@ -1115,6 +1160,148 @@ def get_score_centering_terms(args, batch, logits):
     return {key: torch.cat(values) for key, values in res.items()}
 
 
+def action_policy_loss_function(
+    args: Namespace,
+    batch: RolloutBatch,
+    output: torch.Tensor,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Apply elementwise PPO to row-aligned streams, preserving their head axes.
+
+    Each sample contributes a weighted sum of stream means to the objective.
+    Global diagnostics instead average all selected actions within the sample,
+    without stream weights. The Megatron wrapper owns the global-batch divisor.
+    OPD advantages have already been frozen by ``prepare_action_advantages``.
+    Reference KL and entropy use the same stream weights and sample means.
+    """
+    scores = get_policy_scores(args, batch, output)
+    streams = batch["policy_actions"]
+    lengths = batch["total_lengths"]
+    _maybe_capture_log_probs(
+        batch,
+        [{name: scores[f"policy/{name}/log_probs"][i] for name in streams} for i in range(len(lengths))],
+    )
+    sample_masks = batch.get("policy_sample_masks")
+    if sample_masks is not None and (sample_masks.dtype != torch.bool or sample_masks.shape != (len(lengths),)):
+        raise ValueError("Policy sample masks must contain one boolean per trajectory")
+    source = "rollout" if args.use_rollout_logprobs else "old"
+    weights = getattr(args, "policy_loss_weights", None) or {}
+    has_rollout = all("rollout_log_probs" in stream for stream in streams.values())
+    has_entropy = all(f"policy/{name}/entropy" in scores for name in streams)
+    if args.entropy_coef and not has_entropy:
+        raise ValueError("Nonzero entropy_coef requires actual per-action entropy from the model")
+    diagnostic_names = {
+        "clipfrac": "pg_clipfrac",
+        "ppo_kl_estimate": "ppo_kl",
+        "opd_logratio_mean": "opd_reverse_kl",
+        "train_rollout_logprob_abs_diff": "train_rollout_logprob_abs_diff",
+    }
+    # Keep an empty batch differentiable without reading possibly nonfinite
+    # padding values from the model output.
+    pg_loss = output[..., :0].sum()
+    entropy_loss = output.new_zeros(())
+    kl_loss = output.new_zeros(())
+    metrics = {}
+    offset = 0
+    for i, rows in enumerate(lengths):
+        section = slice(offset, offset + rows)
+        sample_count = 0
+        sample_sums = {}
+        sample_max_diff = output.new_zeros(())
+        for name, stream in streams.items():
+            mask = stream["valid_mask"][section] & stream["loss_mask"][section]
+            if sample_masks is not None:
+                mask = mask & sample_masks[i]
+            current = scores[f"policy/{name}/log_probs"][i]
+            if current.shape != mask.shape or mask.dtype != torch.bool:
+                raise ValueError(f"Policy scores for {name} do not match their action mask")
+            excluded = ~mask
+            count = mask.sum()
+            denominator = count.clamp_min(1)
+            sample_count = sample_count + count
+            # Mask before exponentiation: unselected rows/heads may contain
+            # arbitrary padding, including NaN, and must have zero gradients.
+            current = current.masked_fill(excluded, 0)
+            if f"{source}_log_probs" in stream:
+                old = stream[f"{source}_log_probs"][section].detach().masked_fill(excluded, 0)
+            elif source == "old" and not args.use_opd and batch.get("reuse_current_policy_scores", False):
+                # The actor permits this optimization only for one optimizer step.
+                old = current.detach()
+            else:
+                raise ValueError(f"Missing selected {source} action scores for {name}")
+            if "advantages" not in stream:
+                raise ValueError("Action advantages must be frozen before training")
+            advantages = stream["advantages"][section].detach().masked_fill(excluded, 0)
+            ppo_kl = old - current
+            losses, clipfrac = compute_policy_loss(
+                ppo_kl, advantages, args.eps_clip, args.eps_clip_high, eps_clip_c=args.eps_clip_c
+            )
+            loss_sum = losses.sum()
+            pg_loss = pg_loss + weights.get(name, 1.0) * loss_sum / denominator
+            stream_sums = {
+                "pg_loss": loss_sum.detach(),
+                "clipfrac": clipfrac.detach().masked_fill(excluded, 0).sum(),
+                "ppo_kl_estimate": ppo_kl.detach().sum(),
+            }
+            if has_entropy:
+                entropy = scores[f"policy/{name}/entropy"][i]
+                if entropy.shape != mask.shape:
+                    raise ValueError(f"Policy entropy for {name} does not match its action mask")
+                entropy_sum = entropy.masked_fill(excluded, 0).sum()
+                entropy_loss = entropy_loss + weights.get(name, 1.0) * entropy_sum / denominator
+                stream_sums["entropy_mean"] = entropy_sum.detach()
+            if args.use_kl_loss:
+                if "ref_log_probs" not in stream:
+                    raise ValueError(f"Missing selected reference action scores for {name}")
+                reference = stream["ref_log_probs"][section].detach().masked_fill(excluded, 0)
+                importance_ratio = torch.exp(current - old) if args.use_unbiased_kl else None
+                kl = compute_approx_kl(
+                    current,
+                    reference,
+                    kl_loss_type=args.kl_loss_type,
+                    importance_ratio=importance_ratio,
+                )
+                kl_sum = kl.masked_fill(excluded, 0).sum()
+                kl_loss = kl_loss + weights.get(name, 1.0) * kl_sum / denominator
+                stream_sums["kl_mean"] = kl_sum.detach()
+            if args.use_opd:
+                if "teacher_log_probs" not in stream or "opd_reverse_kl" not in stream:
+                    raise ValueError(f"Missing selected teacher scores or OPD advantages for {name}")
+                stream_sums["opd_logratio_mean"] = (
+                    stream["opd_reverse_kl"][section].detach().masked_fill(excluded, 0).sum()
+                )
+            if has_rollout:
+                rollout = stream["rollout_log_probs"][section].detach().masked_fill(excluded, 0)
+                compared = current.detach() if args.use_rollout_logprobs else old
+                difference = (compared - rollout).abs()
+                stream_sums["train_rollout_logprob_abs_diff"] = difference.sum()
+                sample_max_diff = torch.maximum(
+                    sample_max_diff, difference.amax() if difference.numel() else difference.sum()
+                )
+            for field, total in stream_sums.items():
+                key = f"{name}/{field}"
+                metrics[key] = metrics.get(key, 0) + total / denominator
+                if field in diagnostic_names:
+                    sample_sums[field] = sample_sums.get(field, 0) + total
+            key = f"{name}/active_ratio"
+            metrics[key] = metrics.get(key, 0) + (count > 0).to(output.dtype)
+        for field, total in sample_sums.items():
+            key = diagnostic_names[field]
+            metrics[key] = metrics.get(key, 0) + total / sample_count.clamp_min(1)
+        if has_rollout:
+            key = "mean_sample_train_rollout_logprob_max_abs_diff"
+            metrics[key] = metrics.get(key, 0) + sample_max_diff
+        offset += rows
+    loss = pg_loss
+    if has_entropy:
+        loss = loss - args.entropy_coef * entropy_loss
+        metrics["entropy_loss"] = entropy_loss.detach()
+    if args.use_kl_loss:
+        loss = loss + args.kl_loss_coef * kl_loss
+        metrics["kl_loss"] = kl_loss.detach()
+    metrics.update(loss=loss.detach(), pg_loss=pg_loss.detach())
+    return loss, metrics
+
+
 def policy_loss_function(
     args: Namespace,
     batch: RolloutBatch,
@@ -1145,14 +1332,15 @@ def policy_loss_function(
         "tis", "ois", "tis_clipfrac" are included when the respective features
         are enabled.
     """
+    if batch.get("policy_actions"):
+        return action_policy_loss_function(args, batch, logits)
+
     pg_loss_type = get_pg_loss_type(args)
     use_score_centering = getattr(args, "use_score_centering", False)
-    advantages = torch.cat(batch["advantages"], dim=0)
-    old_log_probs = batch["rollout_log_probs"] if args.use_rollout_logprobs else batch.get("log_probs")
-
     response_lengths = batch["response_lengths"]
     total_lengths = batch["total_lengths"]
-
+    advantages = torch.cat(batch["advantages"], dim=0)
+    old_log_probs = batch["rollout_log_probs"] if args.use_rollout_logprobs else batch.get("log_probs")
     _, log_probs_and_entropy = get_log_probs_and_entropy(
         logits,
         args=args,

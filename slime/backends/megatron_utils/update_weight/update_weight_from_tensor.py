@@ -141,7 +141,7 @@ class UpdateWeightFromTensor:
             if self._is_distributed_src_rank:
                 if self._model_update_groups is not None:
                     disconnect_rollout_engines_from_distributed(
-                        self._group_name, self._model_update_groups, self.distributed_rollout_engines
+                        self.args, self._group_name, self._model_update_groups, self.distributed_rollout_engines
                     )
 
                 self._model_update_groups = connect_rollout_engines_from_distributed(
@@ -300,7 +300,7 @@ class UpdateWeightFromTensor:
                     for engine in self.rollout_engines
                 ]
             )
-            if flush_cache:
+            if flush_cache and getattr(self.args, "rollout_backend", "sglang") != "sglang-omni":
                 ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
             if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
                 post_process_weights(
@@ -433,12 +433,13 @@ def _send_to_colocated_engine(
                     empty_serialized_tensor = MultiprocessingSerializer.serialize(empty_tensor_data, output_str=True)
                 serialized_tensors_for_dtype.append(empty_serialized_tensor)
 
-            kwargs = {
-                "serialized_named_tensors": serialized_tensors_for_dtype,
-                "load_format": "flattened_bucket",
-                "weight_version": str(weight_version),
-            }
-            refs.append(ipc_engine.update_weights_from_tensor.remote(**kwargs))
+            refs.append(
+                ipc_engine.update_weights_from_tensor.remote(
+                    serialized_named_tensors=serialized_tensors_for_dtype,
+                    load_format="flattened_bucket",
+                    weight_version=str(weight_version),
+                )
+            )
 
     return refs, long_live_tensors
 

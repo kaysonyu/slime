@@ -516,6 +516,6 @@ def _wrap_low_level_call(check_memory=True):
                 clear_memory()
         yield
     except Exception as e:
-        mem_info = print_memory("after torch distributed error")
+        mem_info = print_memory("after torch distributed error", level=logging.ERROR)
         e.add_note(f"{mem_info=}")
         raise

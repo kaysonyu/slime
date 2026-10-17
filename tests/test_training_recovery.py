@@ -570,6 +570,7 @@ def test_committed_checkpoint_survives_lost_manager_notification(args, tmp_path)
 
 def test_replay_builds_new_layout_without_writing_payloads(args, monkeypatch):
     from unittest.mock import Mock
+
     from slime.data import batch_builder
 
     monkeypatch.setattr(batch_builder.ray, "put", lambda value: value)
@@ -797,6 +798,48 @@ def test_serving_cleanup_releases_lock_and_placements_after_controller_timeout(a
 
 
 @pytest.mark.parametrize("failed", [False, True])
+def test_serving_constructor_owns_registered_routers_even_when_startup_fails(args, monkeypatch, failed):
+    import multiprocessing
+
+    from slime.backends.sglang_utils import deployment
+    from slime.observability import logging_utils
+    from slime.ray import placement_group
+    from slime.ray import serving as module
+
+    cls = ServingCluster.__ray_metadata__.modified_class
+    owner = object.__new__(cls)
+    router, rollout_pg, lock = object(), object(), object()
+    disposed = []
+    args.ci_test = False
+    error = RuntimeError("deployment failed after router creation")
+
+    def start(args, pg, *, on_router_started):
+        assert pg is rollout_pg
+        on_router_started(router)
+        assert owner.router_processes == [router]
+        if failed:
+            raise error
+        return {}, []
+
+    monkeypatch.setattr(deployment, "start_rollout_servers", start)
+    monkeypatch.setattr(placement_group, "create_placement_groups", lambda args: {"rollout": rollout_pg})
+    monkeypatch.setattr(logging_utils, "configure_logger", lambda: None)
+    monkeypatch.setattr(module.ray, "get", lambda refs: refs)
+    monkeypatch.setattr(module, "Lock", SimpleNamespace(options=lambda **kwargs: SimpleNamespace(remote=lambda: lock)))
+    monkeypatch.setattr(cls, "dispose", lambda self: disposed.append(list(self.router_processes)))
+    monkeypatch.setattr(multiprocessing, "active_children", lambda: pytest.fail("Router ownership must be explicit"))
+    if failed:
+        with pytest.raises(RuntimeError) as caught:
+            owner.__init__(args, RestorePlan())
+        assert caught.value is error
+        assert disposed == [[router]]
+    else:
+        owner.__init__(args, RestorePlan())
+        assert owner.router_processes == [router]
+        assert owner.lock is lock and not disposed
+
+
+@pytest.mark.parametrize("failed", [False, True])
 def test_driver_preserves_training_or_cleanup_failure_and_finishes_tracking(args, monkeypatch, failed):
     import runpy
     import sys
@@ -805,6 +848,7 @@ def test_driver_preserves_training_or_cleanup_failure_and_finishes_tracking(args
     monkeypatch.setitem(sys.modules, "slime.utils.arguments", SimpleNamespace(parse_args=None))
     main = runpy.run_path(str(Path(__file__).resolve().parents[1] / "train.py"))["main"]
     startup = Mock()
+    startup.args = args
     startup.close.side_effect = RuntimeError("cleanup failure")
     finish = Mock(side_effect=ValueError("tracking failure"))
     monkeypatch.setitem(main.__globals__, "init_tracking", Mock())

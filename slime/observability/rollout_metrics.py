@@ -45,15 +45,26 @@ _SGLANG_DECODE_PERF_FIELDS = (
 
 def compute_metrics_from_samples(args, samples):
     response_lengths = [sample.effective_response_length for sample in samples]
+    text_samples = [sample for sample in samples if "text" in sample.output_modalities]
 
     log_dict = {}
     log_dict |= dict_add_prefix(compute_statistics(response_lengths), "response_len/")
-    log_dict |= _compute_zero_std_metrics(args, samples)
+    if text_samples or not getattr(args, "use_opd", False):
+        log_dict |= _compute_zero_std_metrics(args, samples)
     log_dict |= _compute_spec_metrics(args, samples)
-    log_dict |= _compute_prefix_cache_metrics(samples)
+    if text_samples:
+        log_dict |= _compute_prefix_cache_metrics(text_samples)
     log_dict |= _compute_reward_cat_metrics(args, samples)
     log_dict |= _compute_top_p_kept_vocab_metrics(samples)
-    log_dict["repetition_frac"] = np.mean([int(has_repetition(s.response)) for s in samples]).item()
+    units = sorted({unit for sample in samples for unit in sample.output_units})
+    for unit in units:
+        values = [sample.output_units[unit] for sample in samples if unit in sample.output_units]
+        log_dict |= dict_add_prefix(compute_statistics(values), f"{unit}/")
+    audio = [sample for sample in samples if "audio_frames" in sample.output_units]
+    if audio:
+        log_dict["zero_frame_ratio"] = np.mean([sample.output_units["audio_frames"] == 0 for sample in audio]).item()
+    if text_samples:
+        log_dict["repetition_frac"] = np.mean([int(has_repetition(sample.response)) for sample in text_samples]).item()
     log_dict["truncated_ratio"] = np.mean([int(s.status == Sample.Status.TRUNCATED) for s in samples]).item()
     return log_dict
 
@@ -87,6 +98,18 @@ def compute_perf_metrics_from_samples(args, samples, rollout_time):
 
     token_perf([sample.response_length for sample in samples], non_generation_time, key="")
     token_perf([sample.effective_response_length for sample in samples], non_generation_time, key="effective_")
+    if rollout_time > 0:
+        log_dict["rollout_samples_per_sec"] = len(samples) / rollout_time
+        units = sorted({unit for sample in samples for unit in sample.output_units})
+        for unit in units:
+            values = [sample.output_units.get(unit) for sample in samples]
+            if all(
+                isinstance(value, (int, float)) and not isinstance(value, bool) and np.isfinite(value) and value >= 0
+                for value in values
+            ):
+                log_dict[f"rollout_{unit}_per_sec"] = sum(values) / rollout_time
+                if args.rollout_num_gpus:
+                    log_dict[f"rollout_{unit}_per_gpu_sec"] = sum(values) / rollout_time / args.rollout_num_gpus
     log_dict |= _compute_sglang_request_perf_metrics(samples)
 
     return log_dict
@@ -153,8 +176,15 @@ def _compute_zero_std_metrics(args, all_samples: list[Sample]):
         rewards = [sample.get_reward_value(args) for sample in samples]
         return len(rewards) == 0 or all(rewards[0] == r for r in rewards)
 
-    all_sample_groups = group_by(all_samples, lambda s: s.group_index)
-    interesting_sample_groups = [g for g in all_sample_groups.values() if _is_zero_std(g)]
+    all_sample_groups = group_by(
+        all_samples,
+        lambda s: (s.metadata or {}).get("eval_prompt_index", s.group_index),
+    )
+    interesting_sample_groups = [
+        g
+        for g in all_sample_groups.values()
+        if (len(g) > 1 or all("text" in sample.output_modalities for sample in g)) and _is_zero_std(g)
+    ]
 
     interesting_rewards = [str(round(g[0].get_reward_value(args), 1)) for g in interesting_sample_groups]
 
@@ -239,7 +269,7 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any] 
         if "truncated" in data[key]:
             truncated = data[key]["truncated"]
             log_dict[f"eval/{key}-truncated_ratio"] = sum(truncated) / len(truncated)
-        if args.log_passrate:
+        if args.log_passrate and all("text" in sample.output_modalities for sample in data[key].get("samples", [])):
             log_dict |= dict_add_prefix(
                 compute_pass_rate(
                     flat_rewards=rewards,

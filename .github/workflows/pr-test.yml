@@ -898,7 +898,72 @@ jobs:
             },
             {
               "num_gpus": 0,
+              "test_file": "test_log_noise.py"
+            },
+            {
+              "num_gpus": 0,
+              "test_file": "test_prism_experiment_artifacts.py"
+            },
+            {
+              "num_gpus": 0,
+              "test_file": "test_prism_launch.py"
+            },
+            {
+              "num_gpus": 0,
+              "test_file": "test_prism_numerical_diagnostic.py"
+            },
+            {
+              "num_gpus": 0,
               "test_file": "test_metric_report.py"
+            },
+            {
+              "num_gpus": 0,
+              "test_file": "test_prism_metrics.py"
+            },
+            {
+              "num_gpus": 0,
+              "test_file": "test_prism_model.py"
+            },
+            {
+              "num_gpus": 0,
+              "test_file": "test_train_checkpoint_offload.py"
+            },
+            {
+              "num_gpus": 0,
+              "test_file": "test_policy_actions.py"
+            },
+            {
+              "num_gpus": 0,
+              "straw": true,
+              "test_file": "test_policy_streams.py"
+            },
+            {
+              "num_gpus": 0,
+              "test_file": "test_opd_teacher_routes.py"
+            },
+            {
+              "num_gpus": 0,
+              "test_file": "test_teacher_client.py"
+            },
+            {
+              "num_gpus": 0,
+              "test_file": "test_omni_config.py"
+            },
+            {
+              "num_gpus": 0,
+              "test_file": "test_omni_engine.py"
+            },
+            {
+              "num_gpus": 0,
+              "test_file": "test_omni_deployment.py"
+            },
+            {
+              "num_gpus": 0,
+              "test_file": "test_distributed_weight_lifecycle.py"
+            },
+            {
+              "num_gpus": 0,
+              "test_file": "test_prism_rollout_integration.py"
             },
             {
               "num_gpus": 0,
@@ -981,6 +1046,18 @@ jobs:
             {
               "num_gpus": 0,
               "test_file": "test_rm_deepscaler.py"
+            },
+            {
+              "num_gpus": 0,
+              "test_file": "test_tts_reward_plugin.py"
+            },
+            {
+              "num_gpus": 0,
+              "test_file": "test_prism_reward_categories.py"
+            },
+            {
+              "num_gpus": 0,
+              "test_file": "test_prism_reward_composition.py"
             },
             {
               "num_gpus": 0,
@@ -1213,7 +1290,7 @@ jobs:
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors psutil
 
-          pip install transformers wandb zstandard
+          pip install transformers wandb zstandard cloudpickle
 
 
 

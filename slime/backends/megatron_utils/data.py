@@ -39,7 +39,9 @@ def get_batch(
     """
 
     assert "tokens" in keys
+    keys = list(dict.fromkeys([*keys, "policy_actions", "policy_sample_masks"]))
     batch = data_iterator.get_next(keys)
+    batch["reuse_current_policy_scores"] = data_iterator.rollout_data.get("reuse_current_policy_scores", False)
 
     tokens = batch["tokens"]
     # use 0 as the pad token id should be fine?
@@ -145,6 +147,21 @@ def get_batch(
                     else:
                         multimodal_data[key] = torch.cat([multimodal_data[key], mm_tensor], dim=0)
         batch["multimodal_train_inputs"] = multimodal_data
+
+    if batch.get("policy_actions") is not None:
+        trajectories = batch["policy_actions"]
+        names = tuple(trajectories[0])
+        if any(tuple(streams) != names for streams in trajectories):
+            raise ValueError("Packed trajectories must declare the same ordered action streams")
+        packed = {}
+        for name in names:
+            fields = tuple(trajectories[0][name])
+            if any(set(streams[name]) != set(fields) for streams in trajectories):
+                raise ValueError(f"Packed action stream {name} has inconsistent fields")
+            packed[name] = {field: torch.cat([streams[name][field] for streams in trajectories]) for field in fields}
+        batch["policy_actions"] = packed
+    if batch.get("policy_sample_masks") is not None:
+        batch["policy_sample_masks"] = torch.cat(batch["policy_sample_masks"])
 
     return batch
 

@@ -228,5 +228,105 @@ def test_source_rank_pads_empty_colocated_bucket_entries(monkeypatch):
     ]
 
 
+def test_colocated_update_supports_separate_dtype_buckets(monkeypatch):
+    module, dist_state = _load_update_weight_module(monkeypatch)
+    monkeypatch.setattr(_FakeFlattenedTensorBucket, "supports_multi_dtypes", False)
+    dist_state.world_size = 1
+    dist_state.gathered = lambda local: [local]
+    engine = _FakeEngine()
+
+    refs, long_lived_tensors = module._send_to_colocated_engine(
+        [("weight", types.SimpleNamespace(dtype="float32")), ("counter", types.SimpleNamespace(dtype="int64"))],
+        ipc_engine=engine,
+        ipc_gather_src=0,
+        ipc_gather_group=object(),
+        weight_version=8,
+    )
+
+    assert refs == ["ref-1", "ref-2"]
+    assert len(long_lived_tensors) == 2
+    calls = engine.update_weights_from_tensor.calls
+    assert [call["serialized_named_tensors"][0]["metadata"] for call in calls] == [("weight",), ("counter",)]
+    assert all(set(call) == {"serialized_named_tensors", "load_format", "weight_version"} for call in calls)
+    assert all(call["weight_version"] == "8" for call in calls)
+
+
+@pytest.mark.parametrize("backend", ["sglang", "sglang-omni"])
+@pytest.mark.parametrize("fail_second_bucket", [False, True])
+def test_tensor_update_waits_for_every_bucket_before_resuming(monkeypatch, backend, fail_second_bucket):
+    module, dist_state = _load_update_weight_module(monkeypatch)
+    dist_state.world_size = 1
+    dist_state.gathered = lambda local: [local]
+    events = []
+    acknowledged = []
+    engine = _FakeEngine()
+
+    def control(name):
+        def remote(**kwargs):
+            events.append(("call", name))
+            return name
+
+        return types.SimpleNamespace(remote=remote)
+
+    engine.pause_generation = control("pause")
+    engine.flush_cache = control("flush")
+    engine.continue_generation = control("continue")
+
+    def get(refs):
+        for ref in refs:
+            if ref == "ref-2" and fail_second_bucket:
+                raise RuntimeError("second bucket failed")
+            events.append(("ack", ref))
+            if ref.startswith("ref-"):
+                acknowledged.append(ref)
+
+    monkeypatch.setattr(module.ray, "get", get, raising=False)
+    monkeypatch.setattr(module.dist, "barrier", lambda **kwargs: events.append(("barrier", None)), raising=False)
+    monkeypatch.setattr(module.accelerator, "empty_cache", lambda: None, raising=False)
+    updater = module.UpdateWeightFromTensor(
+        types.SimpleNamespace(rollout_backend=backend, flush_cache_interval=1),
+        [],
+        lambda: {},
+        model_name="test-model",
+        quantization_config=None,
+    )
+    updater.rollout_engines = [engine]
+    updater._ipc_engine = engine
+    updater._ipc_gather_src = 0
+    updater._ipc_gather_group = object()
+    updater.use_distribute = False
+    updater._full_param_info_buckets = [
+        [types.SimpleNamespace(name=f"weight-{index}", shape=[1], dtype="float32")] for index in range(3)
+    ]
+
+    def chunks(weights, *, param_info_buckets):
+        assert param_info_buckets is updater._full_param_info_buckets
+        for index in range(3):
+            assert len(acknowledged) == index
+            events.append(("yield", index))
+            yield [(f"weight-{index}", types.SimpleNamespace(dtype="float32"))]
+
+    updater._hf_weight_iterator = types.SimpleNamespace(get_hf_weight_chunks=chunks)
+    if fail_second_bucket:
+        with pytest.raises(RuntimeError, match="second bucket failed"):
+            updater.update_weights()
+        assert acknowledged == ["ref-1"]
+        assert ("yield", 2) not in events
+        assert ("call", "continue") not in events
+    else:
+        updater.update_weights()
+        assert acknowledged == ["ref-1", "ref-2", "ref-3"]
+        tail = events[events.index(("ack", "ref-3")) + 1 :]
+        assert tail.index(("barrier", None)) < tail.index(("call", "continue"))
+
+    assert events[0] == ("call", "pause")
+    assert (("call", "flush") in events) is (backend == "sglang")
+    assert all(
+        set(call) == {"serialized_named_tensors", "load_format", "weight_version"}
+        for call in engine.update_weights_from_tensor.calls
+    )
+    assert all(call["weight_version"] == "1" for call in engine.update_weights_from_tensor.calls)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

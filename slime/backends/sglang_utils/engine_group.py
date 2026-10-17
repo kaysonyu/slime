@@ -15,6 +15,26 @@ from slime.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, add_default_ray
 logger = logging.getLogger(__name__)
 
 
+def shutdown_rollout_resources(engines, router_processes, cleanup):
+    """Close partial or complete deployments under the owner's cleanup budget."""
+    shutdowns = []
+    for engine in engines:
+        ref = cleanup.run("request engine shutdown", engine.shutdown.remote)
+        if ref is not None:
+            shutdowns.append(ref)
+    if shutdowns:
+        cleanup.run("wait for engines", ray.wait, shutdowns, num_returns=len(shutdowns), timeout=cleanup.remaining / 2)
+    for engine in engines:
+        cleanup.run("terminate engine", ray.kill, engine, no_restart=True)
+    for router in router_processes:
+        if router.is_alive():
+            cleanup.run("terminate router", router.terminate)
+            cleanup.run("join router", router.join, timeout=min(10, cleanup.remaining / 2))
+            if router.is_alive():
+                cleanup.run("kill router", router.kill)
+                cleanup.run("reap router", router.join, timeout=cleanup.remaining)
+
+
 def reset_weights_update_groups(groups, *, timeout):
     """Reset every serving peer together, then retire only failed engines.
 
@@ -101,11 +121,20 @@ class ServerGroup:
         """Remove one serving unit from routing and terminate all of its nodes."""
         first = engine_id * self.nodes_per_engine
         if self.worker_type != "encoder":
-            unregister_worker(
-                f"http://{self.router_ip or self.args.sglang_router_ip}:{self.router_port or self.args.sglang_router_port}",
-                self.engine_urls[first],
-                timeout=timeout,
-            )
+            if getattr(self.args, "rollout_backend", "sglang") == "sglang-omni":
+                unregister_worker(
+                    f"http://{self.router_ip}:{self.router_port}",
+                    self.engine_urls[first],
+                    timeout=timeout,
+                    backend="sglang-omni",
+                    admin_key=self.args.omni_admin_key,
+                )
+            else:
+                unregister_worker(
+                    f"http://{self.router_ip or self.args.sglang_router_ip}:{self.router_port or self.args.sglang_router_port}",
+                    self.engine_urls[first],
+                    timeout=timeout,
+                )
         engines = self.all_engines[first : first + self.nodes_per_engine]
         shutdowns = [engine.shutdown.remote() for engine in engines if engine is not None]
         if shutdowns:
@@ -117,6 +146,8 @@ class ServerGroup:
 
     def parallel_config(self) -> dict[str, Any]:
         """Return the SGLang parallel args that affect rank-local expert routing."""
+        if getattr(self.args, "rollout_backend", "sglang") == "sglang-omni":
+            return {"tp_size": 1, "pp_size": 1, "ep_size": 1, "moe_dp_size": 1}
         overrides = {key.replace("-", "_"): value for key, value in self.sglang_overrides.items()}
         pp_size = int(overrides.get("pp_size", getattr(self.args, "sglang_pp_size", 1)))
         tp_size = int(overrides.get("tp_size", self.num_gpus_per_engine // pp_size))
@@ -167,9 +198,14 @@ class ServerGroup:
                 "and --sglang-config server_groups."
             )
 
-        from slime.backends.sglang_utils.sglang_engine import SGLangEngine
+        if getattr(self.args, "rollout_backend", "sglang") == "sglang-omni":
+            from slime.backends.sglang_utils.omni_engine import OmniEngine
 
-        RolloutRayActor = ray.remote(SGLangEngine)
+            RolloutRayActor = ray.remote(OmniEngine)
+        else:
+            from slime.backends.sglang_utils.sglang_engine import SGLangEngine
+
+            RolloutRayActor = ray.remote(SGLangEngine)
 
         rollout_engines = []
         for i in range(len(self.all_engines)):
@@ -185,6 +221,14 @@ class ServerGroup:
             # Get the base GPU ID from placement group using gpu_offset.
             gpu_index = self.gpu_offset + i * num_gpus_per_engine_on_node
             base_gpu_id = int(reordered_gpu_ids[gpu_index])
+            omni_placement = {}
+            if getattr(self.args, "rollout_backend", "sglang") == "sglang-omni":
+                gpu_ids = [
+                    int(value) for value in reordered_gpu_ids[gpu_index : gpu_index + num_gpus_per_engine_on_node]
+                ]
+                if gpu_ids != list(range(base_gpu_id, base_gpu_id + num_gpus_per_engine_on_node)):
+                    raise ValueError("An Omni pipeline's reserved GPUs must form one contiguous node-local range")
+                omni_placement["gpu_ids"] = gpu_ids
 
             scheduling_strategy = PlacementGroupSchedulingStrategy(
                 placement_group=pg,
@@ -219,6 +263,7 @@ class ServerGroup:
                 base_gpu_id=base_gpu_id,
                 sglang_overrides=self.sglang_overrides,
                 num_gpus_per_engine=self.num_gpus_per_engine,
+                **omni_placement,
             )
 
             rollout_engines.append((global_rank, rollout_engine))
@@ -232,14 +277,29 @@ class ServerGroup:
         # Compute base_port from the maximum cursor across all nodes that
         # this group's engines may land on (conservative: just use global max).
         base_port = max(port_cursors.values()) if port_cursors else 15000
-        addr_and_ports, port_cursors = _allocate_rollout_engine_addr_and_ports_normal(
-            args=self.args,
-            rollout_engines=rollout_engines,
-            worker_type=self.worker_type,
-            num_gpus_per_engine=self.num_gpus_per_engine,
-            rank_offset=self.rank_offset,
-            base_port=base_port,
-        )
+        if getattr(self.args, "rollout_backend", "sglang") == "sglang-omni":
+            addr_and_ports = {}
+            for rank, engine in rollout_engines:
+                host, port = ray.get(
+                    engine._get_current_node_ip_and_free_port.remote(start_port=base_port, consecutive=3)
+                )
+                addr_and_ports[rank] = {
+                    "host": host,
+                    "port": port,
+                    "nccl_port": port + 1,
+                    "dist_init_addr": f"{host}:{port + 2}",
+                }
+                base_port = port + 3
+                port_cursors[host] = base_port
+        else:
+            addr_and_ports, port_cursors = _allocate_rollout_engine_addr_and_ports_normal(
+                args=self.args,
+                rollout_engines=rollout_engines,
+                worker_type=self.worker_type,
+                num_gpus_per_engine=self.num_gpus_per_engine,
+                rank_offset=self.rank_offset,
+                base_port=base_port,
+            )
 
         # Cache URLs before init can fail. Deregistration must remain possible
         # even if the actor dies before answering get_url().
@@ -311,8 +371,12 @@ class RolloutServer:
 
     @property
     def engine_gpu_counts(self) -> list[int]:
-        """Per-engine GPU count for all node-0 engines, parallel to ``engines``."""
-        return [g.num_gpus_per_engine for g in self.server_groups for _ in g.engines]
+        """Weight-receiver GPU counts, parallel to engines; Omni targets AR only."""
+        return [
+            1 if getattr(g.args, "rollout_backend", "sglang") == "sglang-omni" else g.num_gpus_per_engine
+            for g in self.server_groups
+            for _ in g.engines
+        ]
 
     @property
     def engine_gpu_offsets(self) -> list[int]:

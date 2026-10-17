@@ -132,12 +132,18 @@ class TestZeroGpuRolloutConfig:
         assert config.models[0].server_groups == []
         assert config.total_num_gpus == 0
 
-    def test_start_rollout_servers_zero_gpu_starts_router_without_engines(self, monkeypatch):
+    @pytest.mark.parametrize("register", [False, True])
+    def test_start_rollout_servers_zero_gpu_starts_router_without_engines(self, monkeypatch, register):
         from slime.backends.sglang_utils import deployment
 
-        def fake_start_router(args, *, has_pd_disaggregation=False, force_new=False):
+        owned = []
+        router = object()
+
+        def fake_start_router(args, *, has_pd_disaggregation=False, force_new=False, on_router_started=None):
             assert has_pd_disaggregation is False
             assert force_new is False
+            if on_router_started is not None:
+                on_router_started(router)
             return "127.0.0.1", 3456
 
         monkeypatch.setattr(deployment, "_start_router", fake_start_router)
@@ -157,9 +163,12 @@ class TestZeroGpuRolloutConfig:
             hf_checkpoint="/tmp/hf",
         )
 
-        servers, init_handles = deployment.start_rollout_servers(args, pg=(None, [], []))
+        servers, init_handles = deployment.start_rollout_servers(
+            args, pg=(None, [], []), on_router_started=owned.append if register else None
+        )
 
         assert list(servers) == ["default"]
+        assert owned == ([router] if register else [])
         assert init_handles == []
         server = servers["default"]
         assert server.router_ip == "127.0.0.1"

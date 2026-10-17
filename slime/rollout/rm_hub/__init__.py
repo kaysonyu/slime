@@ -92,6 +92,8 @@ async def async_rm(args, sample: Sample, **kwargs):
         return random.randint(0, 1)
     elif rm_type:
         raise NotImplementedError(f"Rule-based RM for {rm_type} is not implemented.")
+    elif getattr(args, "use_opd", False) and getattr(args, "opd_teacher_config", None):
+        return 0.0
     else:
         raise NotImplementedError("Rule-based RM type is not specified.")
 

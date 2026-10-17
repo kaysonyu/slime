@@ -53,6 +53,16 @@ def tensorize_rollout_data_for_training(rollout_data: dict[str, Any]) -> None:
             for mm_dict in rollout_data["multimodal_train_inputs"]
         ]
 
+    if "policy_actions" in rollout_data:
+        rollout_data["policy_actions"] = [
+            {name: {field: _cpu_tensor(value) for field, value in stream.items()} for name, stream in streams.items()}
+            for streams in rollout_data["policy_actions"]
+        ]
+    if "policy_sample_masks" in rollout_data:
+        rollout_data["policy_sample_masks"] = [
+            _cpu_tensor(value, torch.bool) for value in rollout_data["policy_sample_masks"]
+        ]
+
     if "rollout_mask_sums" in rollout_data:
         rollout_data["rollout_mask_sums"] = _cpu_tensor(
             rollout_data["rollout_mask_sums"],

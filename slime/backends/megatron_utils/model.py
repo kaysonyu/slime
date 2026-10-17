@@ -28,6 +28,7 @@ try:
     from megatron.core.pipeline_parallel.utils import unwrap_model
 except ImportError:
     from megatron.core.utils import unwrap_model
+
 from slime.observability import logging_utils, train_metric_utils
 from slime.utils.memory_utils import clear_memory
 
@@ -35,6 +36,7 @@ from .checkpoint import load_checkpoint, save_checkpoint
 from .data import DataIterator, get_batch
 from .loss import ROLLOUT_TOP_P_TOKEN_KEYS, get_rollout_top_p_logprob_kwargs, loss_function
 from .model_provider import get_model_provider_func
+from .policy_actions import get_policy_scores, policy_forward_kwargs
 from .stateless_adam import StatelessAdam
 
 logger = logging.getLogger(__name__)
@@ -361,6 +363,7 @@ def forward_only(
     num_microbatches: Sequence[int],
     store_prefix: str = "",
     use_rollout_top_p_replay: bool = False,
+    use_policy_score_extractor: bool = False,
 ) -> dict[str, list[torch.Tensor]]:
     """Run forward passes only and collect non-loss outputs (e.g., logprobs).
 
@@ -382,6 +385,8 @@ def forward_only(
         store_prefix (str): Prefix to prepend to stored output keys.
         use_rollout_top_p_replay (bool): Whether to pass rollout top-p token sets
             to the post-forward log-prob callback when top-p rollout is enabled.
+        use_policy_score_extractor (bool): Use the configured model-specific
+            selected-action extractor with the complete batch.
 
     Returns:
         dict[str, list[torch.Tensor]]: Aggregated outputs keyed by ``store_prefix + key``.
@@ -441,7 +446,15 @@ def forward_only(
         }
         if batch["multimodal_train_inputs"] is not None:
             forward_kwargs.update(batch["multimodal_train_inputs"])
+        forward_kwargs.update(policy_forward_kwargs(args, batch, model))
         output_tensor = model(**forward_kwargs)
+
+        if use_policy_score_extractor:
+
+            def collect_policy_scores(output, non_loss_data=True):
+                return torch.empty(0, device=output.device), get_policy_scores(args, batch, output)
+
+            return output_tensor, collect_policy_scores
 
         output_kwargs = {
             "args": args,
@@ -643,6 +656,7 @@ def train_one_step(
 
             if batch["multimodal_train_inputs"] is not None:
                 forward_kwargs.update(batch["multimodal_train_inputs"])
+            forward_kwargs.update(policy_forward_kwargs(args, batch, model))
 
             if args.enable_mtp_training:
                 forward_kwargs["mtp_kwargs"] = {"mtp_labels": batch["tokens"]}

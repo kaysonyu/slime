@@ -376,7 +376,8 @@ def test_synchronous_rollout_stores_during_generation_and_preserves_legacy_hook(
     args.rollout_all_samples_process_path = "test.all_samples" if all_samples_hook else None
     saved = []
     hook_calls = []
-    state = SimpleNamespace(remaining_batch_size=0, pendings=set(), reset=lambda: None)
+    state = SimpleNamespace(remaining_batch_size=0, pendings=set(), completed=asyncio.Queue(), reset=lambda: None)
+    state.next_completed = sr.GenerateState.next_completed.__get__(state)
 
     async def exercise():
         second = asyncio.Event()
@@ -390,7 +391,10 @@ def test_synchronous_rollout_stores_during_generation_and_preserves_legacy_hook(
 
         def submit(groups):
             state.remaining_batch_size += len(groups)
-            state.pendings.update(asyncio.create_task(generate(index)) for index in (2, 1))
+            for index in (2, 1):
+                task = asyncio.create_task(generate(index))
+                state.pendings.add(task)
+                task.add_done_callback(state.completed.put_nowait)
 
         def pack(group, *a, **kwargs):
             ref = pack_rollout_group(group, *a, **kwargs)

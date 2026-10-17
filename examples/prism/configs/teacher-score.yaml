@@ -1,0 +1,11 @@
+# Standalone teacher server: python -m sglang_omni.cli serve --config <this file>.
+# Bind its URL in teacher-endpoints.yaml after starting the service.
+config_cls: MossTTSPrismScorePipelineConfig
+model_path: /absolute/teacher-hf
+stages:
+  tts_engine:
+    engine:
+      cuda_graph_backend_prefill: disabled
+      enable_weights_cpu_backup: true
+    factory:
+      score_chunk_size: 1024

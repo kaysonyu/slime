@@ -1,0 +1,14 @@
+# Shared by GRPO, MoPD and MixRL. Replica count and GPU allocation belong to the run script.
+# Slime passes --hf-checkpoint as the final model path when launching the student.
+config_cls: MossTTSPrismPipelineConfig
+model_path: /absolute/student-hf
+codec_model_path: /absolute/codec
+enable_rl: true
+stages:
+  tts_engine:
+    engine:
+      # The default colocated training recipe uses eager prefill.
+      cuda_graph_backend_prefill: disabled
+      max_running_requests: 32
+      max_total_tokens: 65536
+      cuda_graph_max_bs: 32

@@ -14,7 +14,7 @@ from filelock import FileLock
 NUM_GPUS = 0
 
 
-def load_init(cache_dir, build_tokenizer):
+def load_init(cache_dir, build_tokenizer, numpy_version="2.3.5"):
     path = Path(__file__).resolve().parents[1] / "slime/backends/megatron_utils/initialize.py"
     function = next(
         node for node in ast.parse(path.read_text()).body if isinstance(node, ast.FunctionDef) and node.name == "init"
@@ -25,7 +25,7 @@ def load_init(cache_dir, build_tokenizer):
         "_set_random_seed": lambda *args: None,
         "_build_tokenizer": build_tokenizer,
         "init_num_microbatches_calculator": lambda *args: None,
-        "np": types.SimpleNamespace(__version__="1.26.4"),
+        "np": types.SimpleNamespace(__version__=numpy_version),
         "nullcontext": nullcontext,
         "Path": Path,
         "FileLock": FileLock,
@@ -54,6 +54,15 @@ def args(tokenizer_type="HuggingFaceTokenizer"):
         deterministic_mode=False,
         tp_comm_overlap=False,
     )
+
+
+@pytest.mark.parametrize("numpy_version", ["1.26.4", "2.3.5"])
+def test_initialization_builds_tokenizer_with_numpy_one_or_two(tmp_path, numpy_version):
+    initialized = []
+    init = load_init(tmp_path / "modules", initialized.append, numpy_version)
+    config = args()
+    init(config)
+    assert initialized == [config]
 
 
 def test_ranks_cannot_import_partially_written_tokenizer_code(tmp_path):

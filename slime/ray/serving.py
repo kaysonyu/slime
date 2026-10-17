@@ -7,7 +7,6 @@ handles; health checks and recovery mutate only this owner's topology.
 
 import copy
 import logging
-import multiprocessing
 from dataclasses import dataclass
 
 import ray
@@ -54,19 +53,17 @@ class ServingCluster:
         self.attachments = 0
         self._health_monitors = []
         self._ci_fault_injection_pending = args.ci_test
-        existing_children = {process.pid for process in multiprocessing.active_children()}
         try:
             # Constructor failure must release partial topology too. A detached
             # actor can fail before any driver obtains a usable deployment.
             self.placements = create_placement_groups(args)
-            try:
-                self.servers, handles = (
-                    ({}, []) if args.debug_train_only else start_rollout_servers(args, self.placements["rollout"])
+            self.servers, handles = (
+                ({}, [])
+                if args.debug_train_only
+                else start_rollout_servers(
+                    args, self.placements["rollout"], on_router_started=self.router_processes.append
                 )
-            finally:
-                self.router_processes = [
-                    process for process in multiprocessing.active_children() if process.pid not in existing_children
-                ]
+            )
             ray.get(handles)
             self.lock = Lock.options(num_cpus=0, num_gpus=0).remote()
         except BaseException:
@@ -294,6 +291,8 @@ class ServingCluster:
     def dispose(self, timeout=None):
         from ray.util.placement_group import remove_placement_group
 
+        from slime.backends.sglang_utils.engine_group import shutdown_rollout_resources
+
         # Full teardown is for successful completion. Failure cleanup uses
         # detach_training instead, preserving the resources needed to resume.
         with Cleanup(getattr(self.args, "rollout_cleanup_timeout", 60) if timeout is None else timeout) as cleanup:
@@ -303,24 +302,7 @@ class ServingCluster:
             engines = [
                 engine for server in self.servers.values() for engine in server.all_engines if engine is not None
             ]
-            shutdowns = []
-            for engine in engines:
-                ref = cleanup.run("request engine shutdown", engine.shutdown.remote)
-                if ref is not None:
-                    shutdowns.append(ref)
-            if shutdowns:
-                cleanup.run(
-                    "wait for engines", ray.wait, shutdowns, num_returns=len(shutdowns), timeout=cleanup.remaining / 2
-                )
-            for engine in engines:
-                cleanup.run("terminate engine", ray.kill, engine, no_restart=True)
-            for router in self.router_processes:
-                if router.is_alive():
-                    cleanup.run("terminate router", router.terminate)
-                    cleanup.run("join router", router.join, timeout=min(10, cleanup.remaining / 2))
-                    if router.is_alive():
-                        cleanup.run("kill router", router.kill)
-                        cleanup.run("reap router", router.join, timeout=cleanup.remaining)
+            shutdown_rollout_resources(engines, self.router_processes, cleanup)
             if self.controller is not None:
                 cleanup.run(
                     "close queue controller",

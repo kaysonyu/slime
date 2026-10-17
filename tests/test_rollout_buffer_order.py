@@ -1,3 +1,5 @@
+import json
+import random
 from types import SimpleNamespace
 
 import pytest
@@ -82,6 +84,73 @@ def test_data_source_reads_and_checkpoints_without_global_dataset_flag(monkeypat
     restored = RolloutDataSource(args)
     restored.load(4)
     assert restored.get_samples(1)[0][0].index == 2
+
+
+@pytest.mark.parametrize("batch_size,candidates", [(256, 8), (2048, 1)])
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_small_dataset_fills_large_batches_and_restores_cursor(monkeypatch, tmp_path, batch_size, candidates, shuffle):
+    import slime.data.data_source as module
+
+    path = tmp_path / "prompts.jsonl"
+    path.write_text(
+        "".join(
+            json.dumps({"text": f"prompt-{index}", "metadata": {"tags": ["original"]}}) + "\n" for index in range(50)
+        )
+    )
+    monkeypatch.setattr(module, "load_tokenizer", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "load_processor", lambda *args, **kwargs: None)
+    args = SimpleNamespace(
+        prompt_data=str(path),
+        hf_checkpoint="unused",
+        dump_details=None,
+        rollout_max_prompt_len=None,
+        input_key="text",
+        multimodal_keys=None,
+        label_key=None,
+        metadata_key="metadata",
+        tool_key=None,
+        apply_chat_template=False,
+        apply_chat_template_kwargs=None,
+        rollout_seed=42,
+        rollout_shuffle=shuffle,
+        n_samples_per_prompt=candidates,
+    )
+    source = RolloutDataSource(args)
+    source.get_samples(17)
+    groups = source.get_samples(batch_size)
+    assert len(groups) == batch_size
+    assert sum(map(len, groups)) == 2048
+    expected = []
+    for epoch in range((17 + batch_size + 49) // 50):
+        order = list(range(50))
+        if shuffle:
+            random.Random(args.rollout_seed + epoch).shuffle(order)
+        expected.extend(f"prompt-{index}" for index in order)
+    assert [group[0].prompt for group in groups] == expected[17 : 17 + batch_size]
+    assert [group[0].group_index for group in groups] == list(range(17, 17 + batch_size))
+    assert [sample.index for group in groups for sample in group] == list(
+        range(17 * candidates, (17 + batch_size) * candidates)
+    )
+    groups[0][0].metadata["tags"].append("changed")
+    assert all(sample.metadata["tags"] == ["original"] for sample in source.dataset.samples)
+    assert all(sample.metadata["tags"] == ["original"] for sample in groups[0][1:])
+
+    state = source.state_dict()
+    expected_next = source.get_samples(75)
+    restored = RolloutDataSource(args)
+    restored.load_state_dict(state)
+    actual_next = restored.get_samples(75)
+    assert [[sample.to_dict() for sample in group] for group in actual_next] == [
+        [sample.to_dict() for sample in group] for group in expected_next
+    ]
+
+
+def test_empty_dataset_rejects_positive_sampling():
+    source = object.__new__(RolloutDataSource)
+    source.dataset = []
+    assert source.get_samples(0) == []
+    with pytest.raises(ValueError, match="empty dataset"):
+        source.get_samples(1)
 
 
 if __name__ == "__main__":

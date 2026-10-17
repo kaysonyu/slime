@@ -18,7 +18,9 @@ from slime.observability.rollout_data_utils import (
 )
 from slime.observability.rollout_metrics import log_eval_rollout_data, log_rollout_data
 from slime.rollout.base_types import RolloutFnTrainOutput, call_rollout_fn
-from slime.rollout.sample_hooks import set_current_rollout_id
+from slime.rollout.gc_utils import configure_rollout_gc
+from slime.rollout.sample_hooks import close_sample_hooks, set_current_rollout_id
+from slime.utils.async_utils import run
 from slime.utils.cleanup import Cleanup
 from slime.utils.http_utils import init_http_client
 from slime.utils.misc import load_function
@@ -43,6 +45,7 @@ class RolloutManager:
 
     def __init__(self, args, pg, *, restore_plan=None, serving=None, deployment=None):
         configure_logger()
+        configure_rollout_gc(getattr(args, "rollout_gc_threshold", None))
 
         from slime.ray.training_recovery import TrainingRecovery, TrainingResume, training_recovery_enabled
 
@@ -163,8 +166,11 @@ class RolloutManager:
         # The driver disposes serving separately, even when a custom source
         # fails here. Managers close only resources they own, never borrowed ones.
         with Cleanup(getattr(self.args, "rollout_cleanup_timeout", 60) if timeout is None else timeout) as cleanup:
+            if close := getattr(getattr(self, "generate_rollout", None), "close", None):
+                cleanup.run("close rollout execution", close)
             if close := getattr(self.data_source, "close", None):
                 cleanup.run("close rollout data source", close)
+            cleanup.run("close rollout sample and reward hooks", run, close_sample_hooks(self.args))
             if self.recovery is not None:
                 cleanup.run("release replay history", self.recovery.release_batches)
                 cleanup.run("remove recovery journal", self.recovery.journal.unlink, missing_ok=True)

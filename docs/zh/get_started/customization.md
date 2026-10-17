@@ -535,3 +535,70 @@ python tests/plugin_contracts/test_plugin_rollout_contracts.py \
 ```
 
 验证时只需将插件路径替换成你的模块路径，断言逻辑（函数签名、返回结构、副作用）保持不变即可。
+
+
+## 多动作策略接口
+
+`Sample.policy_actions` 可以描述一个或多个具名的离散动作流。每个流是 tensor 字典：
+`actions` 为 int64；`valid_mask` 和 `loss_mask` 为 bool。前者描述实际发生的动作，后者选择参与训练的动作，必须是前者的子集。`rollout_log_probs` / `teacher_log_probs` 为可选浮点分数。
+所有字段形状相同，第一维是完整模型序列的时间行；例如 stop 为 `[T]`，音频码为 `[T, Q]`。
+不同样本长度可以不同，但同一个模型声明的动作流名称、顺序和各流的尾部形状应一致。
+没有产生动作的流用全 false `valid_mask` 表示。输入通道不自动成为训练动作。调整 loss 时只修改 `loss_mask`，保留重放轨迹和 `valid_mask`。
+
+需要在 forward 中读取动作目标的模型，在模型类上声明 `accepts_policy_actions = True`。
+框架读取解除 Megatron 包装后的模型声明，向它传入 `policy_actions` 和 `policy_return_entropy`。
+未声明的模型保持原 forward 参数；配置自定义打分函数不会改变模型输入接口。
+已有接收动作目标的自定义模型需添加这个声明，Prism 已声明。
+模型 forward 的动作流只包含 `actions` 和 `valid_mask`，不包含 `loss_mask`、old/teacher 分数或 advantage。
+`ActionStream` 使用单个 TypedDict 描述字段，必填字段由数据入口校验。
+现有 `--custom-megatron-log-prob-function-path` 的函数签名仍是 `(args, batch, output)`。
+新返回格式为 `{"policy/<stream>/log_probs": [tensor_per_sample, ...]}`，可选
+`"policy/<stream>/entropy"`；分数保留各样本的时间行和动作头形状。
+普通 LLM 样本保持原有 token 训练路径，不会自动转换成 `text` 动作流。
+只有 rollout 或插件显式填写 `Sample.policy_actions` 时才启用动作流路径，并且必须配置
+`--custom-megatron-log-prob-function-path`。普通文本继续使用原有 token/logprob/loss 路径。
+
+显式动作流路径当前支持 GRPO、selected-action OPD 和 PPO clipping，TP=PP=CP=1、无 SP。
+普通 LLM 的算法和并行配置沿用原路径及其校验；新接口不自动扩展多动作模型的支持范围。
+`--policy-loss-weights` 接收 stream 到权重的 JSON 映射，默认每个流权重为 1。
+归约先对每条轨迹的有效动作分别求流内平均，再加权求和，最后按 global batch 平均。
+动作 loss 在 `loss.py` 的 `action_policy_loss_function()` 中直接对每个流的原始形状
+计算逐动作 PPO clipping，例如 RVQ 保持 `[T,Q]`、stop 保持 `[T]`；各流不拼接成一维。
+`valid_mask & loss_mask` 选择训练位置，`policy_sample_masks` 移除整条轨迹。
+损失按流权重归约，诊断按真实动作数归约，空流贡献零且不计入该流的有效样本数。
+
+公共多 domain OPD 使用 `--opd-teacher-config`。YAML 提供 `models`、`by_domain` 和可选的
+`default_teacher`；缺失 domain 只有显式默认教师才会被接收，未知 domain 会报错。
+默认文本评分函数调用绑定中的完整 `endpoint`，取学生 response 的 teacher log-prob。
+显式动作流通过配置的 `score_function` 实现
+`score(args, sample, *, binding, evaluation=False) -> Sample | None`，支持同步或异步。
+路由提前填入 `sample.policy_domain` 和 `sample.policy_teacher`，评分函数需填入
+`sample.teacher_log_probs` 或全部已声明动作流的 `teacher_log_probs`。
+评分不会占用任务 reward 字段，也不使用 learner 的数据后处理 hook。
+
+普通文本保留自定义 learner 数据后处理和非二值 response mask 修改 mask / advantage 的原契约。
+显式多动作轨迹的处理函数使用各流的 `loss_mask` 和 `advantages`；整条轨迹移除使用 `policy_sample_masks`。
+
+一个 rollout 拆成多个训练 Sample 的文本路径继续保留原有跨片段归约；当前显式动作流
+要求每个 rollout outcome 对应一个 Sample，避免把片段平均误当成轨迹平均。
+
+模型可以显式声明 `supports_standard_flops_estimate=False`，避免使用不适用的标准 LM FLOPs 公式；
+`supports_single_pass_policy_scoring=False` 保留独立的更新前打分。默认文本模型维持原有行为，
+这些执行能力不由日志模块判断模型名称或是否配置自定义 extractor。
+
+动作流打分函数直接接收含 `policy_actions` 的 batch，返回上述具名分数格式。
+Prism 使用 `slime_plugins.models.prism_policy.score_policy`。模型 forward 的 `policy_actions`
+仅包含各流的 `actions` 和 `valid_mask`；`multimodal_train_inputs` 仅保存模型条件输入。
+
+
+教师评分函数可声明 `create_client(args, configuration)` 工厂，框架向评分函数传入
+`client`。`TeacherRuntime` 由 rollout 执行状态持有，负责客户端 `flush()` / `close()`；
+客户端不得放入 args 或插件全局缓存。HTTP 评分可继承 `BatchedTeacherClient` 并实现
+`send_batch(route, requests)`，复用组批、并发、超时、重试和取消。直接调用 `score_teacher`
+时可以显式传入 runtime；不传则本次调用创建并关闭自己的 runtime。
+
+动作流训练的日志直接来自 `policy_actions`，例如 `rollout/policy/rvq/advantages`、
+`rollout/policy/rvq/teacher_log_probs`、`rollout/policy/stop/train_actions`。
+训练 debug dump 的 `train_log_probs` 位于对应动作流内，不填充虚假的帧级优势或 KL。
+数据结构校验位于 `slime/utils/policy.py`；算法与并行执行的支持范围由 Megatron 后端
+的 `policy_actions.py` 中的 `validate_action_policy_args()` 校验。

@@ -1,4 +1,5 @@
 import logging
+import os
 
 import wandb
 
@@ -14,14 +15,13 @@ def configure_logger(prefix: str = ""):
     if _LOGGER_CONFIGURED:
         return
 
-    _LOGGER_CONFIGURED = True
-
     logging.basicConfig(
-        level=logging.INFO,
+        level=os.environ.get("SLIME_LOG_LEVEL", "INFO").upper(),
         format=f"[%(asctime)s{prefix}] %(filename)s:%(lineno)d - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         force=True,
     )
+    _LOGGER_CONFIGURED = True
 
 
 def init_tracking(args, primary: bool = True, **kwargs):

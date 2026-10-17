@@ -36,6 +36,7 @@ from slime.utils.routed_experts import (
 )
 from slime.utils.routing_replay import RoutingReplay
 from slime.utils.types import RolloutBatch
+from slime.utils.weight_sync import initial_weight_version
 
 from ...utils.tensor_backper import TensorBackuper
 from .checkpoint import load_checkpoint
@@ -51,6 +52,7 @@ from .loss import (
     get_values,
 )
 from .model import forward_only, initialize_model_and_optimizer, save, train
+from .policy_actions import store_old_action_scores
 from .update_weight import create_weight_updater
 from .update_weight.common import named_params_and_buffers
 
@@ -68,11 +70,14 @@ class MegatronTrainRayActor(TrainRayActor):
         with_ref: bool = False,
         with_opd_teacher: bool = False,
     ) -> int | None:
+        self._is_offloaded = False
         if args.debug_rollout_only:
             self.args = args
             return 0
 
         if args.offload_train:
+            # Match Ray's LD_PRELOAD allocator after Megatron's import-time configuration.
+            torch_memory_saver.hook_mode = "preload"
             monkey_patch_torch_dist()
         super().init(args, role, with_ref, with_opd_teacher)
         if args.offload_train:
@@ -124,6 +129,15 @@ class MegatronTrainRayActor(TrainRayActor):
                 self.sleep()
             return start_rollout_id
 
+        native_model = self.model[0]
+        while hasattr(native_model, "module"):
+            native_model = native_model.module
+        standard_policy = not getattr(args, "custom_megatron_log_prob_function_path", None)
+        self.estimate_standard_flops = getattr(native_model, "supports_standard_flops_estimate", standard_policy)
+        self.reuse_current_policy_scores = getattr(
+            native_model, "supports_single_pass_policy_scoring", standard_policy
+        )
+
         self.weights_backuper = TensorBackuper(
             source_getter=lambda: named_params_and_buffers(self.args, self.model),
         )
@@ -143,12 +157,10 @@ class MegatronTrainRayActor(TrainRayActor):
             hf_vocab = getattr(self.hf_config, "vocab_size", None)
             self.args.vocab_size = hf_vocab if hf_vocab is not None else self.tokenizer.vocab_size
 
-        # Model-only resumes keep the serving version aligned with the next
-        # rollout. Actor recreation can supply the latest version explicitly.
-        if not hasattr(args, "update_weight_start_version"):
-            args.update_weight_start_version = (
-                args.start_rollout_id if args.start_rollout_id is not None else start_rollout_id
-            )
+        # Allocation can supply a placeholder version before the checkpoint is
+        # loaded. Preserve a newer live version while advancing that placeholder
+        # to the model's next rollout; fresh model initialization still starts at 0.
+        args.update_weight_start_version = initial_weight_version(args, start_rollout_id)
         self.weight_updater = create_weight_updater(
             self.args,
             self.model,
@@ -180,6 +192,8 @@ class MegatronTrainRayActor(TrainRayActor):
     @timer
     def sleep(self) -> None:
         assert self.args.offload_train
+        if self._is_offloaded:
+            return
 
         clear_memory(clear_host_memory=True)
         print_memory("before offload model")
@@ -194,12 +208,15 @@ class MegatronTrainRayActor(TrainRayActor):
 
         torch_memory_saver.pause()
         reset_cuda_stack_size()
+        self._is_offloaded = True
 
         print_memory("after offload model")
 
     @timer
     def wake_up(self) -> None:
         assert self.args.offload_train
+        if not self._is_offloaded:
+            return
         print_memory("before wake_up model")
 
         torch_memory_saver.resume()
@@ -217,6 +234,7 @@ class MegatronTrainRayActor(TrainRayActor):
             dist.barrier(device_ids=[accelerator.current_device()])
         if self.role == "actor":
             self._switch_model("actor")
+        self._is_offloaded = False
         print_memory("after wake_up model")
 
     def _get_rollout_data(self, rollout_data_ref: Box) -> RolloutBatch:
@@ -254,6 +272,18 @@ class MegatronTrainRayActor(TrainRayActor):
                     else None
                 )
                 for mm_dict in rollout_data["multimodal_train_inputs"]
+            ]
+
+        if rollout_data.get("policy_actions") is not None:
+            rollout_data["policy_actions"] = [
+                {
+                    name: {field: value.to(device=device, non_blocking=True) for field, value in stream.items()}
+                    for name, stream in streams.items()
+                }
+                for streams in rollout_data["policy_actions"]
+            ]
+            rollout_data["policy_sample_masks"] = [
+                value.to(device=device) for value in rollout_data["policy_sample_masks"]
             ]
 
         for key in ["rollout_log_probs", "teacher_log_probs"]:
@@ -386,7 +416,7 @@ class MegatronTrainRayActor(TrainRayActor):
         use_rollout_top_p_replay: bool = True,
     ) -> dict[str, list[torch.Tensor]]:
         with timer(f"{store_prefix}log_probs"):
-            return forward_only(
+            scores = forward_only(
                 get_log_probs_and_entropy,
                 self.args,
                 self.model,
@@ -394,9 +424,18 @@ class MegatronTrainRayActor(TrainRayActor):
                 num_microbatches,
                 store_prefix=store_prefix,
                 use_rollout_top_p_replay=use_rollout_top_p_replay,
+                use_policy_score_extractor=bool(data_iterator[0].rollout_data.get("policy_actions")),
             )
+            if data_iterator[0].rollout_data.get("policy_actions") and mpu.is_pipeline_last_stage():
+                extracted = {
+                    key.removeprefix(store_prefix): scores.pop(key)
+                    for key in tuple(scores)
+                    if key.startswith(f"{store_prefix}policy/")
+                }
+                store_old_action_scores(data_iterator[0].rollout_data, extracted, store_prefix.rstrip("_") or "old")
+            return scores
 
-    def train(self, rollout_id: int, rollout_data_ref: Box, external_data=None):
+    def train(self, rollout_id: int, rollout_data_ref: Box, external_data=None, *, offload_after_train: bool = True):
         if self.args.debug_rollout_only:
             return None
 
@@ -414,7 +453,8 @@ class MegatronTrainRayActor(TrainRayActor):
 
         if self.args.offload_train:
             del rollout_data
-            self.sleep()
+            if offload_after_train:
+                self.sleep()
 
         return result
 
@@ -485,7 +525,8 @@ class MegatronTrainRayActor(TrainRayActor):
 
                 self._switch_model("actor")
                 can_reuse_log_probs_in_loss = (
-                    len(num_microbatches) == 1
+                    self.reuse_current_policy_scores
+                    and len(num_microbatches) == 1
                     and self.args.loss_type == "policy_loss"
                     and self.args.kl_coef == 0
                     and not self.args.use_rollout_logprobs
@@ -495,6 +536,7 @@ class MegatronTrainRayActor(TrainRayActor):
                     and (not self.args.use_routing_replay or self.args.use_rollout_routing_replay)
                     and self.args.advantage_estimator != "gspo"
                 )
+                rollout_data["reuse_current_policy_scores"] = can_reuse_log_probs_in_loss
                 if (
                     not self.args.use_rollout_logprobs or self.args.get_mismatch_metrics
                 ) and not can_reuse_log_probs_in_loss:
@@ -568,7 +610,14 @@ class MegatronTrainRayActor(TrainRayActor):
                 # local sample. Key it by this rank's `partition` to land in local
                 # sample order; skip otherwise (nothing to place).
                 if captured:
-                    rollout_data["log_probs"] = [captured[pos] for pos in rollout_data["partition"]]
+                    if rollout_data.get("policy_actions"):
+                        for streams, pos in zip(
+                            rollout_data["policy_actions"], rollout_data["partition"], strict=True
+                        ):
+                            for name, stream in streams.items():
+                                stream["train_log_probs"] = captured[pos][name]
+                    else:
+                        rollout_data["log_probs"] = [captured[pos] for pos in rollout_data["partition"]]
 
             self.prof.step(rollout_id=rollout_id)
 
@@ -595,6 +644,7 @@ class MegatronTrainRayActor(TrainRayActor):
             rollout_id,
             self.args,
             extra_metrics=self.weight_updater.pop_metrics(),
+            estimate_flops=self.estimate_standard_flops,
         )
 
     @timer
@@ -604,7 +654,10 @@ class MegatronTrainRayActor(TrainRayActor):
 
         # torch dist may trigger nccl communication during saving.
         if self.args.offload_train:
-            self.wake_up()
+            if self._is_offloaded:
+                self.wake_up()
+            else:
+                clear_memory()
 
         if self.args.async_save:
             from megatron.training.async_utils import maybe_finalize_async_save
@@ -676,6 +729,12 @@ class MegatronTrainRayActor(TrainRayActor):
             print_memory("before update_weights")
             self.weight_updater.update_weights()
             print_memory("after update_weights")
+        if dist.get_rank() == 0:
+            logger.info(
+                "Published policy version=%s to %d rollout replicas",
+                self.weight_updater.weight_version,
+                len(rollout_engines),
+            )
 
         if reconnect_rollout_engines:
             self.sleep()

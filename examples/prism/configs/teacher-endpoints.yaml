@@ -1,0 +1,10 @@
+# Bind scoring teacher endpoints to dataset domains.
+# The teacher model and scoring engine are configured separately in teacher-score.yaml.
+models:
+  prism_v04:
+    endpoint: https://replace-prism-teacher.invalid
+    auth_token_env: INF_API_KEY
+by_domain:
+  chinese: prism_v04
+  english: prism_v04
+score_function: slime_plugins.prism.teacher.score_teacher
