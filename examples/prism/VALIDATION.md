@@ -1,5 +1,75 @@
 # Prism 训练验收与性能记录
 
+## Prism 4B v0.0.0(release iter_0095000)32 H200 MOPD / GRPO 计时与 ASR 副本对照(2026-10-18)
+
+学生为 mossLite release 线 Prism 4B v0.0.0 第 95000 步(native DCP:
+`/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/yangxiaogui/mossLite/RUNs/release/prism_release_4B_v0.0.0/checkpoints/iter_0095000`,tracker=95000;manifest schema 2 / identity schema 3)。HF/Omni 制品由官方转换器新代码导出(native→safetensors,9 分片 8.11GB BF16,434 张量,H2560/L36/头32组8/FFN9728,RVQ24,loop 4 组 26-重3+3 组 4 重),但 runtime assets 固定用 converter@17b2374(与 1.7B v0.4.0 制品逐 SHA 一致:
+modeling=96b7ae0b…, processor=96eb72c4…, prompt_protocol=14e8fd32…),部署在
+`artifacts/prism4b-v000/hf-iter-0095000`。配置与 1.7B v0.4.0 32 卡生产计时同构:4 节点×8 H200、
+DP32/TP=PP=CP=1、resident colocate(`--no-offload-train --no-offload-rollout`)、batch 2048、
+max_frames 1024、训练序列 20480、生成并发 16/副本、Omni KV 65536 tokens、`--rollout-data-transport object-store`、
+`--use-dynamic-batch-size --max-tokens-per-gpu 20480 --balance-data --balance-by-flops`、
+`--rollout-execution-workers 8 --rollout-gc-threshold 70000 --rollout-tensor-buffer --resident-cleanup-interval 16`、
+256 MiB 权重桶、种子 6211、同一 v2-fourteacher 60 万 prompt 混合;每组 24 次优化器更新,
+不运行评估,不保存中间 checkpoint(save_interval=100000),计时口径为逐 update 核心循环
+(generate+train+权重发布+cleanup),剔除前 2 轮预热,剔除末轮一次性 checkpoint(约 4.8-5.0s)。
+Slime 源码 `f549efa2828bd663d6e5b12a941105de3004f156`(本分支基址,代码与 pilot r2 相同),
+Megatron `3f49de20`,Omni `c2f8c453`,镜像 `slime-ttsrl:editable-v1`。MoPD 组冻结教师为四个
+v0.0.0/iter_0060000 领域服务(instruction/asmr/dialect/sing,各 1 副本);GRPO 组奖励为冻结
+Qwen3-ASR 的 wer(fingerprint 8d55fe2a…,`slime-prism-profile-asr-20261012-1935`)。
+
+| 组 | 评分/奖励 | 完成更新 | 核心秒/步(均值) | 中位 | samples/s | node0 GPU 均载 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| MoPD | 四领域教师 ×1 | 24/24 | 15.87 | 15.52 | 129.0 | 27.0% |
+| GRPO 复现一 | ASR ×4 | 24/24 | 25.02 | 25.75 | 81.8 | 25.5% |
+| GRPO 复现二 | ASR ×4 | 24/24 | 25.34 | 25.36 | 80.8 | 36.8% |
+| GRPO | ASR ×1 | 24/24 | 44.77 | 44.80 | 45.8 | — |
+
+阶段均值(秒,预热已剔):
+
+| 阶段 | MoPD | GRPO ASR×4(复现一/二) | GRPO ASR×1 |
+| --- | ---: | ---: | ---: |
+| generate(生成+评分/奖励) | 12.49 | 21.73 / 22.07 | 41.48 |
+| async_train(learner) | 2.42 | 2.25 / 2.26 | 2.26 |
+| update_weights(发布) | 0.92 | 1.00 / 0.96 | 0.99 |
+
+对照 1.7B v0.4.0 同规格记录:scale-profile(2026-10-12,生产档)GRPO 68.79 / MoPD 45.74 s/step;
+优化后(2026-10-13)GRPO 16.42 / MoPD 13.64 s/step;IM-MOPD pilot r2(2026-10-15,当前代码)MoPD 核心 14.39 s/step。
+结论:换 4B@95000 后原 32 卡配置可直接运行,但**两算法不再"差不多",差距拉开**——MoPD 13.64→15.87(+16%),
+GRPO 16.42→25.0~25.3(+53%),GRPO/MoPD 由约 1.20× 扩到约 1.58×。learner 时间两算法几乎相等且都约为
+1.7B 的 1.8×(2.25-2.42s vs 约 1.3s);差距全部来自生成/评分段:GRPO 每步生成 2048 条轨迹(256 prompts×8),
+MoPD 仅 2048×1;4B 解码吞吐低于 1.7B 而 RVQ 帧结构不变,生成段 MoPD +7%(12.49 vs 11.7)、GRPO 接近翻倍。
+四个 run 的 grad_norm(GRPO 均值约 0.12)与奖励抽样均正常,每步样本/发布版本和权重更新覆盖完好。
+
+ASR 副本对照(4B GRPO):1 副本时奖励段成为硬瓶颈——Qwen3-ASR 单副本实测约 167 样本/s,
+每步 2048 条 WER 需要 12.3 秒以上的串行下界,叠加排队后 generate 段 41.48s(×4 副本 21.7-22.1s),
+整步 44.77s 对比 25.0s(-43%)。与 reward-services 报告一致:4B GRPO 生产配置 ASR 建议 ≥2 副本,
+保持历史可比则用 4 副本。
+
+本次 RCA 与过程记录(三节,均不影响落盘计时数据的有效性):
+① 首版 4B HF 制品用最新转换器 runtime(renderer v7)导出,`prompt_protocol_sha256` 与冻结教师
+记录的 v6 身份不符,首个教师在评分请求处触发 `attach_teacher_scores` 拒绝(teacher.py:307,
+"incompatible replay identity");以 17b2374 版 runtime 重出制品修复,rev7 版留存
+`artifacts/prism4b-v000/hf-iter-0095000-rev7runtime/`。4B pretrain 数据侧为 renderer v7,
+本验收 rollout runtime 用 v6 与 1.7B 基线/教师同构;后续以质量为目标的 4B RL 需另行对齐 rev7
+runtime 与教师链(仅计时不受影响)。
+② campaign 式多 case 串行在 case 边界 Ray 重组失败一次(rank0 900s 超时"did not acquire every
+allocated GPU";rank>0 早期退出但其平台侧日志缺失);改用逐 case 直跑 `slime_plugins/prism/cluster.py`
+后稳定(pilot r2 五连跑与本次 MoPD/三组 GRPO 均靠同入口完成)。
+③ 一次平台记录在案的 Job 命令指向了内容过时/非常规出现的 campaign 文件(实际读取了含旧输出目录的
+manifest),另一次恰好撞上 ASR 网关 503 瞬时窗口启动失败;前者归档在实验根 `platform/ghosts-1011/`,
+后者属服务端点瞬间缺副本所致。两次幽灵/413 过程均未产生计时数据。
+
+计时有效性边界:本验收只测时间线,不做质量评测;两次 GRPO ASR×4 复现在共享服务上存在同时段并发
+(合计需求峰值约 164 样本/s,低于该部署 4 副本实测约 283 样本/s 容量),与独占期数值一致。
+平台 Job status 查询间歇返回 UNKNOWN,一律以 runs/ 下 result.json 与 driver-phases.jsonl 为准。
+
+完整实验根:`/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism4b-v000-mopd-grpo-20261018`
+(configs/ 全部 manifest、analysis/timing-summary.json、scripts/ 提交与分析脚本、platform/ 过程记录;
+mobd 组 runs/mopd4b-002,GRPO×4 runs/grpo4b-asr4-002 与 -003,GRPO×1 runs/grpo4b-asr1-002)。
+平台 Job 条目保留:prism4b-mopd-grpo-1018(MoPD 成功的那次)、prism4b-grpo-asr4-1018、
+prism4b-grpo-asrx4-1018-r2、prism4b-grpo-asr1-1018-r2 均 SUCCEEDED;失败与中途清理的条目未删除。
+
 ## 兼容层清理与 2 卡回归（2026-10-14 UTC）
 
 删除三个 examples.prism 运行时转发模块及旧 reward 归档包装器，归档统一使用

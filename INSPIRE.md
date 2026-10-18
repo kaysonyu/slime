@@ -1,5 +1,13 @@
 # Prism RL 资产
 
+Prism 4B v0.0.0(release iter_0095000)32 H200 MOPD/GRPO 计时验收的固定实验根目录为
+`/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism4b-v000-mopd-grpo-20261018`。
+学生 native DCP 为 mossLite release 线 `prism_release_4B_v0.0.0/checkpoints/iter_0095000`;
+HF/Omni 制品为 `/inspire/ssd/project/cq-scientific-cooperation-zone/public/kyu/src/vox/artifacts/prism4b-v000/hf-iter-0095000`(runtime 与 1.7B v0.4.0 制品同 SHA,转换命令与日志在 `artifacts/prism4b-v000/`;rev7 runtime 版本另存 `hf-iter-0095000-rev7runtime/`)。
+32 H200、DP32/TP1、batch 2048、每组 24 次更新的 MoPD/GRPO(ASR×4 双重复现与 ASR×1)计时结果、
+失败 RCA 与口径边界见 `examples/prism/VALIDATION.md` 2026-10-18 节。MoPD 组四个领域冻结教师
+与 GRPO 奖励 ASR 的平台 Serving 条目均保留,实验结束后均已恢复停止。
+
 IM-MOPD 独立实验的固定产物目录为
 `/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism-immopd-20261015-044554`，
 适用账号 `kayson`、工作空间 `CQ-科研驾驶舱`、项目 `多模态自进化科学模型`。
