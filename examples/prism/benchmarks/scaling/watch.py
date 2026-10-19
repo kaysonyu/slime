@@ -5,6 +5,7 @@ No language-model polling is involved. Only the named campaign ASR is changed.
 
 import argparse
 import json
+import shutil
 import subprocess
 import time
 import urllib.request
@@ -46,6 +47,67 @@ def smoke(manifest):
     return {"info": info, "score": result, "time": time.time()}
 
 
+def prepare_case_recipe(run):
+    """Validate save settings before releasing the immutable launch barrier.
+
+    Also repairs recipes emitted by the original, already-running campaign
+    driver: save=None alone does not disable its final periodic save action.
+    Never rewrite a recipe after the training processes have been admitted.
+    """
+    if (run / "services-ready.json").exists():
+        return
+    path = run / "recipe.json"
+    recipe = json.loads(path.read_text())
+    if recipe.get("save") is None and recipe.get("save_interval", 10000) is not None:
+        previous = dict(recipe)
+        recipe["save_interval"] = None
+        atomic_json(run / "recipe-before-save-fix.json", previous)
+        atomic_json(path, recipe)
+        atomic_json(
+            run / "recipe-save-fix.json",
+            {
+                "time": time.time(),
+                "change": "Disable periodic and final checkpoint when save is null",
+                "before_training_admission": True,
+            },
+        )
+
+
+def snapshot_service_telemetry(root, manifest, next_case):
+    """Keep completed-case ASR evidence before scale-up reuses pod log paths."""
+    names = [case["name"] for case in manifest["cases"]]
+    index = names.index(next_case)
+    if index == 0:
+        return
+    previous = names[index - 1]
+    output = root / "services/history" / previous
+    if (output / "snapshot.json").exists():
+        return
+    if not (root / "runs" / previous / "summary.json").exists():
+        raise RuntimeError(f"Cannot snapshot unfinished case: {previous}")
+    copied = []
+    for pod in (root / "services/asr").iterdir():
+        if not pod.is_dir():
+            continue
+        for name in ("gpu.csv", "service.log", "launch.json"):
+            source = pod / name
+            if source.is_file():
+                target = output / pod.name / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                copied.append(str(target.relative_to(output)))
+    atomic_json(
+        output / "snapshot.json",
+        {
+            "time": time.time(),
+            "completed_case": previous,
+            "before_case": next_case,
+            "files": copied,
+            "method": "Completed case prefix; filter samples by its steady-state wall-clock interval.",
+        },
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
@@ -85,6 +147,8 @@ def main():
                 if request_file.exists():
                     request = json.loads(request_file.read_text())
                     if request["case"] != acknowledged:
+                        prepare_case_recipe(root / "runs" / request["case"])
+                        snapshot_service_telemetry(root, manifest, request["case"])
                         replicas = request["replicas"]
                         if replicas not in {4, 8, 16}:
                             raise ValueError("ASR request exceeds approved matrix")

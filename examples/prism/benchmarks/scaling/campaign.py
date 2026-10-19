@@ -236,6 +236,7 @@ def main():
                     run / "recipe.json",
                     {
                         "save": str(run / "checkpoint") if case.get("choose_best") or case.get("resume") else None,
+                        "save_interval": 10000 if case.get("choose_best") or case.get("resume") else None,
                         "prism_artifact_dir": str(run / "experiment"),
                         "omni_audio_dir": str(run / "audio"),
                         "rollout_sample_observer_path": ["slime_plugins.prism.artifacts.observe"],

@@ -12,8 +12,43 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples/prism/ben
 from analyze import analyze, percentile, summarize_case
 from campaign import resolve_case
 from prepare import convert_prompt, write_json
+from watch import prepare_case_recipe, snapshot_service_telemetry
 from slime_plugins import tts_reward
 from slime_plugins.omni_rollout import _prompt
+from slime.utils.misc import should_run_periodic_action
+
+
+def test_no_save_recipe_disables_final_checkpoint_before_admission(tmp_path):
+    write_json(tmp_path / "recipe.json", {"save": None, "other": 42})
+    prepare_case_recipe(tmp_path)
+    recipe = json.loads((tmp_path / "recipe.json").read_text())
+    assert recipe == {"save": None, "save_interval": None, "other": 42}
+    assert not should_run_periodic_action(24, recipe["save_interval"], num_rollout=25)
+    assert (tmp_path / "recipe-before-save-fix.json").exists()
+
+
+def test_checkpoint_confirmation_and_admitted_recipes_are_not_rewritten(tmp_path):
+    recipe = {"save": str(tmp_path / "checkpoint"), "save_interval": 10000}
+    write_json(tmp_path / "recipe.json", recipe)
+    prepare_case_recipe(tmp_path)
+    assert json.loads((tmp_path / "recipe.json").read_text()) == recipe
+    assert should_run_periodic_action(99, recipe["save_interval"], num_rollout=100)
+    write_json(tmp_path / "services-ready.json", {})
+    write_json(tmp_path / "recipe.json", {"save": None})
+    prepare_case_recipe(tmp_path)
+    assert json.loads((tmp_path / "recipe.json").read_text()) == {"save": None}
+
+
+def test_asr_snapshot_survives_replica_log_reuse(tmp_path):
+    manifest = {"cases": [{"name": "first"}, {"name": "second"}]}
+    write_json(tmp_path / "runs/first/summary.json", {"valid": True})
+    pod = tmp_path / "services/asr/pod-0"
+    write_json(pod / "launch.json", {"started": 1})
+    snapshot_service_telemetry(tmp_path, manifest, "second")
+    write_json(pod / "launch.json", {"started": 2})
+    snapshot_service_telemetry(tmp_path, manifest, "second")
+    saved = tmp_path / "services/history/first/pod-0/launch.json"
+    assert json.loads(saved.read_text())["started"] == 1
 
 
 def test_converted_prompts_pass_production_parser_with_and_without_language():
