@@ -89,6 +89,36 @@ def test_extension_environment_rejects_unrelated_or_ambiguous_parent(tmp_path, m
         router_extension.inherited_job_environment(tmp_path, 0)
 
 
+def test_retry_plan_preserves_evidence_and_retries_only_failed_leaves(tmp_path):
+    cases = [
+        {"name": "r1"},
+        {"name": "r4"},
+        {"name": "r1-retry", "retry_of": "r1"},
+        {"name": "r4-retry", "retry_of": "r4", "router_source_commit": "unchanged"},
+        {"name": "pending"},
+    ]
+    for name, valid in (("r1", False), ("r4", False), ("r1-retry", True), ("r4-retry", False)):
+        write_json(tmp_path / "runs" / name / "summary.json", {"valid": valid})
+    plan, retries = router_extension.retry_plan(tmp_path, cases)
+    assert [case["name"] for case in plan] == ["r1", "r4", "r1-retry", "r4-retry", "r4-retry-retry", "pending"]
+    assert retries == [{"name": "r4-retry-retry", "retry_of": "r4-retry", "router_source_commit": "unchanged"}]
+    assert router_extension.retry_plan(tmp_path, plan)[1] == []
+    write_json(tmp_path / "runs/r4-retry-retry/evidence.json", {})
+    with pytest.raises(FileExistsError):
+        router_extension.retry_plan(tmp_path, cases)
+
+
+def test_manual_admission_hold_is_scoped_and_expires(tmp_path, monkeypatch):
+    import watch
+
+    write_json(tmp_path / "platform/admission-hold.json", {"cases": ["pending"], "expires": 200})
+    monkeypatch.setattr(watch.time, "time", lambda: 100)
+    assert admission_held(tmp_path, "pending")
+    assert not admission_held(tmp_path, "running")
+    monkeypatch.setattr(watch.time, "time", lambda: 200)
+    assert not admission_held(tmp_path, "pending")
+
+
 def test_no_save_recipe_disables_final_checkpoint_before_admission(tmp_path):
     write_json(tmp_path / "recipe.json", {"save": None, "other": 42})
     prepare_case_recipe(tmp_path)

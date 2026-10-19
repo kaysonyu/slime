@@ -31,6 +31,21 @@
       "attribution_limit": "The original GPU exception records the status and URL, not the response body. The same-scale CPU reproducer identifies a matching failure mechanism; repaired GPU execution is still required for acceptance.",
       "repair": "Size bounded per-data-plane admin admission to max(128, 2 * worker_count); preserve request-body limits, separate forwarding and heartbeat pools, and the all-data-plane snapshot acknowledgement fence. No retries or sleeps hide a publication race.",
       "retry": "64-b4096-a8-w32-r4rr-retry"
+    },
+    {
+      "case": "64-b4096-a8-w32-r4rr-retry",
+      "updates": 8,
+      "failure": "Generation rollout 8: native router reported upstream ReadError for 10.254.9.137:15115 and returned HTTP 502; training stopped without completing the 25-update case.",
+      "root_cause_status": "Unresolved below the HTTP transport boundary. No pre-error actor disconnect in the affected node's Ray logs, no ERROR/Traceback in its worker stderr logs, and cgroup oom/oom_kill counters both zero at capture. These observations do not prove the absence of a transient network or frontend fault.",
+      "not_the_previous_failure": "Eight real updates and successful policy publications distinguish this from the prior initialization-time admin-forward 503.",
+      "partial_mean_seconds": 24.1134178786,
+      "partial_steady_windows": 5,
+      "partial_result_use": "Diagnostic only; invalid for accepted throughput, scaling or stability claims.",
+      "profiling": "The read-only profiler never attached: the case failed before its final-rollout trigger.",
+      "evidence": "runs/64-b4096-a8-w32-r4rr-retry/failure-evidence/node-1/receipt.json and ray-logs.tar.gz",
+      "evidence_sha256": "c2caf996003e1139d845c713e268a92bf426e1aa4984b23ba7a64bb974e14030",
+      "next_action": "One independent repeat with the exact same pinned router/runtime/configuration after the already admitted eight-process run; preserve failed attempt and do not add generation retries to mask errors.",
+      "planned_retry": "64-b4096-a8-w32-r4rr-retry-retry"
     }
   ],
   "repair_revisions": {

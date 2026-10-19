@@ -117,6 +117,13 @@ def prepare_case_recipe(run):
 
 
 def admission_held(root, name):
+    # A scoped, expiring diagnostic hold pauses admission, not observation.
+    # Already admitted runs continue on their immutable recipes.
+    manual = root / "platform/admission-hold.json"
+    if manual.exists():
+        hold = json.loads(manual.read_text())
+        if name in hold["cases"] and time.time() < hold["expires"]:
+            return True
     extension = root / "platform/router-extension.json"
     if not extension.exists():
         return False

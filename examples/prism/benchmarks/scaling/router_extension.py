@@ -96,10 +96,30 @@ def preflight(root, rank, generation):
     )
 
 
+def retry_plan(root, cases):
+    """Retry only failed leaves; keep every previous attempt and pinned router."""
+    retried = {case.get("retry_of") for case in cases}
+    completed, pending, retries = [], [], []
+    for case in cases:
+        summary = root / "runs" / case["name"] / "summary.json"
+        if summary.exists():
+            completed.append(case)
+            result = json.loads(summary.read_text())
+            if not result["valid"] and case["name"] not in retried:
+                name = case["name"] + "-retry"
+                if (root / "runs" / name).exists() or any(item["name"] == name for item in cases):
+                    raise FileExistsError(f"Refuse overwriting retry {name}")
+                retries.append(dict(case, name=name, retry_of=case["name"]))
+        else:
+            pending.append(case)
+    return completed + retries + pending, retries
+
+
 def repair(root, checkout):
     config_path = root / "platform/router-extension.json"
     config = json.loads(config_path.read_text())
     assert_idle(root, config["cases"])
+    cases, retries = retry_plan(root, config["cases"])
     if subprocess.check_output(["git", "-C", str(checkout), "status", "--porcelain"], text=True).strip():
         raise RuntimeError("Commit the repair before pinning it")
     revision = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip()
@@ -109,20 +129,6 @@ def repair(root, checkout):
     subprocess.run(["git", "-C", str(checkout), "archive", "--format=tar", "-o", str(archive), revision], check=True)
     with tarfile.open(archive) as bundle:
         bundle.extractall(destination, filter="data")
-    completed, pending, retries = [], [], []
-    for case in config["cases"]:
-        summary = root / "runs" / case["name"] / "summary.json"
-        if summary.exists():
-            completed.append(case)
-            result = json.loads(summary.read_text())
-            if not result["valid"]:
-                name = case["name"] + "-retry"
-                if (root / "runs" / name).exists():
-                    raise FileExistsError(f"Refuse overwriting retry {name}")
-                retries.append(dict(case, name=name, retry_of=case["name"]))
-        else:
-            pending.append(case)
-    cases = completed + retries + pending
     manifest = json.loads((root / "manifest.json").read_text())
     old_names = {case["name"] for case in config["cases"]}
     index = next(i for i, case in enumerate(manifest["cases"]) if case["name"] in old_names)
