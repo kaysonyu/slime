@@ -4,6 +4,7 @@ No language-model polling is involved. Only the named campaign ASR is changed.
 """
 
 import argparse
+import hashlib
 import json
 import shutil
 import subprocess
@@ -71,6 +72,45 @@ def prepare_case_recipe(run):
                 "before_training_admission": True,
             },
         )
+    case_path = run / "case.json"
+    if case_path.exists():
+        case = json.loads(case_path.read_text())
+        selected = case.get("selected_from") or case.get("resume")
+        source_case = json.loads((run.parent / selected / "case.json").read_text()) if selected else case
+        if "router_python" in source_case:
+            adapter = Path(source_case["router_python"])
+            entry = adapter.parents[4] / "slime/backends/sglang_utils/omni_router.py"
+            if hashlib.sha256(entry.read_bytes()).hexdigest() != source_case["router_entry_sha256"]:
+                raise RuntimeError("Pinned router entry changed")
+            for key in (
+                "router_python",
+                "router_processes",
+                "router_policy",
+                "router_entry_sha256",
+                "router_source_commit",
+            ):
+                case[key] = source_case[key]
+            recipe.update(omni_python=case["router_python"], omni_router_policy=case["router_policy"])
+            atomic_json(path, recipe)
+            atomic_json(case_path, case)
+            atomic_json(
+                run / "router-variant-admission.json",
+                {
+                    "time": time.time(),
+                    "selected_from": selected,
+                    "router_processes": case["router_processes"],
+                    "router_source_commit": case["router_source_commit"],
+                    "before_training_admission": True,
+                },
+            )
+
+
+def admission_held(root, name):
+    extension = root / "platform/router-extension.json"
+    if not extension.exists():
+        return False
+    configuration = json.loads(extension.read_text())
+    return name == configuration["hold_case"] and not (root / "platform/router-extension/finished.json").exists()
 
 
 def snapshot_service_telemetry(root, manifest, next_case):
@@ -147,6 +187,10 @@ def main():
                 if request_file.exists():
                     request = json.loads(request_file.read_text())
                     if request["case"] != acknowledged:
+                        if admission_held(root, request["case"]):
+                            print(json.dumps({"time": time.time(), "admission_held": request["case"]}), flush=True)
+                            time.sleep(args.interval)
+                            continue
                         prepare_case_recipe(root / "runs" / request["case"])
                         snapshot_service_telemetry(root, manifest, request["case"])
                         replicas = request["replicas"]
@@ -170,7 +214,12 @@ def main():
                 cli("serving", "stop", service, "--workspace", workspace)
             print(
                 json.dumps(
-                    {"time": time.time(), "job": status, "serving": serving.get("status"), "acknowledged": acknowledged}
+                    {
+                        "time": time.time(),
+                        "job": status,
+                        "serving": serving.get("status"),
+                        "acknowledged": acknowledged,
+                    }
                 ),
                 flush=True,
             )

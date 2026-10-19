@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples/prism/benchmarks/scaling"))
 
@@ -14,7 +16,8 @@ from campaign import resolve_case
 from diagnose import gpu_profile
 from observe_processes import role
 from prepare import convert_prompt, write_json
-from watch import prepare_case_recipe, snapshot_service_telemetry
+import router_python
+from watch import admission_held, prepare_case_recipe, snapshot_service_telemetry
 from slime_plugins import tts_reward
 from slime_plugins.omni_rollout import _prompt
 from slime.utils.misc import should_run_periodic_action
@@ -39,6 +42,69 @@ def test_checkpoint_confirmation_and_admitted_recipes_are_not_rewritten(tmp_path
     write_json(tmp_path / "recipe.json", {"save": None})
     prepare_case_recipe(tmp_path)
     assert json.loads((tmp_path / "recipe.json").read_text()) == {"save": None}
+
+
+def test_extension_hold_releases_only_after_all_helpers_finished(tmp_path):
+    assert not admission_held(tmp_path, "baseline")
+    write_json(tmp_path / "platform/router-extension.json", {"hold_case": "baseline"})
+    assert admission_held(tmp_path, "baseline")
+    assert not admission_held(tmp_path, "supplemental")
+    write_json(tmp_path / "platform/router-extension/finished.json", {})
+    assert not admission_held(tmp_path, "baseline")
+
+
+@pytest.mark.parametrize("router", [True, False])
+def test_router_adapter_preserves_engine_arguments_and_pins_only_router(tmp_path, monkeypatch, router):
+    run = tmp_path / "runs/case"
+    source = tmp_path / "original"
+    write_json(tmp_path / "manifest.json", {"source": str(source)})
+    write_json(run / "case.json", {"router_processes": 4, "router_policy": "round_robin"})
+    monkeypatch.setenv("PRISM_SCALE_RUN", str(run))
+    arguments = (
+        [str(source / "slime/backends/sglang_utils/omni_router.py"), json.dumps([{"policy": "least_request"}, False])]
+        if router
+        else ["-m", "sglang_omni.cli", "serve", "--config", "same-config"]
+    )
+    monkeypatch.setattr(router_python.sys, "argv", ["adapter", *arguments])
+    calls = []
+    monkeypatch.setattr(router_python.os, "execv", lambda *args: calls.append(args))
+    router_python.main()
+    executable, command = calls[0]
+    assert executable == command[0] == "/opt/venvs/core/bin/python"
+    if router:
+        config, disabled = json.loads(command[2])
+        assert config["router_processes"] == 4
+        assert config["policy"] == "round_robin"
+        assert disabled is False
+    else:
+        assert command[1:] == arguments
+
+
+def test_confirmation_and_resume_inherit_selected_pinned_router(tmp_path):
+    import hashlib
+
+    source = tmp_path / "source"
+    adapter = source / "examples/prism/benchmarks/scaling/router_python.py"
+    entry = source / "slime/backends/sglang_utils/omni_router.py"
+    write_json(entry, {"router": "fixed"})
+    variant = dict(
+        router_python=str(adapter),
+        router_processes=4,
+        router_policy="round_robin",
+        router_entry_sha256=hashlib.sha256(entry.read_bytes()).hexdigest(),
+        router_source_commit="commit",
+    )
+    write_json(tmp_path / "runs/candidate/case.json", variant)
+    for name, link in (("confirm", {"selected_from": "candidate"}), ("resume", {"resume": "confirm"})):
+        run = tmp_path / "runs" / name
+        write_json(run / "case.json", link)
+        write_json(run / "recipe.json", {"save": "checkpoint", "save_interval": 10000})
+        prepare_case_recipe(run)
+        case = json.loads((run / "case.json").read_text())
+        assert case["router_processes"] == 4
+        recipe = json.loads((run / "recipe.json").read_text())
+        assert recipe["omni_python"] == str(adapter)
+        assert recipe["save"] == "checkpoint"
 
 
 def test_asr_snapshot_survives_replica_log_reuse(tmp_path):

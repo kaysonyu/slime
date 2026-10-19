@@ -52,6 +52,33 @@ def gpu_profile(paths, start, end):
     }
 
 
+def router_profile(path):
+    data = json.loads(path.read_text())
+    frames = data["shared"]["frames"]
+    leaves, inclusive = Counter(), Counter()
+    total = count = 0
+    for profile in data["profiles"]:
+        for stack, weight in zip(profile["samples"], profile["weights"], strict=True):
+            total += weight
+            count += 1
+            if stack:
+                leaves[stack[-1]] += weight
+            for frame in set(stack):
+                inclusive[frame] += weight
+
+    def top(counter):
+        return [dict(frames[index], fraction=weight / total) for index, weight in counter.most_common(30)]
+
+    return {
+        "samples": count,
+        "sampled_weight_seconds": total,
+        "top_leaf": top(leaves),
+        "top_inclusive": top(inclusive),
+        "caveat": "Fractions of successfully captured GIL-held samples, not wall-clock fractions; "
+        "nonblocking errors/partial stacks are possible. See py-spy.log and raw profile.",
+    }
+
+
 def diagnose(run):
     summary = json.loads((run / "summary.json").read_text())
     steady = [window for window in summary["windows"] if window["steady"]]
@@ -69,6 +96,18 @@ def diagnose(run):
         "learner_rollout_gpu": gpu_profile(run.glob("node-*/gpu.csv"), steady[0]["started"], steady[-1]["ended"]),
         "phase_fraction": {k: v / summary["step_seconds"] for k, v in summary["phase_seconds"].items()},
     }
+    profile = run / "router-profile/router.speedscope.json"
+    if profile.exists():
+        result["router_profile"] = router_profile(profile)
+    processes = defaultdict(list)
+    for sample in rows(root / "platform/head-processes.jsonl"):
+        if steady[0]["started"] <= sample["time"] < steady[-1]["ended"]:
+            for process in sample["processes"]:
+                if process["role"].startswith("omni_router") and "cpu_cores_used" in process:
+                    processes[(process["pid"], process["role"])].append(process["cpu_cores_used"])
+    result["router_cpu_cores"] = [
+        dict(pid=pid, role=role, **distribution(samples)) for (pid, role), samples in sorted(processes.items())
+    ]
     if (service_dir / "snapshot.json").exists():
         result["asr_gpu"] = gpu_profile(service_dir.glob("*/gpu.csv"), steady[0]["started"], steady[-1]["ended"])
         result["asr_snapshot"] = str(service_dir)

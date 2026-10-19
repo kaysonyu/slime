@@ -85,6 +85,18 @@ def test_disaggregated_omni_defaults(tmp_path):
     assert args.omni_config == str(tmp_path / "pipeline.yaml")
 
 
+@pytest.mark.parametrize("processes", [0, -1, 1.5, True])
+def test_invalid_router_process_count(tmp_path, processes):
+    with pytest.raises(ValueError, match="positive integer"):
+        validate_omni_args(_args(tmp_path, omni_router_processes=processes))
+
+
+def test_multiprocess_router_rejects_local_only_least_request(tmp_path):
+    with pytest.raises(ValueError, match="least_request"):
+        validate_omni_args(_args(tmp_path, omni_router_processes=4, omni_router_policy="least_request"))
+    validate_omni_args(_args(tmp_path, omni_router_processes=4, omni_router_policy="round_robin"))
+
+
 def test_cli_defers_gpu_topology_to_resolved_deployment(tmp_path):
     args = _args(tmp_path, rollout_num_gpus_per_engine=1)
     pipeline = Path(args.omni_config)

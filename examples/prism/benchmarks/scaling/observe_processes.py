@@ -17,7 +17,7 @@ def role(command, source):
     if not command:
         return None
     if str(source / "slime/backends/sglang_utils/omni_router.py") in command:
-        return "omni_router"
+        return "omni_router_control" if "--control-plane" in command else "omni_router"
     if str(source / "train.py") in command:
         return "training_driver"
     for name in ("GroupWorker", "RolloutManager", "ServingCluster", "OmniEngine", "MegatronTrainRayActor"):
@@ -62,8 +62,25 @@ def main():
                 instant, monotonic = time.time(), time.monotonic()
                 samples = []
                 current = {}
+                extension_path = root / "platform/router-extension.json"
+                extension = json.loads(extension_path.read_text()) if extension_path.exists() else None
                 for process in psutil.process_iter(["pid", "cmdline", "create_time"]):
                     kind = role(process.info["cmdline"], source)
+                    if kind is None and extension:
+                        kind = role(process.info["cmdline"], Path(extension["source"]))
+                    if kind is None and extension:
+                        command = process.info["cmdline"] or []
+                        for module, label in (("dp_runner", "omni_router_data"), ("cp_runner", "omni_router_control")):
+                            if f"sglang_omni_router.python.{module}" in command:
+                                try:
+                                    if (
+                                        process.environ()
+                                        .get("PRISM_SCALE_RUN", "")
+                                        .startswith(str(root / "runs") + "/")
+                                    ):
+                                        kind = label
+                                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                    pass
                     if kind is None:
                         continue
                     try:

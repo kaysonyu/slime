@@ -58,6 +58,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 "--omni-router-policy", choices=["round_robin", "least_request", "random"], default="round_robin"
             )
             parser.add_argument(
+                "--omni-router-processes",
+                type=int,
+                default=1,
+                help="Omni HTTP data-plane processes; >1 uses its native control/data-plane supervisor.",
+            )
+            parser.add_argument(
                 "--omni-admin-key", help="Optional shared admin key for Omni workers and their router."
             )
             parser.add_argument(
@@ -2016,6 +2022,11 @@ def validate_omni_args(args):
     if getattr(args, "rollout_backend", "sglang") != "sglang-omni":
         return
     args.omni_python = getattr(args, "omni_python", None) or sys.executable
+    processes = getattr(args, "omni_router_processes", 1)
+    if type(processes) is not int or processes < 1:
+        raise ValueError("--omni-router-processes must be a positive integer")
+    if processes > 1 and getattr(args, "omni_router_policy", "round_robin") == "least_request":
+        raise ValueError("Multiple Omni router processes require round_robin or random, not least_request")
     if getattr(args, "sglang_router_ip", None) is not None:
         raise ValueError("Omni owns its router; --sglang-router-ip is unsupported")
     for name in ("rollout_external",):
