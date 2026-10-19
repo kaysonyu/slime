@@ -88,6 +88,18 @@ def prepare_case_recipe(run):
                 if planned[key] != case[key]:
                     raise RuntimeError(f"Unexpected non-router launch-plan change: {key}")
             source_case = planned
+        if selected and manifest_path.exists():
+            diagnostic = json.loads(manifest_path.read_text()).get("router_diagnostic_override", {})
+            if (
+                source_case.get("router_processes", 1) > 1
+                and source_case.get("router_source_commit") in diagnostic.get("parent_commits", [])
+            ):
+                source_case = dict(source_case)
+                for key in ("router_python", "router_entry_sha256", "router_source_commit"):
+                    source_case[key] = diagnostic[key]
+                case["router_diagnostic_parent_commit"] = json.loads(
+                    (run.parent / selected / "case.json").read_text()
+                )["router_source_commit"]
         if "router_python" in source_case:
             adapter = Path(source_case["router_python"])
             entry = adapter.parents[4] / "slime/backends/sglang_utils/omni_router.py"

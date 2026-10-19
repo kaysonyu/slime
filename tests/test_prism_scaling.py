@@ -193,7 +193,8 @@ def test_router_adapter_preserves_engine_arguments_and_pins_only_router(tmp_path
         assert command[1:] == arguments
 
 
-def test_confirmation_and_resume_inherit_selected_pinned_router(tmp_path):
+@pytest.mark.parametrize("diagnostic", [False, True])
+def test_confirmation_and_resume_inherit_selected_pinned_router(tmp_path, diagnostic):
     import hashlib
 
     source = tmp_path / "source"
@@ -208,6 +209,18 @@ def test_confirmation_and_resume_inherit_selected_pinned_router(tmp_path):
         router_source_commit="commit",
     )
     write_json(tmp_path / "runs/candidate/case.json", variant)
+    expected_adapter, expected_commit = adapter, "commit"
+    if diagnostic:
+        entry = tmp_path / "diagnostic/slime/backends/sglang_utils/omni_router.py"
+        write_json(entry, {"router": "error-only diagnostics"})
+        expected_adapter = tmp_path / "diagnostic/examples/prism/benchmarks/scaling/router_python.py"
+        expected_commit = "diagnostic-commit"
+        write_json(tmp_path / "manifest.json", {"router_diagnostic_override": {
+            "parent_commits": ["commit"],
+            "router_python": str(expected_adapter),
+            "router_source_commit": expected_commit,
+            "router_entry_sha256": hashlib.sha256(entry.read_bytes()).hexdigest(),
+        }})
     for name, link in (("confirm", {"selected_from": "candidate"}), ("resume", {"resume": "confirm"})):
         run = tmp_path / "runs" / name
         write_json(run / "case.json", link)
@@ -216,8 +229,10 @@ def test_confirmation_and_resume_inherit_selected_pinned_router(tmp_path):
         case = json.loads((run / "case.json").read_text())
         assert case["router_processes"] == 4
         recipe = json.loads((run / "recipe.json").read_text())
-        assert recipe["omni_python"] == str(adapter)
+        assert recipe["omni_python"] == str(expected_adapter)
+        assert case["router_source_commit"] == expected_commit
         assert recipe["save"] == "checkpoint"
+    assert json.loads((tmp_path / "runs/candidate/case.json").read_text()) == variant
 
 
 def test_unadmitted_supplemental_case_uses_repaired_manifest_router(tmp_path):

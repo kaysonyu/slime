@@ -9,10 +9,63 @@ import logging
 import os
 import subprocess
 import sys
+import time
+import traceback
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
+
+
+def install_transport_error_diagnostics():
+    """Observe native DP transport failures without retrying or changing pools.
+
+    Install only in the standalone data-plane process, before clients exist.
+    Native proxy handlers otherwise retain only the outer exception class.
+    Never record headers, bodies, query strings or exception message text.
+    """
+    original_send = httpx.AsyncClient.send
+    if getattr(original_send, "_prism_transport_diagnostics", False):
+        return
+
+    async def send(client, request, *args, **kwargs):
+        try:
+            return await original_send(client, request, *args, **kwargs)
+        except httpx.TransportError as error:
+            chain, seen = [], set()
+            current = error
+            while current is not None and id(current) not in seen and len(chain) < 8:
+                seen.add(id(current))
+                chain.append(
+                    {
+                        "type": f"{type(current).__module__}.{type(current).__name__}",
+                        "errno": getattr(current, "errno", None),
+                        "frames": [
+                            {"file": frame.filename, "line": frame.lineno, "function": frame.name}
+                            for frame in traceback.extract_tb(current.__traceback__)
+                        ],
+                    }
+                )
+                current = current.__cause__ or current.__context__
+            logging.getLogger(__name__).error(
+                "omni_router_transport_failure %s",
+                json.dumps(
+                    {
+                        "time": time.time(),
+                        "pid": os.getpid(),
+                        "method": request.method,
+                        "host": request.url.host,
+                        "port": request.url.port,
+                        "path": request.url.path,
+                        "chain": chain,
+                        "retried": False,
+                    }
+                ),
+            )
+            raise
+
+    send._prism_transport_diagnostics = True
+    httpx.AsyncClient.send = send
 
 
 class WorkerTransport(httpx.AsyncBaseTransport):
@@ -176,6 +229,7 @@ def run_data_plane():
     from sglang_omni_router.python import data_plane, dp_runner
     from sglang_omni_router.python.app_factory import load_config_from_env
 
+    install_transport_error_diagnostics()
     config = load_config_from_env()
     # Slime enables/disables every replica concurrently. Shared-socket accept
     # is not guaranteed fair: a DP may receive an entire publication burst.

@@ -171,7 +171,7 @@ def repair(root, checkout, *, add_matched_controls=False):
     print(json.dumps({"helper_commit": revision, "retries": [case["name"] for case in retries]}))
 
 
-def pin_router(root, checkout, names):
+def pin_router(root, checkout, names, *, diagnostics_only=False):
     """Pin a tested router-only repair for cases not yet admitted."""
     manifest = json.loads((root / "manifest.json").read_text())
     config = json.loads((root / "platform/router-extension.json").read_text())
@@ -200,6 +200,12 @@ def pin_router(root, checkout, names):
         "router_entry_sha256": hashlib.sha256(entry.read_bytes()).hexdigest(),
         "router_source_commit": revision,
     }
+    if diagnostics_only:
+        manifest["router_diagnostic_override"] = {
+            "parent_commits": sorted({case["router_source_commit"] for case in cases}),
+            "scope": "Error-only transport diagnostics; no retries, pool, timeout, routing or publication changes",
+            **changes,
+        }
     atomic_json(root / "platform" / f"manifest-before-router-repair-{revision[:12]}.json", manifest)
     for collection in (manifest["cases"], config["cases"]):
         for case in collection:
@@ -380,6 +386,7 @@ def main():
     parser.add_argument("--repair", type=Path, metavar="CHECKOUT")
     parser.add_argument("--matched-controls", action="store_true")
     parser.add_argument("--pin-router", type=Path, metavar="CHECKOUT")
+    parser.add_argument("--diagnostics-only", action="store_true")
     parser.add_argument("--cases", nargs="+")
     parser.add_argument("--launch", action="store_true")
     parser.add_argument("--replace-idle", action="store_true")
@@ -393,7 +400,7 @@ def main():
     if args.pin_router:
         if not args.cases:
             parser.error("--pin-router requires --cases")
-        pin_router(args.root, args.pin_router, args.cases)
+        pin_router(args.root, args.pin_router, args.cases, diagnostics_only=args.diagnostics_only)
         return
     rank = int(os.environ["PET_NODE_RANK"])
     if int(os.environ["PET_NNODES"]) != 8 or rank not in range(8):
