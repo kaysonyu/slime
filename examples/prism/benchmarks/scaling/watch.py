@@ -207,7 +207,15 @@ def main():
                         ):
                             receipt = smoke(manifest)
                             receipt.update(case=request["case"], replicas=replicas, instances=instances)
-                            atomic_json(root / "runs" / request["case"] / "services-ready.json", receipt)
+                            run = root / "runs" / request["case"]
+                            # A controller restart may recheck an already admitted
+                            # case. Preserve its original admission evidence.
+                            target = (
+                                "services-monitor-smoke-latest.json"
+                                if (run / "services-ready.json").exists()
+                                else "services-ready.json"
+                            )
+                            atomic_json(run / target, receipt)
                             acknowledged = request["case"]
             elif initial_smoke and time.monotonic() - started > 900 and serving.get("status") == "RUNNING":
                 # Retain the tested deployment configuration while waiting for eight nodes.
