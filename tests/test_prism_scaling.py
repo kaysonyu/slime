@@ -11,6 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples/prism/ben
 
 from analyze import analyze, percentile, summarize_case
 from campaign import resolve_case
+from diagnose import gpu_profile
+from observe_processes import role
 from prepare import convert_prompt, write_json
 from watch import prepare_case_recipe, snapshot_service_telemetry
 from slime_plugins import tts_reward
@@ -49,6 +51,29 @@ def test_asr_snapshot_survives_replica_log_reuse(tmp_path):
     snapshot_service_telemetry(tmp_path, manifest, "second")
     saved = tmp_path / "services/history/first/pod-0/launch.json"
     assert json.loads(saved.read_text())["started"] == 1
+
+
+def test_gpu_profiles_use_unique_devices_and_half_open_steady_interval(tmp_path):
+    path = tmp_path / "gpu.csv"
+    path.write_text(
+        "1970/01/01 00:16:39.000,0,GPU-1,99,0,50,200\n"
+        "1970/01/01 00:16:40.000,0,GPU-1,0,0,50,200\n"
+        "1970/01/01 00:16:41.000,0,GPU-1,100,0,50,200\n"
+        "1970/01/01 00:16:42.000,0,GPU-1,99,0,50,200\n"
+        "1970/01/01 00:16:40.000,0,GPU-2,20,50,200\n"
+    )
+    result = gpu_profile([path], 1000, 1002)
+    assert result["devices"] == 2
+    assert result["device_mean_busy_percent"]["mean"] == 35
+    assert result["busy_percent_all_samples"]["mean"] == 40
+    assert gpu_profile([], 1000, 1002)["devices"] == 0
+
+
+def test_process_observer_only_classifies_scoped_roles(tmp_path):
+    assert role(["python", str(tmp_path / "slime/backends/sglang_utils/omni_router.py")], tmp_path) == "omni_router"
+    assert role(["ray::GroupWorker"], tmp_path) == "GroupWorker"
+    assert role(["python", "/another/job/omni_router.py"], tmp_path) is None
+    assert role([], tmp_path) is None
 
 
 def test_converted_prompts_pass_production_parser_with_and_without_language():
