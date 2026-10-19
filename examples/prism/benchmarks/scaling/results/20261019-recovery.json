@@ -1,0 +1,73 @@
+{
+  "status": "interim; GPU router comparison and checkpoint acceptance still pending",
+  "date_utc": "2026-10-19",
+  "experiment_root": "/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/grpo64-20261019",
+  "branch": "perf/prism-grpo-64gpu-20261019",
+  "scope": {
+    "baseline_commit": "c73ed2730d480ba64e71739e7e1de7245e23618c",
+    "model": "Prism 1.7B v0.4",
+    "dataset": "fullclone_chinese",
+    "candidates_per_prompt": 8,
+    "reward": "real Qwen3-ASR WER",
+    "learner_rollout_gpus": 64,
+    "gpu_type": "H200",
+    "maximum_extra_asr_replicas": 16,
+    "additional_allocations": 0
+  },
+  "failed_cases_preserved": [
+    {
+      "case": "64-b4096-a8-w32-r1rr",
+      "updates": 0,
+      "failure": "Learner Gloo connectFullMesh used 127.0.0.1 and failed during initialization.",
+      "cause": "The supplemental helper was launched from an interactive Job shell, which did not inherit the submitted Job's GLOO/NCCL network environment.",
+      "repair": "Locate the exact original campaign parent, inherit its environment in memory, validate node identity and bond0 address, and run an eight-node CPU Gloo all-reduce before GPU admission.",
+      "retry": "64-b4096-a8-w32-r1rr-retry"
+    },
+    {
+      "case": "64-b4096-a8-w32-r4rr",
+      "updates": 0,
+      "failure": "HTTP 503 while concurrently attaching Omni workers to the multiprocess router; failure precedes learner initialization.",
+      "reproduced_mechanism": "The native data plane rejects more than 16 simultaneous admin forwards per process. A four-process router receiving a 64-request burst reproduced HTTP 503 with 'too many concurrent admin requests'. Shared-socket distribution is not guaranteed even.",
+      "attribution_limit": "The original GPU exception records the status and URL, not the response body. The same-scale CPU reproducer identifies a matching failure mechanism; repaired GPU execution is still required for acceptance.",
+      "repair": "Size bounded per-data-plane admin admission to max(128, 2 * worker_count); preserve request-body limits, separate forwarding and heartbeat pools, and the all-data-plane snapshot acknowledgement fence. No retries or sleeps hide a publication race.",
+      "retry": "64-b4096-a8-w32-r4rr-retry"
+    }
+  ],
+  "repair_revisions": {
+    "helper_environment": "dc79bb92dc9bd291437385691a4d01e9d40e8a74",
+    "router_burst_and_observation": "0655097d5e8bb7bd254f09f446b9d36aea5951d0",
+    "original_learner_and_omni_snapshots_modified": false,
+    "single_process_control_router_revision": "df556b85a181b0e99f51849136d8b29e2821dc53",
+    "pending_multiprocess_router_revision": "0655097d5e8bb7bd254f09f446b9d36aea5951d0"
+  },
+  "verification": {
+    "cpu_regression_tests_passed": 180,
+    "actual_job_image_http_tests_passed": 2,
+    "actual_job_image_http_test_seconds": 10.95,
+    "http_tests": ["two data planes, forwarding, disable/enable fence, child cleanup", "four data planes, 64 concurrent admin updates, immediate generation after enable, child cleanup"],
+    "gloo_preflight_nodes": 8,
+    "gloo_all_reduce_expected_and_observed": 28,
+    "gloo_preflight_receipts": "platform/router-extension/gloo-{0..7}.json",
+    "inherited_network_receipts": "platform/router-extension/network-{0..7}.json",
+    "gpu_confirmation": "pending"
+  },
+  "existing_valid_measurements": {
+    "method": "25 actual updates; 21 steady adjacent-generation-start intervals, excluding the first three updates and the unclosed final interval. Initializations are excluded, training and weight publication are included.",
+    "32_b4096_a8_w32_seconds": 37.41111527338095,
+    "64_b4096_a8_w32_seconds": 37.151014927619045,
+    "matched_strong_scaling_speedup": 1.0070011639323624,
+    "matched_strong_scaling_efficiency": 0.5035005819661812,
+    "64_b4096_a16_w32_seconds": 37.38217374433333,
+    "best_original_matrix_case": "64-b4096-a8-w64",
+    "best_original_matrix_seconds": 36.09265040257143,
+    "target_10_to_19_seconds_achieved": false,
+    "interpretation": "Original configuration does not show near-linear end-to-end scaling at fixed B4096. Doubling ASR replicas alone did not improve the 64-GPU result. Multiprocess-router performance remains unmeasured; no speedup claim is made for the repair."
+  },
+  "remaining_acceptance": [
+    "Complete the repaired single-process and multiprocess router timing cases with real rewards and every-rank sample/policy audit.",
+    "Complete a valid 32-GPU B2048 anchor in this allocation; the initial anchor failed before training, so before/after drift cannot be measured.",
+    "Run 100 updates with the fastest valid 64-GPU B4096 configuration.",
+    "Validate the saved checkpoint, restore step 100, execute two more updates, and validate the step-102 checkpoint.",
+    "Report final strong/weak scaling, phase timing, request-tail and per-device evidence, stability limits and target attainment."
+  ]
+}
