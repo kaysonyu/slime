@@ -119,6 +119,23 @@ def test_manual_admission_hold_is_scoped_and_expires(tmp_path, monkeypatch):
     assert not admission_held(tmp_path, "pending")
 
 
+def test_matched_controls_only_change_asr_or_gpu_count_and_preserve_unrun_plan(tmp_path):
+    name = "64-b4096-a8-w32-r8rr"
+    base = dict(name=name, gpus=64, asr_replicas=8, router_source_commit="pinned", batch=4096)
+    obsolete = dict(base, name="64-b4096-a16-w32-r4rr", asr_replicas=16)
+    cases = [base, obsolete]
+    write_json(tmp_path / "runs" / name / "summary.json", {"valid": True, "steady_steps": 21})
+    updated, old = router_extension.matched_controls(tmp_path, cases)
+    assert old == obsolete
+    assert cases == [base, obsolete]
+    assert updated[0] == base
+    assert updated[1] == dict(base, name="64-b4096-a16-w32-r8rr", asr_replicas=16, matched_control_of=name)
+    assert updated[2] == dict(base, name="32-b4096-a8-w32-r8rr", gpus=32, matched_control_of=name)
+    write_json(tmp_path / "runs" / obsolete["name"] / "services-ready.json", {})
+    with pytest.raises(RuntimeError, match="admitted"):
+        router_extension.matched_controls(tmp_path, cases)
+
+
 def test_no_save_recipe_disables_final_checkpoint_before_admission(tmp_path):
     write_json(tmp_path / "recipe.json", {"save": None, "other": 42})
     prepare_case_recipe(tmp_path)

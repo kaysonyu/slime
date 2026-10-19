@@ -115,11 +115,36 @@ def retry_plan(root, cases):
     return completed + retries + pending, retries
 
 
-def repair(root, checkout):
+def matched_controls(root, cases):
+    """Spend the remaining allocation on controls for the completed fast router."""
+    name = "64-b4096-a8-w32-r8rr"
+    base = next(case for case in cases if case["name"] == name)
+    result = json.loads((root / "runs" / name / "summary.json").read_text())
+    if not result["valid"] or result.get("steady_steps", 0) < 21:
+        raise RuntimeError("Matched controls require a complete valid eight-process result")
+    obsolete = next(case for case in cases if case["name"] == "64-b4096-a16-w32-r4rr")
+    if (root / "runs" / obsolete["name"] / "services-ready.json").exists():
+        raise RuntimeError("Cannot supersede an admitted experiment")
+    additions = [
+        dict(base, name="64-b4096-a16-w32-r8rr", asr_replicas=16, matched_control_of=name),
+        dict(base, name="32-b4096-a8-w32-r8rr", gpus=32, matched_control_of=name),
+    ]
+    for case in additions:
+        if (root / "runs" / case["name"]).exists() or any(item["name"] == case["name"] for item in cases):
+            raise FileExistsError(case["name"])
+    return [case for case in cases if case["name"] != obsolete["name"]] + additions, obsolete
+
+
+def repair(root, checkout, *, add_matched_controls=False):
     config_path = root / "platform/router-extension.json"
     config = json.loads(config_path.read_text())
     assert_idle(root, config["cases"])
     cases, retries = retry_plan(root, config["cases"])
+    if add_matched_controls:
+        cases, superseded = matched_controls(root, cases)
+        config.setdefault("superseded_cases", []).append(
+            {"case": superseded, "reason": "Unadmitted ASR16 control moved to the completed faster eight-process router"}
+        )
     if subprocess.check_output(["git", "-C", str(checkout), "status", "--porcelain"], text=True).strip():
         raise RuntimeError("Commit the repair before pinning it")
     revision = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip()
@@ -353,6 +378,7 @@ def main():
     parser.add_argument("root", type=Path)
     parser.add_argument("--prepare", type=Path, metavar="CHECKOUT")
     parser.add_argument("--repair", type=Path, metavar="CHECKOUT")
+    parser.add_argument("--matched-controls", action="store_true")
     parser.add_argument("--pin-router", type=Path, metavar="CHECKOUT")
     parser.add_argument("--cases", nargs="+")
     parser.add_argument("--launch", action="store_true")
@@ -362,7 +388,7 @@ def main():
         prepare(args.root, args.prepare)
         return
     if args.repair:
-        repair(args.root, args.repair)
+        repair(args.root, args.repair, add_matched_controls=args.matched_controls)
         return
     if args.pin_router:
         if not args.cases:
