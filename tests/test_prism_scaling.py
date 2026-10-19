@@ -407,6 +407,24 @@ def test_empty_case_is_invalid_and_not_zero_time(tmp_path):
     assert "step_seconds" not in result
 
 
+def test_weak_scaling_uses_valid_anchor_and_discloses_configuration_confounding(tmp_path):
+    names = ["32-b2048-a4-w16-start", "32-b2048-a4-w16-end", "64-b4096-a16-w32-r8rr"]
+    write_json(tmp_path / "manifest.json", {"cases": [{"name": name} for name in names]})
+    for name, valid, seconds in zip(names, [False, True, True], [1, 20, 16], strict=True):
+        write_json(
+            tmp_path / "runs" / name / "summary.json",
+            {"case": name, "valid": valid, "steady_steps": 21, "step_seconds": seconds},
+        )
+    report = analyze(tmp_path)
+    assert report["baseline_32_b2048_seconds"] == 20
+    assert report["baseline_32_b2048_cases"] == [names[1]]
+    assert report["baseline_drift_measured"] is False
+    assert report["baseline_drift_percent"] is None
+    assert report["weak_scaling"][names[2]] == {"throughput_speedup": 2.5, "efficiency": 1.25}
+    assert "not evidence of superlinear hardware scaling" in report["weak_scaling_scope"]
+    assert "additional ASR GPUs" in report["weak_scaling_scope"]
+
+
 def test_router_comparisons_require_complete_valid_controls(tmp_path):
     names = ["64-b4096-a8-w32", "64-b4096-a8-w32-r1rr-retry", "64-b4096-a8-w32-r4rr-retry"]
     write_json(tmp_path / "manifest.json", {"cases": [{"name": name} for name in names]})

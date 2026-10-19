@@ -233,6 +233,14 @@ def analyze(root):
             (anchors[1]["step_seconds"] / anchors[0]["step_seconds"] - 1) * 100 if len(anchors) == 2 else None
         )
         aggregate["baseline_drift_measured"] = len(anchors) == 2
+        aggregate["weak_scaling_scope"] = (
+            "Observed B2048-to-B4096 throughput relative to the valid original-router 32-GPU anchor(s). "
+            "Candidates may also change router implementation, ASR replicas, execution workers or concurrency. "
+            "The legacy efficiency field normalizes by learner/rollout GPU count only; values above one "
+            "are not evidence of superlinear hardware scaling and do not account for additional ASR GPUs. "
+            "Separate-run means do not establish statistical significance; baseline drift is unknown "
+            "unless both anchors are valid."
+        )
         aggregate["weak_scaling"] = {
             name: {"throughput_speedup": 2 * baseline / r["step_seconds"], "efficiency": baseline / r["step_seconds"]}
             for name, r in reports.items()
