@@ -140,6 +140,46 @@ def repair(root, checkout):
     print(json.dumps({"helper_commit": revision, "retries": [case["name"] for case in retries]}))
 
 
+def pin_router(root, checkout, names):
+    """Pin a tested router-only repair for cases not yet admitted."""
+    manifest = json.loads((root / "manifest.json").read_text())
+    config = json.loads((root / "platform/router-extension.json").read_text())
+    cases = [case for case in manifest["cases"] if case["name"] in names]
+    if {case["name"] for case in cases} != set(names):
+        raise ValueError("Unknown supplemental case")
+    for case in cases:
+        if not case.get("supplemental") or case["router_processes"] < 2:
+            raise ValueError("Only supplemental multiprocess cases may be repinned")
+        if (root / "runs" / case["name"] / "services-ready.json").exists():
+            raise RuntimeError(f"Case already admitted: {case['name']}")
+    if subprocess.check_output(["git", "-C", str(checkout), "status", "--porcelain"], text=True).strip():
+        raise RuntimeError("Commit the router repair before pinning it")
+    revision = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip()
+    destination = root / "source" / f"router-repair-{revision[:12]}"
+    destination.mkdir()
+    archive = destination / "source.tar"
+    subprocess.run(["git", "-C", str(checkout), "archive", "--format=tar", "-o", str(archive), revision], check=True)
+    with tarfile.open(archive) as bundle:
+        bundle.extractall(destination, filter="data")
+    adapter = destination / "examples/prism/benchmarks/scaling/router_python.py"
+    adapter.chmod(0o755)
+    entry = destination / "slime/backends/sglang_utils/omni_router.py"
+    changes = {
+        "router_python": str(adapter),
+        "router_entry_sha256": hashlib.sha256(entry.read_bytes()).hexdigest(),
+        "router_source_commit": revision,
+    }
+    atomic_json(root / "platform" / f"manifest-before-router-repair-{revision[:12]}.json", manifest)
+    for collection in (manifest["cases"], config["cases"]):
+        for case in collection:
+            if case["name"] in names:
+                case.update(changes)
+    atomic_json(root / "manifest.json", manifest)
+    atomic_json(root / "platform/router-extension.json", config)
+    atomic_json(root / "platform/router-repair.json", {"time": time.time(), "cases": names, **changes})
+    print(json.dumps({"cases": names, **changes}))
+
+
 def prepare(root, checkout):
     if (root / "platform/router-extension.json").exists():
         raise FileExistsError("Router extension already prepared")
@@ -307,6 +347,8 @@ def main():
     parser.add_argument("root", type=Path)
     parser.add_argument("--prepare", type=Path, metavar="CHECKOUT")
     parser.add_argument("--repair", type=Path, metavar="CHECKOUT")
+    parser.add_argument("--pin-router", type=Path, metavar="CHECKOUT")
+    parser.add_argument("--cases", nargs="+")
     parser.add_argument("--launch", action="store_true")
     parser.add_argument("--replace-idle", action="store_true")
     args = parser.parse_args()
@@ -315,6 +357,11 @@ def main():
         return
     if args.repair:
         repair(args.root, args.repair)
+        return
+    if args.pin_router:
+        if not args.cases:
+            parser.error("--pin-router requires --cases")
+        pin_router(args.root, args.pin_router, args.cases)
         return
     rank = int(os.environ["PET_NODE_RANK"])
     if int(os.environ["PET_NNODES"]) != 8 or rank not in range(8):

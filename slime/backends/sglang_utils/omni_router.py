@@ -99,8 +99,24 @@ def run_multiprocess_router(configuration, *, disabled=False):
             pass_fds=(context.death_pipe_fd,),
         )
 
+    def spawn_data_plane(context, index, generation):
+        from sglang_omni_router.python.supervisor import DP_GENERATION_ENV, DP_INDEX_ENV, SOCKET_FD_ENV
+
+        environment = context.child_env()
+        environment[SOCKET_FD_ENV] = str(context.socket_fd)
+        environment[DP_INDEX_ENV] = str(index)
+        environment[DP_GENERATION_ENV] = str(generation)
+        return subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "--data-plane"],
+            env=environment,
+            pass_fds=(context.socket_fd, context.death_pipe_fd),
+        )
+
     supervisor = RouterSupervisor(
-        RouterConfig(**configuration), router_processes=processes, spawn_cp=spawn_control_plane
+        RouterConfig(**configuration),
+        router_processes=processes,
+        spawn_cp=spawn_control_plane,
+        spawn_dp=spawn_data_plane,
     )
     supervisor.start()
     supervisor.run_forever()  # Owns SIGTERM, child drain/reap and shared-memory cleanup.
@@ -156,9 +172,25 @@ def run_control_plane():
     cp_runner.main()
 
 
+def run_data_plane():
+    from sglang_omni_router.python import data_plane, dp_runner
+    from sglang_omni_router.python.app_factory import load_config_from_env
+
+    config = load_config_from_env()
+    # Slime enables/disables every replica concurrently. Shared-socket accept
+    # is not guaranteed fair: a DP may receive an entire publication burst.
+    # Keep body and HTTP-pool bounds, but size the bounded admin admission for
+    # the replica fanout instead of Omni's fixed 16-request per-DP default.
+    data_plane._MAX_CONCURRENT_FORWARDS = max(128, 2 * len(config.workers))
+    dp_runner.main()
+
+
 def main():
     if sys.argv[1:] == ["--control-plane"]:
         run_control_plane()
+        return
+    if sys.argv[1:] == ["--data-plane"]:
+        run_data_plane()
         return
     import uvicorn
     from sglang_omni.serve.access_logging import configure_access_logging

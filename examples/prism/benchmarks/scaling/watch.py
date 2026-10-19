@@ -77,6 +77,17 @@ def prepare_case_recipe(run):
         case = json.loads(case_path.read_text())
         selected = case.get("selected_from") or case.get("resume")
         source_case = json.loads((run.parent / selected / "case.json").read_text()) if selected else case
+        manifest_path = run.parent.parent / "manifest.json"
+        if not selected and case.get("supplemental") and manifest_path.exists():
+            # A live helper may hold a pre-repair case list in memory. Apply
+            # only the explicitly pinned router revision, before admission.
+            planned = next(
+                item for item in json.loads(manifest_path.read_text())["cases"] if item["name"] == case["name"]
+            )
+            for key in ("gpus", "batch", "asr_replicas", "workers", "steps", "router_processes", "router_policy"):
+                if planned[key] != case[key]:
+                    raise RuntimeError(f"Unexpected non-router launch-plan change: {key}")
+            source_case = planned
         if "router_python" in source_case:
             adapter = Path(source_case["router_python"])
             entry = adapter.parents[4] / "slime/backends/sglang_utils/omni_router.py"
@@ -161,6 +172,10 @@ def main():
     initial_smoke = (root / "services/initial-smoke.json").exists()
     while True:
         try:
+            updated = json.loads((root / "manifest.json").read_text())
+            if any(updated[key] != manifest[key] for key in ("workspace", "job_name", "asr_name", "root")):
+                raise RuntimeError("Campaign identity changed during observation")
+            manifest = updated
             job = cli("job", "status", manifest["job_name"], "--workspace", workspace)
             serving = cli("serving", "status", service, "--workspace", workspace)
             status = job.get("status", "UNKNOWN")

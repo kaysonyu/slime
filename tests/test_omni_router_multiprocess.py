@@ -20,7 +20,8 @@ NUM_GPUS = 0
 pytestmark = pytest.mark.unit
 
 
-def test_native_multiprocess_router_control_forwarding_and_cleanup(tmp_path):
+@pytest.mark.parametrize("processes,updates", [(2, 1), (4, 64)])
+def test_native_multiprocess_router_control_forwarding_and_cleanup(tmp_path, processes, updates):
     pytest.importorskip("sglang_omni_router.python.supervisor")
     payload = json.dumps({"echo": "x" * 100000}).encode()
 
@@ -54,7 +55,7 @@ def test_native_multiprocess_router_control_forwarding_and_cleanup(tmp_path):
         host="127.0.0.1",
         port=port,
         workers=[dict(url=upstream, capabilities=["chat"])],
-        router_processes=2,
+        router_processes=processes,
         policy="round_robin",
         health_check_interval_secs=1,
         request_timeout_secs=10,
@@ -98,7 +99,7 @@ def test_native_multiprocess_router_control_forwarding_and_cleanup(tmp_path):
         try:
             wait_status("/ready", 200)
             children = psutil.Process(process.pid).children(recursive=True)
-            assert len(children) == 3  # one CP, two DPs
+            assert len(children) == processes + 1  # one CP plus all DPs
 
             def generate(_):
                 with requests.Session() as local:
@@ -109,12 +110,28 @@ def test_native_multiprocess_router_control_forwarding_and_cleanup(tmp_path):
 
             with ThreadPoolExecutor(max_workers=8) as executor:
                 list(executor.map(generate, range(32)))
-            response = client.put(url + "/workers/" + quote(upstream, safe=""), json={"disabled": True}, timeout=5)
-            assert response.status_code == 200, response.text
+
+            def change_admission(disabled):
+                start = threading.Barrier(updates)
+
+                def update(_):
+                    with requests.Session() as local:
+                        local.trust_env = False
+                        start.wait(timeout=10)
+                        response = local.put(
+                            url + "/workers/" + quote(upstream, safe=""), json={"disabled": disabled}, timeout=15
+                        )
+                        return response.status_code, response.text
+
+                with ThreadPoolExecutor(max_workers=updates) as executor:
+                    results = list(executor.map(update, range(updates)))
+                failures = [result for result in results if result[0] != 200]
+                assert not failures, failures
+
+            change_admission(True)
             wait_status("/ready", 503)
             assert client.post(url + "/generate", json={}, timeout=5).status_code == 503
-            response = client.put(url + "/workers/" + quote(upstream, safe=""), json={"disabled": False}, timeout=5)
-            assert response.status_code == 200, response.text
+            change_admission(False)
             # The PUT itself must fence every DP, not just the one owning this
             # HTTP connection. No sleeps or request retries after publication.
             with ThreadPoolExecutor(max_workers=8) as executor:

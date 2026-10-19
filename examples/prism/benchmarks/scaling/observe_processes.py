@@ -17,6 +17,8 @@ def role(command, source):
     if not command:
         return None
     if str(source / "slime/backends/sglang_utils/omni_router.py") in command:
+        if "--data-plane" in command:
+            return "omni_router_data"
         return "omni_router_control" if "--control-plane" in command else "omni_router"
     if str(source / "train.py") in command:
         return "training_driver"
@@ -64,8 +66,14 @@ def main():
                 current = {}
                 extension_path = root / "platform/router-extension.json"
                 extension = json.loads(extension_path.read_text()) if extension_path.exists() else None
+                request = json.loads((root / "services/request.json").read_text())
+                case_path = root / "runs" / request["case"] / "case.json"
+                case = json.loads(case_path.read_text()) if case_path.exists() else {}
+                router_source = Path(case["router_python"]).parents[4] if "router_python" in case else None
                 for process in psutil.process_iter(["pid", "cmdline", "create_time"]):
                     kind = role(process.info["cmdline"], source)
+                    if kind is None and router_source:
+                        kind = role(process.info["cmdline"], router_source)
                     if kind is None and extension:
                         kind = role(process.info["cmdline"], Path(extension["source"]))
                     if kind is None and extension:

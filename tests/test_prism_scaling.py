@@ -172,6 +172,44 @@ def test_confirmation_and_resume_inherit_selected_pinned_router(tmp_path):
         assert recipe["save"] == "checkpoint"
 
 
+def test_unadmitted_supplemental_case_uses_repaired_manifest_router(tmp_path):
+    import hashlib
+
+    run = tmp_path / "runs" / "supplemental"
+    entry = tmp_path / "new/slime/backends/sglang_utils/omni_router.py"
+    write_json(entry, {"revision": "repaired"})
+    case = dict(
+        name="supplemental",
+        supplemental=True,
+        gpus=64,
+        batch=4096,
+        asr_replicas=8,
+        workers=32,
+        steps=25,
+        router_processes=4,
+        router_policy="round_robin",
+        router_python="old",
+    )
+    planned = dict(
+        case,
+        router_python=str(tmp_path / "new/examples/prism/benchmarks/scaling/router_python.py"),
+        router_entry_sha256=hashlib.sha256(entry.read_bytes()).hexdigest(),
+        router_source_commit="new",
+    )
+    write_json(run / "case.json", case)
+    write_json(run / "recipe.json", {"save": None, "save_interval": None})
+    write_json(tmp_path / "manifest.json", {"cases": [planned]})
+    prepare_case_recipe(run)
+    assert json.loads((run / "case.json").read_text())["router_source_commit"] == "new"
+    assert json.loads((run / "recipe.json").read_text())["omni_python"] == planned["router_python"]
+    planned["batch"] = 2048
+    write_json(tmp_path / "manifest.json", {"cases": [planned]})
+    with pytest.raises(RuntimeError, match="non-router"):
+        prepare_case_recipe(run)
+    write_json(run / "services-ready.json", {})
+    prepare_case_recipe(run)  # An admitted case is immutable, even after a manifest change.
+
+
 def test_asr_snapshot_survives_replica_log_reuse(tmp_path):
     manifest = {"cases": [{"name": "first"}, {"name": "second"}]}
     write_json(tmp_path / "runs/first/summary.json", {"valid": True})
@@ -205,6 +243,10 @@ def test_process_observer_only_classifies_scoped_roles(tmp_path):
     assert role(["ray::GroupWorker"], tmp_path) == "GroupWorker"
     assert role(["python", "/another/job/omni_router.py"], tmp_path) is None
     assert role([], tmp_path) is None
+    assert (
+        role(["python", str(tmp_path / "slime/backends/sglang_utils/omni_router.py"), "--data-plane"], tmp_path)
+        == "omni_router_data"
+    )
 
 
 def test_converted_prompts_pass_production_parser_with_and_without_language():
