@@ -65,7 +65,9 @@ def summarize_case(run):
     check(len(metrics) == len(expected), f"training metric count {len(metrics)} != {len(expected)}")
     check(
         all(
-            math.isfinite(item["train/grad_norm"]) and item["train/grad_norm"] > 0 and math.isfinite(item["train/loss"])
+            math.isfinite(item["train/grad_norm"])
+            and item["train/grad_norm"] > 0
+            and math.isfinite(item["train/loss"])
             for item in metrics
         ),
         "invalid loss/gradients",
@@ -73,7 +75,9 @@ def summarize_case(run):
     publications = [
         (int(v), int(n)) for v, n in re.findall(r"Published policy version=(\d+) to (\d+) rollout replicas", log)
     ]
-    check(bool(publications) and all(n == case["gpus"] for _, n in publications), "incorrect publication replica count")
+    check(
+        bool(publications) and all(n == case["gpus"] for _, n in publications), "incorrect publication replica count"
+    )
     check(
         {v for v, _ in publications} == set(range(first_step + 1, case["steps"] + 2)), "incomplete policy publications"
     )
@@ -220,7 +224,9 @@ def analyze(root):
         if name in reports and reports[name]["valid"] and reports[name].get("steady_steps")
     ]
     if anchors:
-        baseline = sum(r["step_seconds"] * r["steady_steps"] for r in anchors) / sum(r["steady_steps"] for r in anchors)
+        baseline = sum(r["step_seconds"] * r["steady_steps"] for r in anchors) / sum(
+            r["steady_steps"] for r in anchors
+        )
         aggregate["baseline_32_b2048_seconds"] = baseline
         aggregate["baseline_32_b2048_cases"] = [r["case"] for r in anchors]
         aggregate["baseline_drift_percent"] = (
@@ -237,6 +243,31 @@ def analyze(root):
         aggregate["strong_scaling_b4096"] = {
             "speedup": a["step_seconds"] / b["step_seconds"],
             "efficiency": a["step_seconds"] / b["step_seconds"] / 2,
+        }
+    aggregate["router_comparisons"] = {}
+    for label, control, candidate in (
+        ("single_process_policy", "64-b4096-a8-w32", "64-b4096-a8-w32-r1rr-retry"),
+        ("native_four_process", "64-b4096-a8-w32-r1rr-retry", "64-b4096-a8-w32-r4rr-retry"),
+        ("native_eight_vs_four_process", "64-b4096-a8-w32-r4rr-retry", "64-b4096-a8-w32-r8rr"),
+        ("asr16_vs_asr8_native_four_process", "64-b4096-a8-w32-r4rr-retry", "64-b4096-a16-w32-r4rr"),
+    ):
+        a, b = reports.get(control, {}), reports.get(candidate, {})
+        if not all(
+            item.get("valid") and item.get("steady_steps", 0) >= 21 and item.get("step_seconds") for item in (a, b)
+        ):
+            continue
+        aggregate["router_comparisons"][label] = {
+            "control": control,
+            "candidate": candidate,
+            "control_seconds": a["step_seconds"],
+            "candidate_seconds": b["step_seconds"],
+            "speedup": a["step_seconds"] / b["step_seconds"],
+            "time_reduction_percent": (1 - b["step_seconds"] / a["step_seconds"]) * 100,
+            "phase_seconds_saved": {
+                key: value - b.get("phase_seconds", {}).get(key, 0)
+                for key, value in a.get("phase_seconds", {}).items()
+            },
+            "caveat": "Descriptive means from separate runs, not statistical significance. Native multiprocess also changes upstream HTTP pool implementation; the first native comparison is not process-count-only.",
         }
     write_json(root / "analysis/report.json", aggregate)
     table = ["case,valid,updates,steady_steps,step_seconds,p95_seconds,samples_per_second,frames_per_second"]

@@ -14,12 +14,33 @@ import psutil
 from observe_processes import role
 
 
+def select_router(processes, run, source, *, multiprocess=False):
+    """Profile a busy data plane, never a supervisor or a previous run's router."""
+    expected = "omni_router_data" if multiprocess else "omni_router"
+    candidates = []
+    for process in processes:
+        if role(process.info["cmdline"], source) != expected:
+            continue
+        try:
+            if process.environ().get("PRISM_SCALE_RUN") == str(run):
+                usage = process.cpu_times()
+                candidates.append((usage.user + usage.system, process))
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    if not candidates:
+        raise RuntimeError(f"No {expected} belongs to this run")
+    return max(candidates, key=lambda item: item[0])[1], [p.pid for _, p in candidates]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
     parser.add_argument("case")
     parser.add_argument("--launch", action="store_true")
+    parser.add_argument("--duration", type=int, default=15)
     args = parser.parse_args()
+    if not 1 <= args.duration <= 30:
+        parser.error("--duration must be between 1 and 30 seconds")
     if os.environ.get("PET_NODE_RANK") != "0":
         raise RuntimeError("Profiler belongs in the campaign head pod only")
     root = args.root.resolve()
@@ -30,7 +51,14 @@ def main():
     output = run / "router-profile"
     output.mkdir(exist_ok=True)
     if args.launch:
-        command = [sys.executable, str(Path(__file__).resolve()), str(root), args.case]
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            str(root),
+            args.case,
+            "--duration",
+            str(args.duration),
+        ]
         with (output / "controller.log").open("a") as log:
             process = subprocess.Popen(
                 command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
@@ -55,20 +83,16 @@ def main():
         phases = [json.loads(line) for line in (run / "phases.jsonl").open()]
         if any(row["phase"] == "generate" and row["rollout"] == case["steps"] - 1 for row in phases):
             raise RuntimeError("Final generation already completed; do not profile another phase")
-        source = Path(manifest["source"])
-        routers = [
-            p
-            for p in psutil.process_iter(["cmdline", "create_time"])
-            if role(p.info["cmdline"], source) == "omni_router"
-        ]
-        process = max(routers, key=lambda p: p.info["create_time"])
+        source = Path(case["router_python"]).parents[4] if "router_python" in case else Path(manifest["source"])
+        multiprocess = case.get("router_processes", 1) > 1
+        process, candidates = select_router(psutil.process_iter(["cmdline"]), run, source, multiprocess=multiprocess)
         command = [
             "/opt/sglang/bin/py-spy",
             "record",
             "--pid",
             str(process.pid),
             "--duration",
-            "15",
+            str(args.duration),
             "--rate",
             "99",
             "--gil",
@@ -80,11 +104,14 @@ def main():
         ]
         started = time.time()
         with (output / "py-spy.log").open("w") as log:
-            result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=30)
+            result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=args.duration + 15)
         receipt = {
             "started": started,
             "ended": time.time(),
             "pid": process.pid,
+            "role": "omni_router_data" if multiprocess else "omni_router",
+            "candidate_pids": candidates,
+            "selection": "Highest cumulative CPU among run-scoped eligible router processes; one representative, not all data planes",
             "command": command,
             "returncode": result.returncode,
             "excluded_from_timing": "Final rollout has no adjacent generate start and is never in steady_windows",

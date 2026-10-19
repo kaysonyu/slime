@@ -15,6 +15,7 @@ from analyze import analyze, percentile, summarize_case
 from campaign import resolve_case
 from diagnose import gpu_profile
 from observe_processes import role
+from profile_router import select_router
 from prepare import convert_prompt, write_json
 import router_python
 import router_extension
@@ -249,6 +250,33 @@ def test_process_observer_only_classifies_scoped_roles(tmp_path):
     )
 
 
+def test_profiler_selects_busy_current_data_plane_not_supervisor_or_stale_router(tmp_path):
+    source = tmp_path / "pinned"
+    run = tmp_path / "runs/current"
+    entry = str(source / "slime/backends/sglang_utils/omni_router.py")
+
+    def process(pid, arguments, cpu, scoped_run):
+        return SimpleNamespace(
+            pid=pid,
+            info={"cmdline": ["python", entry, *arguments]},
+            cpu_times=lambda: SimpleNamespace(user=cpu, system=0),
+            environ=lambda: {"PRISM_SCALE_RUN": str(scoped_run)},
+        )
+
+    processes = [
+        process(1, [], 1000, run),
+        process(2, ["--control-plane"], 999, run),
+        process(3, ["--data-plane"], 998, tmp_path / "old"),
+        process(4, ["--data-plane"], 20, run),
+        process(5, ["--data-plane"], 40, run),
+    ]
+    selected, eligible = select_router(processes, run, source, multiprocess=True)
+    assert selected.pid == 5 and eligible == [4, 5]
+    assert select_router(processes, run, source)[0].pid == 1
+    with pytest.raises(RuntimeError, match="No omni_router_data"):
+        select_router(processes, tmp_path / "unrelated", source, multiprocess=True)
+
+
 def test_converted_prompts_pass_production_parser_with_and_without_language():
     old = {
         "task_type": "fullclone",
@@ -315,6 +343,26 @@ def test_empty_case_is_invalid_and_not_zero_time(tmp_path):
     assert not result["valid"]
     assert result["issues"]
     assert "step_seconds" not in result
+
+
+def test_router_comparisons_require_complete_valid_controls(tmp_path):
+    names = ["64-b4096-a8-w32", "64-b4096-a8-w32-r1rr-retry", "64-b4096-a8-w32-r4rr-retry"]
+    write_json(tmp_path / "manifest.json", {"cases": [{"name": name} for name in names]})
+    for name, seconds, valid in zip(names, [40, 38, 10], [True, True, False], strict=True):
+        write_json(
+            tmp_path / "runs" / name / "summary.json",
+            {
+                "case": name,
+                "valid": valid,
+                "steady_steps": 21,
+                "step_seconds": seconds,
+                "phase_seconds": {"generate": seconds - 2},
+            },
+        )
+    comparison = analyze(tmp_path)["router_comparisons"]
+    assert set(comparison) == {"single_process_policy"}
+    assert comparison["single_process_policy"]["speedup"] == 40 / 38
+    assert comparison["single_process_policy"]["phase_seconds_saved"]["generate"] == 2
 
 
 def test_percentile_keeps_slow_steps():
