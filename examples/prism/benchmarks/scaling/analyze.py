@@ -208,6 +208,47 @@ def summarize_case(run):
     return result
 
 
+def acceptance_status(root, manifest, reports):
+    """Business acceptance is separate from finishing a matrix of attempts.
+
+    Failed exploratory attempts remain evidence, but cannot veto a later valid
+    confirmation. Conversely, successful short runs cannot replace confirmation
+    and a verified checkpoint restart.
+    """
+    required = [case for case in manifest["cases"] if case.get("choose_best") or case.get("resume")]
+    results = {}
+    for case in required:
+        name = case["name"]
+        run = root / "runs" / name
+        summary = reports.get(name)
+        if summary is None:
+            results[name] = {"status": "failed" if (run / "skip.json").exists() else "pending"}
+            continue
+        verification = run / "checkpoint-verification.json"
+        checkpoint_valid = verification.exists() and json.loads(verification.read_text()).get("valid") is True
+        commit_exists = (run / "checkpoint/rollout" / f"training_commit_{case['steps'] - 1}.json").is_file()
+        passed = summary.get("valid") is True and checkpoint_valid and commit_exists
+        results[name] = {
+            "status": "passed" if passed else "failed",
+            "summary_valid": summary.get("valid") is True,
+            "updates": summary.get("updates", 0),
+            "checkpoint_verified": checkpoint_valid,
+            "checkpoint_commit_exists": commit_exists,
+        }
+    configured = any(case.get("choose_best") for case in required) and any(case.get("resume") for case in required)
+    statuses = {item["status"] for item in results.values()}
+    accepted = configured and statuses == {"passed"}
+    status = "passed" if accepted else ("failed" if "failed" in statuses else "pending")
+    if not configured:
+        status = "not_configured"
+    return {
+        "accepted": accepted,
+        "status": status,
+        "required_cases": results,
+        "scope": "Requires independent confirmation plus checkpoint/optimizer/scheduler restart validation. Platform exit and complete/all_valid matrix fields are not acceptance.",
+    }
+
+
 def analyze(root):
     reports = {path.parent.name: json.loads(path.read_text()) for path in (root / "runs").glob("*/summary.json")}
     manifest = json.loads((root / "manifest.json").read_text())
@@ -217,6 +258,7 @@ def analyze(root):
         "all_valid": bool(reports) and all(r["valid"] for r in reports.values()),
         "method": "Adjacent generate starts; exclude first three updates and final window; retain all other steps. HTTP latency includes remote queue and transport, not pure GPU time.",
         "runs": reports,
+        "acceptance": acceptance_status(root, manifest, reports),
     }
     anchors = [
         reports[name]

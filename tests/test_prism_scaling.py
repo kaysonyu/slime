@@ -11,8 +11,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples/prism/benchmarks/scaling"))
 
-from analyze import analyze, percentile, summarize_case
-from campaign import resolve_case
+from analyze import acceptance_status, analyze, percentile, summarize_case
+from campaign import finish_campaign, resolve_case
 from diagnose import gpu_profile
 from observe_processes import role
 from profile_router import select_router
@@ -397,6 +397,57 @@ def test_confirmation_selects_only_complete_valid_cases(tmp_path):
     chosen = resolve_case(tmp_path, {"name": "confirmation", "steps": 100, "choose_best": True})
     assert chosen["selected_from"] == "64-b4096-good"
     assert chosen["steps"] == 100
+
+
+@pytest.mark.parametrize("missing", ["summary", "verification", "commit", "invalid_summary", "invalid_verification", None])
+def test_resume_requires_successful_parent_and_verified_checkpoint(tmp_path, missing):
+    parent = tmp_path / "runs/confirm"
+    previous = dict(steps=100, asr_replicas=16, workers=32, concurrency=16, asr_inflight=4)
+    write_json(parent / "case.json", previous)
+    if missing != "summary":
+        write_json(parent / "summary.json", {"valid": missing != "invalid_summary"})
+    if missing != "verification":
+        write_json(parent / "checkpoint-verification.json", {"valid": missing != "invalid_verification"})
+    if missing != "commit":
+        write_json(parent / "checkpoint/rollout/training_commit_99.json", {})
+    candidate = dict(name="resume", resume="confirm", steps=102)
+    if missing:
+        with pytest.raises(RuntimeError, match="Resume prerequisite failed"):
+            resolve_case(tmp_path, candidate)
+    else:
+        resolved = resolve_case(tmp_path, candidate)
+        assert resolved["asr_replicas"] == 16 and resolved["steps"] == 102
+
+
+def test_campaign_acceptance_rejects_short_success_and_failed_confirmation(tmp_path):
+    cases = [dict(name="short"), dict(name="confirm", choose_best=True, steps=100),
+             dict(name="resume", resume="confirm", steps=102)]
+    manifest = {"cases": cases}
+    reports = {"short": {"valid": True}}
+    assert acceptance_status(tmp_path, manifest, reports)["status"] == "pending"
+    reports["confirm"] = {"valid": False, "updates": 35}
+    outcome = acceptance_status(tmp_path, manifest, reports)
+    assert outcome["status"] == "failed" and not outcome["accepted"]
+    assert outcome["required_cases"]["resume"]["status"] == "pending"
+    write_json(tmp_path / "runs/resume/skip.json", {"error": "Missing checkpoint"})
+    assert acceptance_status(tmp_path, manifest, reports)["required_cases"]["resume"]["status"] == "failed"
+
+
+def test_campaign_final_receipt_fails_closed_then_accepts_verified_restart_despite_historical_failure(tmp_path):
+    cases = [dict(name="exploration"), dict(name="confirm", choose_best=True, steps=100),
+             dict(name="resume", resume="confirm", steps=102)]
+    write_json(tmp_path / "manifest.json", {"cases": cases})
+    for case in cases:
+        write_json(tmp_path / "runs" / case["name"] / "summary.json", {"case": case["name"], "valid": case["name"] != "exploration"})
+    assert finish_campaign(tmp_path)["returncode"] == 1  # A 'valid' summary alone is insufficient.
+    for case in cases[1:]:
+        run = tmp_path / "runs" / case["name"]
+        write_json(run / "checkpoint-verification.json", {"valid": True})
+        write_json(run / "checkpoint/rollout" / f"training_commit_{case['steps'] - 1}.json", {})
+    receipt = finish_campaign(tmp_path)
+    assert receipt["returncode"] == 0 and receipt["acceptance"]["accepted"]
+    assert json.loads((tmp_path / "campaign-finished.json").read_text()) == receipt
+    assert not analyze(tmp_path)["all_valid"]  # Historical failures remain visible.
 
 
 def test_empty_case_is_invalid_and_not_zero_time(tmp_path):

@@ -1,0 +1,186 @@
+{
+  "status": "CAMPAIGN ENDED; SHORT-RUN SPEED TARGET MET; 100-UPDATE STABILITY AND CHECKPOINT RESTART ACCEPTANCE FAILED",
+  "reviewed_utc": "2026-10-19 22:52 UTC",
+  "experiment_root": "/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/grpo64-20261019",
+  "branch": "perf/prism-grpo-64gpu-20261019",
+  "baseline_commit": "c73ed2730d480ba64e71739e7e1de7245e23618c",
+  "scope": {
+    "model": "Prism 1.7B v0.4",
+    "dataset": "fullclone_chinese",
+    "candidates_per_prompt": 8,
+    "batch4096_prompt_groups": 512,
+    "reward": "Real Qwen3-ASR WER; identity fingerprint checked",
+    "max_colocated_learner_rollout_h200": 64,
+    "max_additional_asr_h200": 16,
+    "allocations": 1,
+    "planned_attempts_with_terminal_summaries": 21,
+    "valid_complete_short_runs": 13,
+    "failed_attempts_retained": 8,
+    "quality_claim": "Execution and real-reward integrity, not convergence or perceptual quality"
+  },
+  "measurement": {
+    "clock": "Adjacent generate starts: generation, reward, artifact handling/conversion, learner update, weight publication and intervening overhead",
+    "short_run_updates": 25,
+    "steady_windows_per_valid_short_run": 21,
+    "excluded": "First three warmup updates; final unclosed interval; cold initialization",
+    "failed_prefixes": "Retained for diagnosis, excluded from accepted speed/scaling comparisons",
+    "uncertainty": "Single completed runs per configuration, no statistical-significance claim. The failed initial B2048 anchor prevents before/after drift measurement."
+  },
+  "performance_table": [
+    {"case": "32-b2048-a4-w16-end", "gpus": 32, "batch": 2048, "asr": 4, "router_processes": 1, "seconds": 19.965235228857143, "p95_seconds": 20.697237872, "samples_per_second": 102.57830556586096},
+    {"case": "32-b4096-a8-w32", "gpus": 32, "batch": 4096, "asr": 8, "router_processes": 1, "seconds": 37.41111527338095},
+    {"case": "64-b4096-a8-w32", "gpus": 64, "batch": 4096, "asr": 8, "router_processes": 1, "seconds": 37.151014927619045},
+    {"case": "64-b4096-a16-w32", "gpus": 64, "batch": 4096, "asr": 16, "router_processes": 1, "seconds": 37.38217374433333},
+    {"case": "64-b4096-a8-w32-r1rr-retry", "gpus": 64, "batch": 4096, "asr": 8, "router_processes": 1, "seconds": 37.02303711985714},
+    {"case": "32-b4096-a8-w32-r8rr", "gpus": 32, "batch": 4096, "asr": 8, "router_processes": 8, "seconds": 18.492922919380952, "p95_seconds": 19.234711283, "samples_per_second": 221.49013532670438},
+    {"case": "64-b4096-a8-w32-r8rr", "gpus": 64, "batch": 4096, "asr": 8, "router_processes": 8, "seconds": 17.82727586914286, "p95_seconds": 18.598295667, "samples_per_second": 229.76028587125563},
+    {"case": "64-b4096-a16-w32-r8rr", "gpus": 64, "batch": 4096, "asr": 16, "router_processes": 8, "seconds": 15.872002835333333, "p95_seconds": 16.765864867, "samples_per_second": 258.0644700290579}
+  ],
+  "scaling": {
+    "original_weak_32_B2048_A4_to_64_B4096_A8": {
+      "throughput_speedup": 1.0748150632091862,
+      "efficiency_vs_ideal_2x": 0.5374075316045931,
+      "generation_seconds": [17.96012876347619, 34.568535157619046],
+      "train_seconds": [1.3697064865238096, 1.46854028],
+      "publication_seconds": [0.5912941654285715, 1.0698066069047618]
+    },
+    "matched_strong_R8_B4096_A8_32_to_64": {
+      "speedup": 1.0373386856816558,
+      "efficiency_vs_ideal_2x": 0.5186693428408279,
+      "generation_seconds": [15.04014270104762, 14.899200037],
+      "train_seconds": [2.514842465285714, 1.486996799142857],
+      "publication_seconds": [0.8965365312380953, 1.3938973564285715],
+      "actor_train_seconds": [1.5752068360646565, 0.8287879171825591],
+      "generation_concurrency_per_engine": 16,
+      "generation_total_concurrency": [512, 1024],
+      "generation_concurrency_per_execution_worker": [16, 32],
+      "execution_workers": 32,
+      "asr_total_client_inflight_limit": 128,
+      "note": "GPU count is the explicit change, but derived generation concurrency also doubles. All other client and ASR settings remain fixed."
+    },
+    "matched_R8_64_B4096_ASR8_to_ASR16": {
+      "speedup": 1.1231900632891023,
+      "time_reduction_percent": 10.96787332042075,
+      "asr_client_queue_mean_seconds": [1.7511726048787912, 0.8278252610542749],
+      "asr_http_mean_seconds": [0.28355514214424765, 0.21215251157852727],
+      "scope": "ASR GPU count doubles; router entry also gains error-only diagnostics, so not byte-identical code. Successful-path transport settings unchanged."
+    },
+    "R8_B4096_32plus8_to_64plus16": {"speedup": 1.1651285040230133, "efficiency_vs_ideal_2x": 0.5825642520115066},
+    "combined_optimization_vs_original_B2048_anchor": {
+      "A8_throughput_speedup": 2.2398526140962307,
+      "A16_throughput_speedup": 2.5157801993850066,
+      "warning": "Router/software, batch, GPU and ASR changes are combined. Not evidence of superlinear GPU scaling. No optimized R8/B2048 anchor was run."
+    }
+  },
+  "bottlenecks": [
+    {
+      "finding": "Original router/HTTP path dominates before optimization",
+      "evidence": "Single router median CPU approximately one core; doubling batch nearly doubles generation/reward time while learner time remains nearly constant. ASR16 alone, W64, client inflight16 and concurrency32 variants remain about 36-37 seconds.",
+      "intervention": "Round-robin alone remains 37.02 s. Native eight-process routing plus its HTTP-pool implementation gives 17.83 s, 2.0768x versus single-process round-robin at the same 64 GPUs and ASR8.",
+      "limitation": "This intervention changes process count and native upstream HTTP-pool behavior; no isolated hot-function or process-count-only claim."
+    },
+    {
+      "finding": "After router optimization, learner compute is no longer dominant",
+      "best_A16_phase_seconds": {"generate_reward_and_collection": 12.800418132238095, "train": 1.5036218717619048, "publish": 1.5175932661428573, "clear_memory": 0.04539239947619048},
+      "learner_rollout_gpu_busy_mean_percent": 32.4077515015015,
+      "learner_rollout_peak_memory_gib": 124.064453125,
+      "interpretation": "The matched 32-to-64 run saves 1.03 s in training, but generation/reward barely improves and publication adds 0.50 s. Actor training itself improves 1.90x; end-to-end throughput improves only 1.037x."
+    },
+    {
+      "finding": "Fixed ASR admission and post-generation work consume the saved generation time",
+      "matched_32_to_64_last_generation_response_finishes_earlier_seconds": 3.022004990350632,
+      "matched_32_to_64_after_last_response_tail_seconds": [4.139100307771949, 7.020162634074963],
+      "best_A16_logged_rollout_seconds": 8.723201774415516,
+      "best_A16_driver_generate_minus_logged_rollout_seconds": 4.0772163578225795,
+      "best_A16_after_last_generation_response_seconds": 5.86943537221743,
+      "best_A16_execution_worker_cpu_seconds_per_batch": 119.72708819595238,
+      "best_A16_all_router_DP_cpu_cores_mean": 2.6733866067303946,
+      "interpretation": "Increasing ASR replicas helps only after routing is unblocked. Remaining tail includes reward completion, artifacts/metrics, conversion/splitting, finish_rollout and RPC return. These overlapping quantities must not be added or labeled pure disk I/O, pure ASR GPU time, or pure GPU generation."
+    }
+  ],
+  "stability_and_checkpoint": {
+    "accepted": false,
+    "best_short_run": {
+      "case": "64-b4096-a16-w32-r8rr",
+      "updates": 25,
+      "selected_samples": 102400,
+      "successful_real_wer_samples": 102400,
+      "rank_audits": 1600,
+      "zero_frame_samples": 0,
+      "length_truncated_samples": 0,
+      "policy_versions": "1 through 26, all 64 replicas",
+      "gradient_norm_range": [0.1055576279759407, 0.11475684493780136]
+    },
+    "confirmation": {
+      "case": "64-confirm",
+      "selected_from": "64-b4096-a16-w32-r8rr",
+      "requested_updates": 100,
+      "completed_updates": 35,
+      "failed_generation_rollout_index": 35,
+      "failure_reported_utc": "2026-10-19 22:42:55 UTC",
+      "all_eight_node_returncodes": [1, 1, 1, 1, 1, 1, 1, 1],
+      "summary_independently_recomputed": "Exact JSON-normalized match",
+      "diagnostic_prefix_steady_windows": 32,
+      "diagnostic_prefix_mean_seconds_NOT_accepted_performance": 15.67781842375,
+      "completed_prefix_selected_samples": 143360,
+      "completed_prefix_successful_rewards_and_wer": 143360,
+      "completed_prefix_rank_audits": 2240,
+      "completed_prefix_zero_or_truncated_samples": 0,
+      "completed_prefix_policy_versions": "1 through 36, all 64 replicas",
+      "gradient_norm_range": [0.10332042723894119, 0.13144849240779877],
+      "asr_fingerprint": "8d55fe2aec5d5a65ce7c92c8e7495ebd9fe0b5beeff7fc637f367330648f6a3f",
+      "exception": "HTTP503 on http://10.254.1.136:4527/generate",
+      "failure_mechanism": "Shared-admission sibling seqlock did not stabilize within fail-fast reads; admission shed requests and the native proxy mapped the false return to router_overloaded HTTP503.",
+      "log_sequence": ["sibling admission slot unstable; shedding until reclaim", "route_rejected ... path=/generate status_code=503 reason=router_overloaded (three records)", "sibling admission slots readable again; resuming admission"],
+      "code_path": "source/omni/sglang_omni_router/python/admission_shm.py: SlotCodec.read(fail_fast=True), SharedAdmission.try_acquire and 50ms cached unstable shedding; python/proxy.py forward_model_request maps any failed admission to router_overloaded",
+      "not_proven": "A capacity-limit hit, ASR saturation as the failure cause, learner numerical divergence, or the exact OS/writer event that left the slot temporarily unreadable. The restored-readability warning does not by itself prove a DP crash or no crash.",
+      "CPU_reproduction": "analysis/reproduce-admission.json: same pinned module rejects with zero inflight while sibling seq is odd, keeps rejecting after writer resumes until cached 50ms reprobe expires, then admits without a process restart. Controlled protocol reproduction, not a GPU fix validation.",
+      "checkpoint": "No final training_commit_99.json; final-only save was never reached. No newly validated resumable checkpoint from this campaign."
+    },
+    "restart": {
+      "case": "64-resume",
+      "completed_updates": 0,
+      "result": "Failed before training: explicit --load does not identify a supported checkpoint because confirmation never saved one",
+      "safety": "No silent fallback to pretrained weights",
+      "acceptance": "Optimizer, scheduler and model checkpoint restart NOT verified"
+    },
+    "earlier_R4_failures": "Two failed attempts at 8 and 2 updates with upstream ReadError/HTTP502 on different workers. Preserved diagnostics did not show OOM on inspected nodes; lower-level cause unresolved. These are not the same observed failure path as confirmation's admission HTTP503. See 20261019-r4-repeat.json."
+  },
+  "terminal_and_resource_state": {
+    "job": "prism-grpo64-matrix-1019",
+    "platform_status": "SUCCEEDED",
+    "business_acceptance": "FAILED",
+    "why_statuses_differ": "Original frozen campaign returned zero after summarizing failed cases. A terminal receipt previously meant script completion, not business acceptance.",
+    "finished_utc": "2026-10-19 22:44:35 UTC",
+    "training_pods": "All eight released; attempted in-instance inspection found no running instances",
+    "asr_serving": "prism-grpo64-asr-1019",
+    "asr_live_status_at_review": "STOPPED",
+    "asr_replica_configuration_retained": 16,
+    "new_allocation_submitted": false,
+    "missing_diagnostics": "The final confirmation's node-local Ray logs, router shared-memory state and cgroup counters could not be retained before automatic pod release. Shared launch/lifecycle logs, phases, samples, rank audits and GPU/process telemetry remain."
+  },
+  "changes_after_GPU_release": {
+    "runtime_fix": "None claimed. The shared-admission defect remains unvalidated for long GPU runs.",
+    "analysis": "Separate business acceptance from matrix completeness and historical all_valid. Require independent confirmation and verified checkpoint restart artifacts.",
+    "campaign": "Gate resume on valid parent summary, checkpoint verification and commit file; skipped prerequisites produce invalid terminal summaries; all nodes propagate final acceptance failure via nonzero exit.",
+    "reproducer": "reproduce_admission.py performs a CPU-only below-capacity transient-slot reproduction against the pinned Omni module.",
+    "tests": "38 CPU tests passed with pinned Omni on PYTHONPATH, including two real multiprocess HTTP/control-plane cleanup tests. No post-fix GPU validation; frozen runtime and historical receipts are unchanged."
+  },
+  "remaining_work_requiring_new_GPU_allocation": [
+    "Repair transient shared-admission reads using bounded asynchronous pre-forward admission retry or a properly synchronized counter design, preserving global capacity, fencing, deadlines and cancellation. Do not disable safety checks or blindly regenerate a request after an upstream failure.",
+    "Test transient live-writer pauses and dead/fenced writers, then rerun selected 64-GPU B4096/R8/ASR16 configuration for at least 100 updates without masked sample failures.",
+    "Save an intermediate checkpoint as well as the final checkpoint; validate model/optimizer/scheduler metadata and perform an actual checkpoint load followed by further optimizer updates.",
+    "Arrange bounded failed-pod retention and automatic shared-disk failure capture before allocation release; keep CPU-only monitoring rather than language-model polling.",
+    "If optimizing further, isolate reward admission from artifact/collection CPU and I/O costs; preserve real ASR, complete batches and the same measurement boundary."
+  ],
+  "evidence": {
+    "aggregate": "analysis/report.json and analysis/results.csv",
+    "per_case": "runs/*/{case.json,summary.json,phases.jsonl,bottleneck.json,node-*/launch.log,validation/,experiment/records/train/}",
+    "confirmation_log_sha256": "ec456e0ae37c3b4016f30ae824899bdb69cddf3e1b4b9f06a0367496bbd85365",
+    "confirmation_summary_sha256": "6938d2e0e98ccb232daba3c22d38453a7ce4a41d9abeabe9495812ae402e8770",
+    "restart_log_sha256": "5eaacb8220470bd85631e4f1acbe7929dce48782ddd6f5dbd8edc2e9d82c7457",
+    "admission_module_sha256": "b530cd04b321eaaead80d8d604bb3aa10aee65e7f35ec91a90aa6c2a9514e33a",
+    "related_committed_reports": ["20261019-r8.json", "20261019-r8-asr16.json", "20261019-r8-strong-scaling.json", "20261019-b2048-anchor.json", "20261019-r4-repeat.json"],
+    "authority": "This terminal report supersedes earlier reports' pending-confirmation status, not their measured short-run values."
+  }
+}

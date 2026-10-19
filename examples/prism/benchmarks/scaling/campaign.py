@@ -47,10 +47,33 @@ def resolve_case(root, candidate):
             case[key] = best[key]
         case["selected_from"] = best["name"]
     if case.get("resume"):
-        previous = json.loads((root / "runs" / case["resume"] / "case.json").read_text())
+        parent = root / "runs" / case["resume"]
+        previous = json.loads((parent / "case.json").read_text())
+        summary = parent / "summary.json"
+        verification = parent / "checkpoint-verification.json"
+        commit = parent / "checkpoint/rollout" / f"training_commit_{previous['steps'] - 1}.json"
+        if not (
+            summary.exists() and json.loads(summary.read_text()).get("valid") is True
+            and verification.exists() and json.loads(verification.read_text()).get("valid") is True
+            and commit.is_file()
+        ):
+            raise RuntimeError(f"Resume prerequisite failed: {case['resume']} needs valid confirmation and checkpoint")
         for key in ("asr_replicas", "workers", "concurrency", "asr_inflight"):
             case[key] = previous[key]
     return case
+
+
+def finish_campaign(root):
+    from analyze import analyze
+
+    result = analyze(root)  # Reload the manifest, including supplemental attempts.
+    receipt = {
+        "finished": time.time(),
+        "acceptance": result["acceptance"],
+        "returncode": 0 if result["acceptance"]["accepted"] else 1,
+    }
+    atomic_json(root / "campaign-finished.json", receipt)
+    return receipt
 
 
 def run_node(root, manifest, case, rank, master, address, index):
@@ -246,6 +269,12 @@ def main():
                 )
                 atomic_json(root / "services/request.json", {"case": case["name"], "replicas": case["asr_replicas"]})
             except Exception as error:
+                # A skipped prerequisite is a terminal invalid attempt, not a
+                # missing result or a successful zero-update benchmark.
+                atomic_json(run / "summary.json", {
+                    "case": candidate["name"], "valid": False, "updates": 0,
+                    "steady_steps": 0, "issues": [f"Case preparation failed: {error!r}"],
+                })
                 atomic_json(run / "skip.json", {"error": repr(error)})
         wait_for(lambda: (run / "case.json").exists() or (run / "skip.json").exists(), "Case not prepared")
         if (run / "skip.json").exists():
@@ -273,11 +302,10 @@ def main():
             atomic_json(run / "summary.json", summarize_case(run))
         wait_for(lambda: (run / "summary.json").exists(), "Case analysis", 600)
     if rank == 0:
-        from analyze import analyze
-
-        analyze(root)
-        atomic_json(root / "campaign-finished.json", {"finished": time.time()})
+        finish_campaign(root)
+    wait_for(lambda: (root / "campaign-finished.json").exists(), "Campaign acceptance", 600)
+    return json.loads((root / "campaign-finished.json").read_text())["returncode"]
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
