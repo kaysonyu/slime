@@ -244,13 +244,29 @@ def analyze(root):
             "speedup": a["step_seconds"] / b["step_seconds"],
             "efficiency": a["step_seconds"] / b["step_seconds"] / 2,
         }
+    def latest_valid_attempt(name):
+        family = {name}
+        for case in manifest["cases"]:
+            if case.get("retry_of") in family:
+                family.add(case["name"])
+        # Choose the latest complete valid attempt, never the fastest attempt.
+        for case in reversed(manifest["cases"]):
+            result = reports.get(case["name"], {})
+            if case["name"] in family and result.get("valid") and result.get("steady_steps", 0) >= 21:
+                return case["name"]
+        return name
+
     aggregate["router_comparisons"] = {}
     for label, control, candidate in (
         ("single_process_policy", "64-b4096-a8-w32", "64-b4096-a8-w32-r1rr-retry"),
         ("native_four_process", "64-b4096-a8-w32-r1rr-retry", "64-b4096-a8-w32-r4rr-retry"),
+        ("native_eight_process", "64-b4096-a8-w32-r1rr-retry", "64-b4096-a8-w32-r8rr"),
         ("native_eight_vs_four_process", "64-b4096-a8-w32-r4rr-retry", "64-b4096-a8-w32-r8rr"),
         ("asr16_vs_asr8_native_four_process", "64-b4096-a8-w32-r4rr-retry", "64-b4096-a16-w32-r4rr"),
+        ("asr16_vs_asr8_native_eight_process", "64-b4096-a8-w32-r8rr", "64-b4096-a16-w32-r8rr"),
+        ("matched_strong_scaling_native_eight_process", "32-b4096-a8-w32-r8rr", "64-b4096-a8-w32-r8rr"),
     ):
+        control, candidate = latest_valid_attempt(control), latest_valid_attempt(candidate)
         a, b = reports.get(control, {}), reports.get(candidate, {})
         if not all(
             item.get("valid") and item.get("steady_steps", 0) >= 21 and item.get("step_seconds") for item in (a, b)

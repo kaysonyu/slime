@@ -410,6 +410,16 @@ def test_router_comparisons_require_complete_valid_controls(tmp_path):
     assert set(comparison) == {"single_process_policy"}
     assert comparison["single_process_policy"]["speedup"] == 40 / 38
     assert comparison["single_process_policy"]["phase_seconds_saved"]["generate"] == 2
+    retry = names[-1] + "-retry"
+    cases = [{"name": name} for name in names] + [{"name": retry, "retry_of": names[-1]}]
+    write_json(tmp_path / "manifest.json", {"cases": cases})
+    write_json(
+        tmp_path / "runs" / retry / "summary.json",
+        {"case": retry, "valid": True, "steady_steps": 21, "step_seconds": 25, "phase_seconds": {"generate": 23}},
+    )
+    comparison = analyze(tmp_path)["router_comparisons"]
+    assert comparison["native_four_process"]["candidate"] == retry
+    assert comparison["native_four_process"]["speedup"] == 38 / 25
 
 
 def test_percentile_keeps_slow_steps():

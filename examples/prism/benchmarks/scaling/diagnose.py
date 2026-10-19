@@ -148,7 +148,7 @@ def diagnose(run):
             }
         )
     result["generation_timeline"] = intervals
-    worker_cpu = {}
+    worker_cpu, rollout_wall = {}, {}
     pattern = re.compile(r"perf (\d+): (\{.*\})")
     with (run / "node-0/launch.log").open(errors="replace") as stream:
         for line in stream:
@@ -156,10 +156,29 @@ def diagnose(run):
                 continue
             match = pattern.search(re.sub(r"\x1b\[[0-9;]*m", "", line))
             if match:
-                worker_cpu[int(match[1])] = ast.literal_eval(match[2])["rollout/execution_worker_cpu_seconds"]
+                metrics = ast.literal_eval(match[2])
+                worker_cpu[int(match[1])] = metrics["rollout/execution_worker_cpu_seconds"]
+                if "perf/rollout_time" in metrics:
+                    rollout_wall[int(match[1])] = metrics["perf/rollout_time"]
     result["execution_worker_cpu_seconds"] = distribution(
         [worker_cpu[w["step"]] for w in steady if w["step"] in worker_cpu]
     )
+    result["generation_boundary_breakdown"] = {
+        "logged_rollout_seconds": distribution(
+            [rollout_wall[w["step"]] for w in steady if w["step"] in rollout_wall]
+        ),
+        "driver_generate_minus_logged_rollout_seconds": distribution(
+            [w["phases"]["generate"] - rollout_wall[w["step"]] for w in steady if w["step"] in rollout_wall]
+        ),
+        "after_last_generation_response_seconds": distribution(
+            [
+                row["after_last_generation_response_seconds"]
+                for row in intervals
+                if row["after_last_generation_response_seconds"] is not None
+            ]
+        ),
+        "scope": "Logged rollout_time stops before custom artifact/metric logging, batch conversion and splitting, serving finish_rollout and RPC return. The difference includes those operations and timing-boundary overhead; it does not isolate any one of them. The last-response tail also includes reward/ASR completion and must not be interpreted as pure GPU generation or pure ASR service time.",
+    }
     result["generation_http_request_counts"] = dict(
         sum(
             (
