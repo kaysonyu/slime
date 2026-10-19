@@ -78,6 +78,9 @@ def main():
                 if serving.get("status") == "STOPPED":
                     cli("serving", "start", service, "--workspace", workspace)
                     acknowledged = None
+                    # Starting is asynchronous; scale is accepted only after RUNNING.
+                    time.sleep(args.interval)
+                    continue
                 request_file = root / "services/request.json"
                 if request_file.exists():
                     request = json.loads(request_file.read_text())
@@ -85,6 +88,9 @@ def main():
                         replicas = request["replicas"]
                         if replicas not in {4, 8, 16}:
                             raise ValueError("ASR request exceeds approved matrix")
+                        if serving.get("status") != "RUNNING":
+                            time.sleep(args.interval)
+                            continue
                         if serving.get("replicas") != replicas:
                             cli("serving", "scale", service, "--workspace", workspace, "--replicas", str(replicas))
                         instances = cli("serving", "instances", service, "--workspace", workspace).get("items", [])
