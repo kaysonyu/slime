@@ -1,0 +1,61 @@
+{
+  "status": "Four-process configuration fails stability acceptance; lower-level transport cause unresolved",
+  "reviewed_utc": "2026-10-19 21:42 UTC",
+  "experiment_root": "/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/grpo64-20261019",
+  "case": "64-b4096-a8-w32-r4rr-retry-retry",
+  "repeat_of": "64-b4096-a8-w32-r4rr-retry",
+  "configuration_comparison": "Exact equality after excluding name and retry_of; model/data/seed/rewards/GPU count/ASR count/router code and settings unchanged",
+  "router_revision_in_both_attempts": "0655097d5e8bb7bd254f09f446b9d36aea5951d0",
+  "observations": [
+    {
+      "case": "64-b4096-a8-w32-r4rr-retry",
+      "successful_updates_before_failure": 8,
+      "failed_generation_rollout": 8,
+      "upstream": "10.254.9.137:15115",
+      "node": "qb-prod-gpu1080",
+      "error": "Native data plane reports ReadError; rollout receives HTTP 502"
+    },
+    {
+      "case": "64-b4096-a8-w32-r4rr-retry-retry",
+      "successful_updates_before_failure": 2,
+      "failed_generation_rollout": 2,
+      "upstream": "10.254.20.129:15189",
+      "node": "qb-prod-gpu1954",
+      "error": "Native data plane reports ReadError; rollout receives HTTP 502",
+      "steady_windows": 0,
+      "failed_case_is_excluded_from_performance_selection": true
+    }
+  ],
+  "evidence": {
+    "affected_node": "runs/64-b4096-a8-w32-r4rr-retry-retry/failure-evidence/node-7/",
+    "affected_node_log_files": 57,
+    "affected_node_archive_sha256": "304de0971133d0420df879d9fefb3e1f3bd758d8e8fa7f443dc2f9c323d767ef",
+    "head_node": "runs/64-b4096-a8-w32-r4rr-retry-retry/failure-evidence/node-0/",
+    "head_node_log_files": 301,
+    "head_node_archive_sha256": "add5c537ddb6845055d575ef68ccd80d59166736b111c348ebc32881530848ce",
+    "oom_and_oom_kill_counters_at_capture": "Both zero on affected node and head",
+    "affected_node_worker_stderr_error_search": "No ERROR, Error, Traceback or Killed match",
+    "affected_node_raylet": "No worker disconnect/death/exit record before the observed failure; teardown follows training failure",
+    "sampler": "Never attached; experiment ended before final-rollout trigger"
+  },
+  "interpretation": {
+    "supported": "The same error category recurred on another node with unchanged four-process configuration. It cannot be treated as an isolated single-node incident or accepted as stable.",
+    "not_supported": "No proof yet of a particular kernel/network/frontend/connection-pool defect. Existing proxy logging discards exception details and retains only ReadError. Recurrence does not prove eight-process immunity.",
+    "performance": "Neither four-process failure supplies a complete accepted measurement. The completed eight-process 17.827-second result remains a short-run result, not long-run acceptance."
+  },
+  "next_actions": {
+    "repeat_four_process_unchanged": false,
+    "reason": "Two unchanged transport failures; another identical GPU rerun without new evidence would not establish a fix",
+    "instrumentation_revision": "3a5dd4e7e45122f3c49ffedcc162f8da56dd51b2",
+    "instrumentation_scope": "Native standalone DP only: log transport exception classes, errno and stack locations before native handler reduces them to a class name; re-raise the exact original exception. No successful-request logging, hidden retries, connection-pool, timeout, routing, publication, learner or Omni changes.",
+    "privacy": "No request headers/body, URL userinfo/query, or exception message text recorded",
+    "applied_before_admission": ["64-b4096-a16-w32-r8rr", "32-b4096-a8-w32-r8rr"],
+    "confirmation": "Compatible native-router candidates selected for 100-update confirmation inherit the diagnostics-only revision; original completed candidates remain immutable",
+    "local_tests_passed": 27,
+    "actual_job_image_tests_passed": 4,
+    "actual_job_image_test_seconds": 11.09,
+    "remaining": "Finish ASR16 and matched 32-GPU controls, original baseline, 100-update confirmation and checkpoint restore; diagnose any new transport failure from retained exception chain",
+    "additional_allocations": 0,
+    "maximum_extra_asr_replicas": 16
+  }
+}
