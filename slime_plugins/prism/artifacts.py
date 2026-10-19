@@ -153,6 +153,7 @@ def _record(sample, *, reward_value=None, reward_status="pending", error=None, f
         "model_identity": trace.get("model_identity"),
         "sampling": trace.get("sampling"),
         "request_id": trace.get("request_id"),
+        "generation_client_timing": metadata.get("omni_client_timing"),
         "teacher": {
             name.removeprefix("omni_teacher_"): value
             for name, value in metadata.items()
@@ -287,9 +288,7 @@ def _prepare_sample(args, sample, rollout_id, evaluation):
                             if not link.is_symlink() or (
                                 link.readlink() != reference_path and link.resolve() != reference_path
                             ):
-                                raise ValueError(
-                                    f"Reference changed within an archived prompt group: {link}"
-                                ) from None
+                                raise ValueError(f"Reference changed within an archived prompt group: {link}") from None
                 group.fingerprint = fingerprint
 
     reward_path = sample.custom_rm_path or args.custom_rm_path

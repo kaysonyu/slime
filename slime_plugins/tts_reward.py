@@ -24,6 +24,7 @@ import json
 import math
 import os
 import re
+import time
 import unicodedata
 import uuid
 import weakref
@@ -249,7 +250,9 @@ class _Service:
 
     async def evaluate(self, route, request):
         async def run():
+            started = time.perf_counter()
             async with self._slots:
+                admitted = time.perf_counter()
                 body = await post(
                     self.url(route), request, max_retries=self.attempts, timeout=self.timeout, **self._request_auth
                 )
@@ -259,6 +262,13 @@ class _Service:
                     raise ScoringError("scoring response request_id mismatch")
                 if not isinstance(body.get("result"), dict):
                     raise ScoringError("scoring response requires a result object")
+                body = dict(
+                    body,
+                    _client_timing={
+                        "queue_s": admitted - started,
+                        "http_s": time.perf_counter() - admitted,
+                    },
+                )
                 return body
 
         return await asyncio.wait_for(run(), self.timeout)
@@ -270,6 +280,7 @@ def _result(raw, transformed, body=None, **details):
         "transformed": transformed,
         "status": "success",
         "identity": body.get("identity") if body else None,
+        "client_timing": body.get("_client_timing") if body else None,
         "details": details,
     }
 
