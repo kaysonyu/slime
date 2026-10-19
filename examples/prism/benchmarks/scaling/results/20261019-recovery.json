@@ -49,7 +49,22 @@
     "gloo_all_reduce_expected_and_observed": 28,
     "gloo_preflight_receipts": "platform/router-extension/gloo-{0..7}.json",
     "inherited_network_receipts": "platform/router-extension/network-{0..7}.json",
-    "gpu_confirmation": "pending"
+    "gpu_confirmation": {
+      "case": "64-b4096-a8-w32-r1rr-retry",
+      "first_update_completed_utc": "2026-10-19 20:48:58",
+      "rank_audits": 64,
+      "samples": 4096,
+      "grpo_groups": 512,
+      "candidates_per_group": 8,
+      "real_wer_successes": 4096,
+      "asr_identities": 1,
+      "sample_policy_version": 1,
+      "published_updated_policy_version": 2,
+      "publication_replicas": 64,
+      "grad_norm": 0.11209142953157425,
+      "loss": 0.0006987317465245724,
+      "acceptance_scope": "Environment repair passed a real full update; not yet a complete timing, multiprocess-router, long-stability or checkpoint acceptance."
+    }
   },
   "existing_valid_measurements": {
     "method": "25 actual updates; 21 steady adjacent-generation-start intervals, excluding the first three updates and the unclosed final interval. Initializations are excluded, training and weight publication are included.",
