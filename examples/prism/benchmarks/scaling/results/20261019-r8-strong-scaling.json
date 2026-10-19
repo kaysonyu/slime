@@ -1,0 +1,133 @@
+{
+  "status": "Matched B4096 strong-scaling short runs complete; B2048 anchor, 100-update stability and checkpoint recovery pending",
+  "reviewed_utc": "2026-10-19 22:14 UTC",
+  "experiment_root": "/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/grpo64-20261019",
+  "cases_in_column_order": ["32-b4096-a8-w32-r8rr", "64-b4096-a8-w32-r8rr"],
+  "matched_configuration": {
+    "model": "Prism 1.7B v0.4",
+    "dataset": "fullclone_chinese",
+    "batch_samples": 4096,
+    "candidates_per_prompt": 8,
+    "extra_asr_gpus": 8,
+    "reward": "real Qwen3-ASR WER",
+    "execution_workers": 32,
+    "router_data_processes": 8,
+    "router_policy": "round_robin",
+    "generation_concurrency_per_engine": 16,
+    "asr_max_inflight_per_execution_worker": 4,
+    "derived_generation_concurrency_total": [512, 1024],
+    "derived_generation_concurrency_per_execution_worker": [16, 32],
+    "derived_aggregate_asr_client_inflight_limit": [128, 128],
+    "concurrency_scope": "Configured upper limits, not measurements of simultaneous requests. get_rollout_num_engines and RolloutExecutionPool derive total generation concurrency from GPU engine count, so doubling GPUs also doubles the derived generation concurrency under an unchanged per-engine setting.",
+    "instrumentation_difference": "32 GPUs uses diagnostic-only router 3a5dd4e7; the earlier 64-GPU control uses 0655097d. No pool, routing, retries, timeout or publication behavior changed; successful requests do not log. Not a byte-identical router control.",
+    "runtime_sources": "Learner, Omni, data order, seed and model checkpoints remain pinned by manifest.json"
+  },
+  "audit_32_gpu_case": {
+    "valid": true,
+    "independent_summary_recomputation": "Exact JSON-normalized match",
+    "updates": 25,
+    "steady_windows": 21,
+    "participating_nodes": [0, 1, 2, 3],
+    "allocated_but_nonparticipating_nodes": [4, 5, 6, 7],
+    "all_eight_node_returncodes": [0, 0, 0, 0, 0, 0, 0, 0],
+    "rank_schedule_audits": 800,
+    "microbatch_schedule_counts": {"[2]": 800},
+    "selected_samples": 102400,
+    "successful_rewards": 102400,
+    "successful_wer_components": 102400,
+    "zero_frame_samples": 0,
+    "length_truncated_samples": 0,
+    "policy_publications": "Versions 1 through 26, each to all 32 replicas",
+    "gradient_norm_range": [0.10562819987535477, 0.11954013258218765],
+    "asr_fingerprint": "8d55fe2aec5d5a65ce7c92c8e7495ebd9fe0b5beeff7fc637f367330648f6a3f",
+    "driver_log_transport_failure_or_traceback_matches": 0,
+    "quality_scope": "Execution and real reward correctness, not convergence or perceptual quality acceptance"
+  },
+  "timing": {
+    "method": "Adjacent generate starts, excluding three warmup updates and the final unclosed interval; 21 steady windows per case. Includes generation, scoring, artifacts/conversion, training and weight publication; excludes initialization.",
+    "mean_seconds": [18.492922919380952, 17.82727586914286],
+    "p50_seconds": [18.410744007, 17.697639732],
+    "p95_seconds": [19.234711283, 18.598295667],
+    "samples_per_second": [221.49013532670438, 229.76028587125563],
+    "mean_frames_per_sample": [92.02701822916667, 92.2866443452381],
+    "strong_scaling_speedup": 1.0373386856816558,
+    "strong_scaling_efficiency": 0.5186693428408279,
+    "time_reduction_percent": 3.5994691219984554,
+    "generate_seconds": [15.04014270104762, 14.899200037],
+    "train_seconds": [2.514842465285714, 1.486996799142857],
+    "publish_seconds": [0.8965365312380953, 1.3938973564285715],
+    "clear_memory_seconds": [0.036698007619047616, 0.04230106814285714],
+    "actor_train_seconds": [1.5752068360646565, 0.8287879171825591],
+    "train_phase_speedup": 1.6912225142215058,
+    "actor_train_metric_speedup": 1.9006151072032123,
+    "statistical_scope": "Descriptive means from separate short runs; no statistical significance or all-workload scaling claim"
+  },
+  "why_not_linear": {
+    "phase_accounting": {
+      "train_seconds_saved": 1.0278456661428572,
+      "generate_seconds_saved": 0.14094266404761946,
+      "publication_seconds_increase": 0.4973608251904762,
+      "interpretation": "Learner computation benefits substantially, but it is a small fraction of the whole step. Publication takes longer at 64 replicas, and generation plus reward processing barely improves. Do not call the observed publication increase network-bandwidth saturation: transfer, control and acknowledgement costs were not separately timed."
+    },
+    "pipeline_tail_evidence": {
+      "last_generation_response_offset_mean_seconds": [10.90104239327567, 7.879037402925038],
+      "after_last_generation_response_mean_seconds": [4.139100307771949, 7.020162634074963],
+      "asr_client_queue_mean_seconds": [0.16476100425006193, 1.7511726048787912],
+      "asr_client_queue_p95_seconds": [0.4878052592393942, 3.097021814319305],
+      "asr_http_mean_seconds": [0.26154876290691964, 0.28355514214424765],
+      "generation_http_mean_seconds": [1.1401157371187385, 1.1277450829445164],
+      "generation_http_p95_seconds": [1.705461033154279, 1.8597652513999492],
+      "logged_rollout_seconds": [11.33337452298119, 11.01774567649478],
+      "driver_generate_minus_logged_rollout_seconds": [3.7067681780664294, 3.88145436050522],
+      "execution_worker_cpu_seconds_per_batch": [119.04170324990476, 119.08167530133335],
+      "interpretation": "Generation responses finish about 3.02 seconds earlier on 64 GPUs, but the subsequent tail grows about 2.88 seconds. Together with the 10.6x increase in client ASR queueing under a fixed 128-request ASR client limit, this supports a downstream scoring/backpressure bottleneck after generation is accelerated. Tail also includes artifact/metric logging, conversion/splitting, serving completion and RPC return; these overlapping timings do not isolate pure ASR service, storage or network time."
+    },
+    "resource_evidence": {
+      "learner_rollout_gpu_mean_busy_percent": [48.309481648422405, 33.00108622994652],
+      "asr_gpu_device_mean_busy_percent": [26.99565820777161, 25.636036522926386],
+      "gpu_peak_memory_gib": [124.55078125, 123.95703125],
+      "active_router_data_plane_cpu_cores_mean_sum": [1.6813032189431114, 2.4963995896202085],
+      "scope": "Whole-step utilization includes alternating training, serving and idle phases; it is not kernel efficiency. Nonparticipating nodes are absent from the 32-GPU utilization calculation."
+    },
+    "asr_capacity_intervention": {
+      "case": "64-b4096-a16-w32-r8rr",
+      "mean_seconds": 15.872002835333333,
+      "asr_queue_mean_seconds": 0.8278252610542749,
+      "generate_seconds": 12.800418132238095,
+      "interpretation": "Doubling ASR service replicas at fixed 64 learner/rollout GPUs lowers queueing and improves throughput by 12.3%, supporting the downstream-capacity interpretation. It does not isolate whether changing the client concurrency cap would help; that was not retested after the router change."
+    },
+    "both_gpu_pools_doubled_at_fixed_b4096": {
+      "control": "32 learner/rollout + 8 ASR",
+      "candidate": "64 learner/rollout + 16 ASR",
+      "speedup": 1.1651285040230133,
+      "efficiency": 0.5825642520115066,
+      "scope": "Fixed-B4096 comparison. Not the B2048-to-B4096 weak-scaling result, whose valid B2048 anchor remains pending."
+    }
+  },
+  "profile_32_gpu_case": {
+    "rollout": 24,
+    "duration_seconds": 5,
+    "returncode": 0,
+    "successful_gil_samples": 147,
+    "errors": 48,
+    "scope": "One run-scoped busy data plane, final excluded rollout; not all processes, and sample fractions are not wall-clock shares"
+  },
+  "evidence": [
+    "runs/32-b4096-a8-w32-r8rr/{summary.json,bottleneck.json,resolved-args.json,router-profile/}",
+    "runs/64-b4096-a8-w32-r8rr/{summary.json,bottleneck.json,resolved-args.json}",
+    "runs/64-b4096-a16-w32-r8rr/{summary.json,bottleneck.json,resolved-args.json}",
+    "services/history/32-b4096-a8-w32-r8rr/snapshot.json",
+    "source/source/slime/rollout/execution_pool.py",
+    "source/source/slime/utils/http_utils.py",
+    "source/source/slime_plugins/tts_reward.py",
+    "analysis/report.json"
+  ],
+  "handoff": {
+    "extension_completed": true,
+    "original_parent_baseline_admitted_utc": "2026-10-19 22:12:46 UTC",
+    "baseline_admitted_before_parent_deadline": true,
+    "remaining": ["32-b2048-a4-w16-end", "64-confirm", "64-resume"],
+    "monitoring": "Existing CPU watcher and same-thread resumer alive; no new task, agent, GPU allocation or experiment added"
+  },
+  "record_correction": "The earlier ASR16 result mislabeled concurrency=16 as per execution worker. Corrected to per engine, with derived total=1024 and per-worker=32. Runtime settings, measurements and comparisons are unchanged."
+}
