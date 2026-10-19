@@ -17,10 +17,75 @@ from diagnose import gpu_profile
 from observe_processes import role
 from prepare import convert_prompt, write_json
 import router_python
+import router_extension
 from watch import admission_held, prepare_case_recipe, snapshot_service_telemetry
 from slime_plugins import tts_reward
 from slime_plugins.omni_rollout import _prompt
 from slime.utils.misc import should_run_periodic_action
+
+
+def test_extension_replacement_requires_complete_cleanup_and_held_parent(tmp_path):
+    case = {"name": "supplemental"}
+    run = tmp_path / "runs" / case["name"]
+    router_extension.assert_idle(tmp_path, [case])
+    write_json(run / "services-ready.json", {})
+    with pytest.raises(RuntimeError, match="still running"):
+        router_extension.assert_idle(tmp_path, [case])
+    write_json(run / "summary.json", {"valid": False})
+    with pytest.raises(RuntimeError, match="Cleanup incomplete"):
+        router_extension.assert_idle(tmp_path, [case])
+    for rank in range(8):
+        write_json(run / f"done-{rank}.json", {})
+    router_extension.assert_idle(tmp_path, [case])
+    write_json(tmp_path / "runs" / router_extension.HOLD_CASE / "services-ready.json", {})
+    with pytest.raises(RuntimeError, match="Original parent was admitted"):
+        router_extension.assert_idle(tmp_path, [case])
+
+
+def test_extension_inherits_exact_original_parent_environment_without_persisting_secrets(tmp_path, monkeypatch):
+    import psutil
+    import socket
+
+    source = tmp_path / "frozen"
+    write_json(tmp_path / "manifest.json", {"source": str(source)})
+    write_json(tmp_path / "platform/node-2.json", {"address": "10.1.2.3"})
+    environment = {
+        "PET_NODE_RANK": "2",
+        "PET_NNODES": "8",
+        "GLOO_SOCKET_IFNAME": "bond0",
+        "NCCL_SOCKET_IFNAME": "bond0",
+        "NCCL_IB_HCA": "=mlx5_0",
+        "PRIVATE_TOKEN": "secret",
+    }
+    parent = SimpleNamespace(
+        pid=32,
+        info={"cmdline": ["python", str(source / "examples/prism/benchmarks/scaling/campaign.py"), str(tmp_path)]},
+        environ=lambda: dict(environment),
+    )
+    monkeypatch.setattr(psutil, "process_iter", lambda *args: [parent])
+    monkeypatch.setattr(
+        psutil, "net_if_addrs", lambda: {"bond0": [SimpleNamespace(address="10.1.2.3", family=socket.AF_INET)]}
+    )
+    inherited, receipt = router_extension.inherited_job_environment(tmp_path, 2)
+    assert inherited == environment
+    assert "secret" not in json.dumps(receipt)
+    assert receipt["network"]["GLOO_SOCKET_IFNAME"] == "bond0"
+    environment.pop("GLOO_SOCKET_IFNAME")
+    with pytest.raises(RuntimeError, match="missing GLOO"):
+        router_extension.inherited_job_environment(tmp_path, 2)
+
+
+def test_extension_environment_rejects_unrelated_or_ambiguous_parent(tmp_path, monkeypatch):
+    import psutil
+
+    write_json(tmp_path / "manifest.json", {"source": "/frozen"})
+    monkeypatch.setattr(
+        psutil,
+        "process_iter",
+        lambda *args: [SimpleNamespace(info={"cmdline": ["python", "campaign.py", str(tmp_path)]})],
+    )
+    with pytest.raises(RuntimeError, match="found 0"):
+        router_extension.inherited_job_environment(tmp_path, 0)
 
 
 def test_no_save_recipe_disables_final_checkpoint_before_admission(tmp_path):

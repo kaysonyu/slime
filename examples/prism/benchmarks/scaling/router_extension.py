@@ -11,16 +11,133 @@ import fcntl
 import hashlib
 import json
 import os
+import socket
 import subprocess
 import sys
 import tarfile
 import time
 from pathlib import Path
+from datetime import timedelta
 
 from campaign import atomic_json, run_node, wait_for
 
 HOLD_CASE = "32-b2048-a4-w16-end"
 PREVIOUS_CASE = "64-b2048-a4-w16"
+
+
+def assert_idle(root, cases):
+    """Never replace helpers while any admitted GPU case is unfinished."""
+    for case in cases:
+        output = root / "runs" / case["name"]
+        if (output / "services-ready.json").exists() and not (output / "summary.json").exists():
+            raise RuntimeError(f"Admitted case still running: {case['name']}")
+        if (output / "summary.json").exists() and not all((output / f"done-{i}.json").exists() for i in range(8)):
+            raise RuntimeError(f"Cleanup incomplete: {case['name']}")
+    if (root / "runs" / HOLD_CASE / "services-ready.json").exists():
+        raise RuntimeError("Original parent was admitted; do not overlap GPU work")
+
+
+def inherited_job_environment(root, rank):
+    """An interactive Job shell does NOT inherit the submitted Job environment."""
+    import psutil
+
+    manifest = json.loads((root / "manifest.json").read_text())
+    original = str(Path(manifest["source"]) / "examples/prism/benchmarks/scaling/campaign.py")
+    parents = []
+    for process in psutil.process_iter(["pid", "cmdline"]):
+        command = process.info["cmdline"] or []
+        if original in command and str(root) in command:
+            parents.append(process)
+    if len(parents) != 1:
+        raise RuntimeError(f"Expected one original campaign parent, found {len(parents)}")
+    parent = parents[0]
+    environment = parent.environ()
+    if environment.get("PET_NODE_RANK") != str(rank) or environment.get("PET_NNODES") != "8":
+        raise RuntimeError("Original Job environment belongs to a different node/allocation")
+    for key in ("GLOO_SOCKET_IFNAME", "NCCL_SOCKET_IFNAME", "NCCL_IB_HCA"):
+        if not environment.get(key):
+            raise RuntimeError(f"Original Job is missing {key}")
+    interface = environment["GLOO_SOCKET_IFNAME"]
+    addresses = [item.address for item in psutil.net_if_addrs().get(interface, []) if item.family == socket.AF_INET]
+    address = json.loads((root / "platform" / f"node-{rank}.json").read_text())["address"]
+    if address not in addresses or address.startswith("127."):
+        raise RuntimeError("Gloo interface does not own this allocation's recorded routable address")
+    # Keep the complete inherited environment only in memory; persist no credentials.
+    receipt = {
+        "parent_pid": parent.pid,
+        "rank": rank,
+        "address": address,
+        "time": time.time(),
+        "network": {key: value for key, value in environment.items() if key.startswith(("NCCL_", "GLOO_"))},
+    }
+    return environment, receipt
+
+
+def preflight(root, rank, generation):
+    """Eight CPU-only ranks validate actual Gloo collectives before admission."""
+    import torch
+    import torch.distributed as dist
+
+    master = json.loads((root / "platform/head.json").read_text())["address"]
+    dist.init_process_group(
+        "gloo", init_method=f"tcp://{master}:6490", rank=rank, world_size=8, timeout=timedelta(seconds=120)
+    )
+    try:
+        value = torch.tensor([rank], dtype=torch.int64)
+        dist.all_reduce(value)
+        if value.item() != 28:
+            raise RuntimeError("Cross-node Gloo sum differs from 0+...+7")
+        dist.barrier()
+    finally:
+        dist.destroy_process_group()
+    atomic_json(
+        root / "platform/router-extension" / f"gloo-{rank}.json",
+        {"rank": rank, "generation": generation, "sum": 28, "time": time.time()},
+    )
+
+
+def repair(root, checkout):
+    config_path = root / "platform/router-extension.json"
+    config = json.loads(config_path.read_text())
+    assert_idle(root, config["cases"])
+    if subprocess.check_output(["git", "-C", str(checkout), "status", "--porcelain"], text=True).strip():
+        raise RuntimeError("Commit the repair before pinning it")
+    revision = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip()
+    destination = root / "source" / f"router-extension-{revision[:12]}"
+    destination.mkdir()
+    archive = destination / "source.tar"
+    subprocess.run(["git", "-C", str(checkout), "archive", "--format=tar", "-o", str(archive), revision], check=True)
+    with tarfile.open(archive) as bundle:
+        bundle.extractall(destination, filter="data")
+    completed, pending, retries = [], [], []
+    for case in config["cases"]:
+        summary = root / "runs" / case["name"] / "summary.json"
+        if summary.exists():
+            completed.append(case)
+            result = json.loads(summary.read_text())
+            if not result["valid"]:
+                name = case["name"] + "-retry"
+                if (root / "runs" / name).exists():
+                    raise FileExistsError(f"Refuse overwriting retry {name}")
+                retries.append(dict(case, name=name, retry_of=case["name"]))
+        else:
+            pending.append(case)
+    cases = completed + retries + pending
+    manifest = json.loads((root / "manifest.json").read_text())
+    old_names = {case["name"] for case in config["cases"]}
+    index = next(i for i, case in enumerate(manifest["cases"]) if case["name"] in old_names)
+    manifest["cases"] = [case for case in manifest["cases"] if case["name"] not in old_names]
+    manifest["cases"][index:index] = cases
+    stamp = str(int(time.time()))
+    atomic_json(root / "platform" / f"router-extension-before-repair-{stamp}.json", config)
+    atomic_json(
+        root / "platform" / f"manifest-before-repair-{stamp}.json", json.loads((root / "manifest.json").read_text())
+    )
+    config.update(source=str(destination), commit=revision, generation=revision, cases=cases, repaired=time.time())
+    manifest["router_extension"].update(helper_source=str(destination), helper_commit=revision)
+    atomic_json(root / "manifest.json", manifest)
+    atomic_json(config_path, config)
+    print(json.dumps({"helper_commit": revision, "retries": [case["name"] for case in retries]}))
 
 
 def prepare(root, checkout):
@@ -90,25 +207,44 @@ def run(root, rank):
     extension = json.loads((root / "platform/router-extension.json").read_text())
     manifest = json.loads((root / "manifest.json").read_text())
     record = root / "platform/router-extension"
+    assert_idle(root, extension["cases"])
     with (record / f"rank-{rank}.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        atomic_json(record / f"ready-{rank}.json", {"rank": rank, "pid": os.getpid(), "time": time.time()})
+        generation = extension.get("generation", extension["commit"])
+        atomic_json(
+            record / f"ready-{rank}.json",
+            {"rank": rank, "pid": os.getpid(), "time": time.time(), "generation": generation},
+        )
+
+        def all_current(prefix):
+            return all(
+                (record / f"{prefix}-{i}.json").exists()
+                and json.loads((record / f"{prefix}-{i}.json").read_text()).get("generation") == generation
+                for i in range(8)
+            )
+
+        wait_for(lambda: all_current("ready"), "Current generation of eight helpers", 600)
+        preflight(root, rank, generation)
+        wait_for(lambda: all_current("gloo"), "All eight Gloo preflight results", 180)
         if rank == 0:
-            wait_for(lambda: all((record / f"ready-{i}.json").exists() for i in range(8)), "Extension helpers", 600)
 
             def original_waiting():
                 request = json.loads((root / "services/request.json").read_text())
                 return request["case"] == HOLD_CASE and (root / "runs" / PREVIOUS_CASE / "summary.json").exists()
 
-            wait_for(original_waiting, "Original parents reach the admission hold", 6 * 3600)
+            if not (record / "claimed.json").exists():
+                wait_for(original_waiting, "Original parents reach the admission hold", 6 * 3600)
             if (root / "runs" / HOLD_CASE / "services-ready.json").exists():
                 raise RuntimeError("Original baseline was admitted; do not overlap GPU work")
-            atomic_json(record / "claimed.json", {"time": time.time()})
+            if not (record / "claimed.json").exists():
+                atomic_json(record / "claimed.json", {"time": time.time()})
         wait_for(lambda: (record / "claimed.json").exists(), "Extension takes ownership", 6 * 3600)
         address = json.loads((root / "platform" / f"node-{rank}.json").read_text())["address"]
         master = json.loads((root / "platform/head.json").read_text())["address"]
         for index, case in enumerate(extension["cases"], start=30):
             output = root / "runs" / case["name"]
+            if (output / "summary.json").exists():
+                continue
             if rank == 0:
                 atomic_json(output / "case.json", case)
                 atomic_json(
@@ -154,10 +290,10 @@ def run(root, rank):
 
                 atomic_json(output / "summary.json", summarize_case(output))
             wait_for(lambda: (output / "summary.json").exists(), "Supplemental summary", 600)
-        atomic_json(record / f"finished-{rank}.json", {"time": time.time()})
+        atomic_json(record / f"finished-{rank}.json", {"time": time.time(), "generation": generation})
         if rank == 0:
             wait_for(
-                lambda: all((record / f"finished-{i}.json").exists() for i in range(8)),
+                lambda: all_current("finished"),
                 "All extension helpers finish",
                 120,
             )
@@ -170,10 +306,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
     parser.add_argument("--prepare", type=Path, metavar="CHECKOUT")
+    parser.add_argument("--repair", type=Path, metavar="CHECKOUT")
     parser.add_argument("--launch", action="store_true")
+    parser.add_argument("--replace-idle", action="store_true")
     args = parser.parse_args()
     if args.prepare:
         prepare(args.root, args.prepare)
+        return
+    if args.repair:
+        repair(args.root, args.repair)
         return
     rank = int(os.environ["PET_NODE_RANK"])
     if int(os.environ["PET_NNODES"]) != 8 or rank not in range(8):
@@ -181,13 +322,37 @@ def main():
     record = args.root / "platform/router-extension"
     record.mkdir(exist_ok=True)
     if args.launch:
+        import psutil
+
         config = json.loads((args.root / "platform/router-extension.json").read_text())
+        environment, network = inherited_job_environment(args.root, rank)
+        if args.replace_idle:
+            assert_idle(args.root, config["cases"])
+            receipt_path = record / f"controller-{rank}.json"
+            previous = json.loads(receipt_path.read_text())
+            process = psutil.Process(previous["pid"])
+            if process.cmdline() != previous["command"] or process.children(recursive=True):
+                raise RuntimeError("Old helper identity mismatch or children still active")
+            if (
+                str(Path(config["source"]) / "examples/prism/benchmarks/scaling/router_extension.py")
+                in previous["command"]
+            ):
+                raise RuntimeError("This helper generation is already running")
+            process.terminate()
+            process.wait(timeout=15)
+            atomic_json(record / f"controller-{rank}-before-{config['commit'][:12]}.json", previous)
         script = Path(config["source"]) / "examples/prism/benchmarks/scaling/router_extension.py"
         command = [sys.executable, "-u", str(script), str(args.root)]
         with (record / f"rank-{rank}.log").open("a") as log:
             process = subprocess.Popen(
-                command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                env=environment,
             )
+        atomic_json(record / f"network-{rank}.json", network)
         atomic_json(record / f"controller-{rank}.json", {"pid": process.pid, "command": command})
         print(json.dumps({"rank": rank, "pid": process.pid}))
     else:
