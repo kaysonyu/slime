@@ -219,10 +219,14 @@ def analyze(root):
         for name in ("32-b2048-a4-w16-start", "32-b2048-a4-w16-end")
         if name in reports and reports[name]["valid"] and reports[name].get("steady_steps")
     ]
-    if len(anchors) == 2:
+    if anchors:
         baseline = sum(r["step_seconds"] * r["steady_steps"] for r in anchors) / sum(r["steady_steps"] for r in anchors)
         aggregate["baseline_32_b2048_seconds"] = baseline
-        aggregate["baseline_drift_percent"] = (anchors[1]["step_seconds"] / anchors[0]["step_seconds"] - 1) * 100
+        aggregate["baseline_32_b2048_cases"] = [r["case"] for r in anchors]
+        aggregate["baseline_drift_percent"] = (
+            (anchors[1]["step_seconds"] / anchors[0]["step_seconds"] - 1) * 100 if len(anchors) == 2 else None
+        )
+        aggregate["baseline_drift_measured"] = len(anchors) == 2
         aggregate["weak_scaling"] = {
             name: {"throughput_speedup": 2 * baseline / r["step_seconds"], "efficiency": baseline / r["step_seconds"]}
             for name, r in reports.items()

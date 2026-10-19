@@ -7,11 +7,26 @@ import subprocess
 import tarfile
 from itertools import islice
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+
+
+def convert_prompt(old):
+    if "task_type" not in old:
+        raise ValueError("Expected the fixed fullclone revision-6 source dataset")
+    slots = {ref["id"]: f"audio{i+1}" for i, ref in enumerate(old["references"])}
+    return {
+        "modality": "speech",
+        "script": old["transcript_target"],
+        "references": {f"audio{i+1}": ref["uri"] for i, ref in enumerate(old["references"])},
+        "reference_attributes": {key: slots[value] for key, value in old["reference_targets"].items()},
+        "global_instruction": {"Language": old["language"]} if old["show_language"] else {},
+        "global_tokens": None,
+    }
 
 
 def main():
@@ -34,22 +49,14 @@ def main():
         (root / directory).mkdir(parents=True, exist_ok=True)
     references = set()
     count = 0
+    from slime_plugins.omni_rollout import _prompt
+
     with args.input.open() as stream, (root / "data/train.jsonl").open("w") as out:
         for count, line in enumerate(islice(stream, 80000), 1):
             row = json.loads(line)
             old = row["metadata"]["omni_prompt"]
-            if "task_type" not in old:
-                raise ValueError("Expected the fixed fullclone revision-6 source dataset")
-            refs = {f"audio{i+1}": ref["uri"] for i, ref in enumerate(old["references"])}
-            slots = {ref["id"]: f"audio{i+1}" for i, ref in enumerate(old["references"])}
-            prompt = {
-                "modality": "speech",
-                "script": old["transcript_target"],
-                "references": refs,
-                "reference_attributes": {key: slots[value] for key, value in old["reference_targets"].items()},
-                "global_instruction": {"Language": old["language"]} if old["show_language"] else None,
-                "global_tokens": None,
-            }
+            prompt = convert_prompt(old)
+            _prompt(SimpleNamespace(prompt=prompt, metadata={}))
             row["metadata"] = {
                 "id": f"ttsrl-fullclone-{count-1:06d}",
                 "domain": "fullclone_chinese",
@@ -58,7 +65,7 @@ def main():
                 "language": "zh",
                 "omni_prompt": prompt,
             }
-            references.update(refs.values())
+            references.update(prompt["references"].values())
             out.write(json.dumps(row, ensure_ascii=False) + "\n")
     if count != 80000:
         raise ValueError(f"Expected 80000 fixed prompts, got {count}")

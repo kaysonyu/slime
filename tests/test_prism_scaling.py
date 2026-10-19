@@ -4,14 +4,32 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples/prism/benchmarks/scaling"))
 
-from analyze import percentile, summarize_case
+from analyze import analyze, percentile, summarize_case
 from campaign import resolve_case
-from prepare import write_json
+from prepare import convert_prompt, write_json
 from slime_plugins import tts_reward
+from slime_plugins.omni_rollout import _prompt
+
+
+def test_converted_prompts_pass_production_parser_with_and_without_language():
+    old = {
+        "task_type": "fullclone",
+        "transcript_target": "测试语音。",
+        "language": "Chinese",
+        "references": [{"id": "ref0", "uri": "/reference.wav"}],
+        "reference_targets": {"timbre": "ref0"},
+    }
+    for visible in (True, False):
+        prompt = convert_prompt(dict(old, show_language=visible))
+        expected = {"Language": "Chinese"} if visible else {}
+        assert prompt["global_instruction"] == expected
+        parsed = _prompt(SimpleNamespace(prompt=prompt, metadata={}))
+        assert parsed["global_instruction"] == expected
 
 
 def test_reward_timing_measures_client_queue_without_mutating_response(monkeypatch):
@@ -68,3 +86,25 @@ def test_empty_case_is_invalid_and_not_zero_time(tmp_path):
 
 def test_percentile_keeps_slow_steps():
     assert percentile([10, 10, 10, 100], 0.95) > 80
+
+
+def test_single_valid_anchor_does_not_claim_drift_or_erase_failure(tmp_path):
+    names = ["32-b2048-a4-w16-start", "32-b2048-a4-w16-end", "64-b4096-a8-w32"]
+    write_json(tmp_path / "manifest.json", {"cases": [{"name": name} for name in names]})
+    for name, valid, seconds in zip(names, [False, True, True], [0.1, 18, 18], strict=True):
+        write_json(
+            tmp_path / "runs" / name / "summary.json",
+            {
+                "case": name,
+                "valid": valid,
+                "step_seconds": seconds,
+                "steady_steps": 21,
+            },
+        )
+    report = analyze(tmp_path)
+    assert report["complete"] and not report["all_valid"]
+    assert report["baseline_32_b2048_seconds"] == 18
+    assert report["baseline_32_b2048_cases"] == [names[1]]
+    assert report["baseline_drift_percent"] is None
+    assert not report["baseline_drift_measured"]
+    assert report["weak_scaling"][names[2]]["throughput_speedup"] == 2
