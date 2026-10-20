@@ -44,6 +44,26 @@ def group(offset=0):
     return [Sample(index=offset + i, group_index=offset // 2, prompt="test", metadata={}) for i in range(2)]
 
 
+@pytest.mark.parametrize("packed", [False, True])
+def test_worker_serialization_uses_the_explicit_transport_option(monkeypatch, worker_args, packed):
+    import ray.cloudpickle as pickle
+    import torch
+
+    worker_args.rollout_packed_tensor_buffer = packed
+    worker = execution_pool.GroupWorker(worker_args, 2)
+    expected = [Sample(index=4, multimodal_train_inputs={"x": torch.arange(3)})]
+
+    async def generate(*args):
+        return expected
+
+    monkeypatch.setattr(worker, "generate", generate)
+    wrapped = asyncio.run(worker.generate_serialized(0, [], {}))
+    assert wrapped.packed is packed
+    actual = pickle.loads(pickle.dumps(wrapped))[0]
+    assert actual.index == 4
+    assert torch.equal(actual.multimodal_train_inputs["x"], expected[0].multimodal_train_inputs["x"])
+
+
 def test_group_execution_preserves_hooks_rewards_and_rollout_boundary(monkeypatch, worker_args):
     seen = []
 

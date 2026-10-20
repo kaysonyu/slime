@@ -8,17 +8,18 @@ _restore_tensor = tensor_serialization._restore_tensor
 
 
 class SerializedGroup:
-    def __init__(self, group):
+    def __init__(self, group, *, packed=False):
         self.group = group
+        self.packed = packed
 
     def __reduce__(self):
         # Run inside Ray's serialization context so nested ObjectRefs retain
         # the same ownership bookkeeping as an ordinary worker result.
-        return deserialize_group, (serialize_group(self.group),)
+        return deserialize_group, (serialize_group(self.group, packed=self.packed),)
 
 
-def serialize_group(group):
-    return serialize_tensor_payload(group)
+def serialize_group(group, *, packed=False):
+    return serialize_tensor_payload(group, packed=packed)
 
 
 def deserialize_group(payload):

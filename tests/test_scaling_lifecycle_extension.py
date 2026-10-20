@@ -45,6 +45,12 @@ def test_topology_cache_is_an_explicit_case_opt_in(tmp_path):
     assert recipe_for(tmp_path, dict(base, cache_weight_topology=True))["cache_weight_topology"] is True
 
 
+def test_packed_tensor_buffer_is_an_explicit_case_opt_in(tmp_path):
+    base = dict(name="short", router_python="/pinned/router", router_policy="round_robin")
+    assert "rollout_packed_tensor_buffer" not in recipe_for(tmp_path, base)
+    assert recipe_for(tmp_path, dict(base, rollout_packed_tensor_buffer=True))["rollout_packed_tensor_buffer"] is True
+
+
 def test_controller_requires_unadmitted_original_parent(tmp_path):
     write_json(tmp_path / "services/request.json", {"case": "held"})
     write_json(tmp_path / "runs/held/prepared.json", {})

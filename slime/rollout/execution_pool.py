@@ -80,7 +80,10 @@ class GroupWorker:
         }
 
     async def generate_serialized(self, rollout_id, group, sampling_params):
-        return SerializedGroup(await self.generate(rollout_id, group, sampling_params))
+        return SerializedGroup(
+            await self.generate(rollout_id, group, sampling_params),
+            packed=getattr(self.args, "rollout_packed_tensor_buffer", False),
+        )
 
     async def close(self):
         if self.running:

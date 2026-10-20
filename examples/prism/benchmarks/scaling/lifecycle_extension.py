@@ -45,6 +45,8 @@ def recipe_for(root, case):
     }
     if case.get("cache_weight_topology", False):
         recipe["cache_weight_topology"] = True
+    if case.get("rollout_packed_tensor_buffer", False):
+        recipe["rollout_packed_tensor_buffer"] = True
     return recipe
 
 
@@ -98,6 +100,8 @@ def run(root, rank, plan):
                         raise RuntimeError(f"Confirmation workload differs: {key}")
                 if case.get("cache_weight_topology", False) != config.get("cache_weight_topology", False):
                     raise RuntimeError("Confirmation workload differs: cache_weight_topology")
+                if case.get("rollout_packed_tensor_buffer", False) != config.get("rollout_packed_tensor_buffer", False):
+                    raise RuntimeError("Confirmation workload differs: rollout_packed_tensor_buffer")
             atomic_json(output / "case.json", case)
             atomic_json(output / "recipe.json", recipe_for(root, case))
             atomic_json(

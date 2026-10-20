@@ -688,6 +688,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--rollout-packed-tensor-buffer",
+                action="store_true",
+                default=False,
+                help="Pack CPU tensor bytes into one writable receiver arena for rollout and training transport.",
+            )
+            parser.add_argument(
                 "--rollout-tensor-buffer",
                 action="store_true",
                 default=False,

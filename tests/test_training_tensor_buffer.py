@@ -21,8 +21,9 @@ def test_existing_worker_payloads_can_resolve_the_original_tensor_reducer():
     assert torch.equal(result, tensor)
 
 
-def test_empty_cpu_tensor_ignores_receiver_default_device():
-    payload = serialize_tensor_payload({"empty": torch.empty((0, 24), dtype=torch.bfloat16)})
+@pytest.mark.parametrize("packed", [False, True])
+def test_empty_cpu_tensor_ignores_receiver_default_device(packed):
+    payload = serialize_tensor_payload({"empty": torch.empty((0, 24), dtype=torch.bfloat16)}, packed=packed)
     with torch.device("meta"):
         result = deserialize_tensor_payload(payload)["empty"]
     assert result.device.type == "cpu"
@@ -59,13 +60,15 @@ def consume_partition(boxes, rank, buffered):
 
 
 @pytest.mark.parametrize("buffered", [False, True])
-def test_real_ray_training_partitions_preserve_schedule_values_and_nested_refs(buffered):
-    ray.init(address="local", num_cpus=2, object_store_memory=128 * 1024**2, include_dashboard=False)
+@pytest.mark.parametrize("packed", [False, True])
+def test_real_ray_training_partitions_preserve_schedule_values_and_nested_refs(buffered, packed):
+    ray.init(address="local", num_cpus=2, num_gpus=0, object_store_memory=128 * 1024**2, include_dashboard=False)
     try:
         args = make_args(use_dynamic_batch_size=True, max_tokens_per_gpu=64)
         args.global_batch_size = 8
         args.rollout_data_transport = "object-store"
         args.rollout_tensor_buffer = buffered
+        args.rollout_packed_tensor_buffer = packed
         args.custom_reward_post_process_path = None
         args.custom_convert_samples_to_train_data_path = None
         builder = BatchBuilder(args)
