@@ -58,6 +58,11 @@ def wait_case_ready(run, timeout=7200):
     return json.loads((run / "case.json").read_text())
 
 
+def has_publication(run, marker):
+    log = run / "node-0/launch.log"
+    return log.exists() and marker in log.read_text(errors="replace")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
@@ -104,7 +109,7 @@ def main():
         case = wait_case_ready(run)
         marker = f"Published policy version={case['steps']} to {case['gpus']} rollout replicas"
         deadline = time.monotonic() + 7200
-        while marker not in (run / "node-0/launch.log").read_text(errors="replace"):
+        while not has_publication(run, marker):
             if time.monotonic() >= deadline or (run / "summary.json").exists():
                 raise TimeoutError("Case finished or stalled before final publication")
             time.sleep(3)

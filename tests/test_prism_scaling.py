@@ -88,6 +88,18 @@ def test_sampler_wait_is_bounded(tmp_path, monkeypatch):
         profile_router.wait_case_ready(tmp_path, timeout=1)
 
 
+def test_queued_sampler_tolerates_not_yet_created_launch_log(tmp_path):
+    import profile_router
+
+    marker = "Published policy version=25 to 128 rollout replicas"
+    assert not profile_router.has_publication(tmp_path, marker)
+    (tmp_path / "node-0").mkdir()
+    (tmp_path / "node-0/launch.log").write_text("startup\n")
+    assert not profile_router.has_publication(tmp_path, marker)
+    (tmp_path / "node-0/launch.log").write_text(marker + "\n")
+    assert profile_router.has_publication(tmp_path, marker)
+
+
 def test_extension_replacement_requires_complete_cleanup_and_held_parent(tmp_path):
     case = {"name": "supplemental"}
     run = tmp_path / "runs" / case["name"]
