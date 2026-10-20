@@ -13,13 +13,14 @@ import os
 import socket
 import threading
 import uuid
-from _thread import LockType
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from functools import lru_cache
 from pathlib import Path
+
+from _thread import LockType
 
 from slime.rollout.sample_hooks import get_current_rollout_id
 from slime_plugins.prism.metrics import compute_metrics, path_component, reward_timing_summary
@@ -155,6 +156,7 @@ def _record(sample, *, reward_value=None, reward_status="pending", error=None, f
         "model_identity": trace.get("model_identity"),
         "sampling": trace.get("sampling"),
         "request_id": trace.get("request_id"),
+        "generation_client_timing": metadata.get("omni_client_timing"),
         "teacher": {
             name.removeprefix("omni_teacher_"): value
             for name, value in metadata.items()

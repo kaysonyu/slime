@@ -89,6 +89,22 @@ def test_tensorize_rollout_data_for_training_normalizes_cpu_tensors():
     assert rollout_data["rollout_mask_sums"].dtype == torch.float32
 
 
+def test_normalized_tensors_keep_values_and_alias_storage_without_reconversion():
+    from slime.observability.rollout_data_utils import _cpu_tensor
+
+    value = torch.arange(12).reshape(3, 4)
+    result = _cpu_tensor(value, torch.int64)
+    assert result is value
+    assert _cpu_tensor(value, torch.float32).dtype == torch.float32
+    gradient = torch.ones(3, requires_grad=True)
+    assert not _cpu_tensor(gradient).requires_grad
+    transposed = value.T
+    assert _cpu_tensor(transposed).is_contiguous()
+    custom = torch.ones(2)
+    custom.note = "must retain the old detach behavior"
+    assert not hasattr(_cpu_tensor(custom), "note")
+
+
 def test_save_and_load_debug_rollout_data_round_trip(tmp_path):
     path_template = str(tmp_path / "rollout_{rollout_id}.pt")
     samples = [

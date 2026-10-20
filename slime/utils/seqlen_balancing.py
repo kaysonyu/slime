@@ -19,7 +19,6 @@ import heapq
 def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool):
     # see: https://en.wikipedia.org/wiki/Largest_differencing_method
     class Set:
-
         def __init__(self) -> None:
             self.sum = 0
             self.items = []
@@ -40,15 +39,20 @@ def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool):
                 return len(self.items) < len(other.items)
             return self.items < other.items
 
-    class State:
+    # Empty partitions are immutable. Transfer ownership when a popped state
+    # contributes a nonempty partition, preserving the exact heap/tie ordering.
+    empty = Set()
 
+    class State:
         def __init__(self, items: list[tuple[int, int]], k: int) -> None:
             self.k = k
             # sets should always be decreasing order
-            self.sets = [Set() for _ in range(k)]
+            self.sets = [empty] * k
             assert len(items) in [1, k], f"{len(items)} not in [1, {k}]"
             for i, (idx, seqlen) in enumerate(items):
-                self.sets[i].add(idx=idx, val=seqlen)
+                partition = Set()
+                partition.add(idx=idx, val=seqlen)
+                self.sets[i] = partition
             self.sets = sorted(self.sets, reverse=True)
 
         def get_partitions(self):
@@ -62,7 +66,11 @@ def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool):
 
         def merge(self, other):
             for i in range(self.k):
-                self.sets[i].merge(other.sets[self.k - 1 - i])
+                source = other.sets[self.k - 1 - i]
+                if self.sets[i] is empty:
+                    self.sets[i] = source
+                elif source is not empty:
+                    self.sets[i].merge(source)
             self.sets = sorted(self.sets, reverse=True)
 
         @property

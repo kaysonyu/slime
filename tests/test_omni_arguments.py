@@ -58,6 +58,28 @@ def test_cli_defaults_keep_original_backend():
     assert args.custom_megatron_log_prob_function_path is None
     assert not args.use_rollout_logprobs
     assert args.policy_loss_weights is None
+    assert args.omni_router_processes == 1
+    assert not args.cache_weight_topology
+    assert not args.rollout_packed_tensor_buffer
+
+
+def test_cli_accepts_opt_in_scaling_without_changing_reward_configuration():
+    parser = get_slime_extra_args_provider()(argparse.ArgumentParser())
+    args = parser.parse_args(
+        [
+            "--rollout-batch-size",
+            "1024",
+            "--omni-router-processes",
+            "16",
+            "--cache-weight-topology",
+            "--rollout-packed-tensor-buffer",
+            "--omni-reward-config",
+            "rewards.yaml",
+        ]
+    )
+    assert args.omni_router_processes == 16
+    assert args.cache_weight_topology and args.rollout_packed_tensor_buffer
+    assert args.omni_reward_config == "rewards.yaml"
 
 
 def test_cli_accepts_an_explicit_weight_update_stage_and_router_capabilities():
@@ -83,6 +105,18 @@ def test_disaggregated_omni_defaults(tmp_path):
     validate_omni_args(args)
     assert args.omni_python == sys.executable
     assert args.omni_config == str(tmp_path / "pipeline.yaml")
+
+
+@pytest.mark.parametrize("processes", [0, -1, 1.5, True])
+def test_invalid_router_process_count(tmp_path, processes):
+    with pytest.raises(ValueError, match="positive integer"):
+        validate_omni_args(_args(tmp_path, omni_router_processes=processes))
+
+
+def test_multiprocess_router_rejects_local_only_least_request(tmp_path):
+    with pytest.raises(ValueError, match="least_request"):
+        validate_omni_args(_args(tmp_path, omni_router_processes=4, omni_router_policy="least_request"))
+    validate_omni_args(_args(tmp_path, omni_router_processes=4, omni_router_policy="round_robin"))
 
 
 def test_cli_defers_gpu_topology_to_resolved_deployment(tmp_path):

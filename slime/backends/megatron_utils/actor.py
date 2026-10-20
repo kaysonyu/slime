@@ -689,6 +689,20 @@ class MegatronTrainRayActor(TrainRayActor):
                 ray.get(self.rollout_manager.recover_updatable_engines.remote())
             dist.barrier(group=get_gloo_group())
 
+        if getattr(self.args, "cache_weight_topology", False) and (
+            not self.args.rollout_external or self.args.use_fault_tolerance
+        ):
+            from slime.ray.weight_topology import WeightTopologyClient
+
+            client = getattr(self, "_weight_topology_client", None)
+            if client is None:
+                client = self._weight_topology_client = WeightTopologyClient()
+            topology = client.resolve(
+                ray.get(self.rollout_manager.get_cached_updatable_engines_and_lock.remote(client.revision))
+            )
+        else:
+            # External serving without a recovery boundary keeps live fetches.
+            topology = ray.get(self.rollout_manager.get_updatable_engines_and_lock.remote())
         (
             rollout_engines,
             rollout_engine_lock,
@@ -696,7 +710,7 @@ class MegatronTrainRayActor(TrainRayActor):
             engine_gpu_counts,
             engine_gpu_offsets,
             engine_parallel_configs,
-        ) = ray.get(self.rollout_manager.get_updatable_engines_and_lock.remote())
+        ) = topology
 
         reconnect_rollout_engines = self.args.offload_train and self.args.use_critic and not self.args.colocate
 

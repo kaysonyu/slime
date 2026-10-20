@@ -27,6 +27,7 @@ from slime.utils.misc import load_function
 from slime.utils.staleness import fully_async_metrics_enabled
 
 from .utils import Lock, add_default_ray_env_vars
+from .weight_topology import WeightTopologyPublisher
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -50,6 +51,7 @@ class RolloutManager:
         from slime.ray.training_recovery import TrainingRecovery, TrainingResume, training_recovery_enabled
 
         self.serving = serving
+        self._weight_topology = WeightTopologyPublisher()
         self.recovery = (
             TrainingRecovery(args, restore_plan, retained_serving=deployment.reused)
             if serving is not None and training_recovery_enabled(args)
@@ -188,6 +190,8 @@ class RolloutManager:
         from slime.data.queue_data_source import QueueDataSource
         from slime.ray.training_recovery import TrainingResume
 
+        if topology := getattr(self, "_weight_topology", None):
+            topology.invalidate()
         was_paused = self.pause_rollout_admission()
         if self._recovery_admission_was_paused is None:
             # Remember the original state across repeated attachments; a
@@ -305,6 +309,10 @@ class RolloutManager:
 
     def get_num_rollout_per_epoch(self):
         return len(self.data_source) // self.args.rollout_batch_size
+
+    def get_cached_updatable_engines_and_lock(self, known_revision=None):
+        """Only valid after the publication's rank-zero recovery barrier."""
+        return self._weight_topology.get(known_revision)
 
     def generate(self, rollout_id):
         start_time = time.time()
@@ -461,28 +469,40 @@ class RolloutManager:
             srv.onload_kv()
 
     def recover_updatable_engines(self):
+        cache = getattr(self.args, "cache_weight_topology", False)
+        if cache:
+            self._weight_topology.invalidate()
         if self.serving is not None:
             self.servers = ray.get(self.serving.recover_updatable_engines.remote())
-            return
-        # Keep the existing external-serving recovery policy.
-        if self.rollout_id == -1:
-            return
-        server = self._get_updatable_server()
-        if server is not None:
-            server.recover()
+        elif self.rollout_id != -1:
+            # Keep the existing external-serving recovery policy.
+            server = self._get_updatable_server()
+            if server is not None:
+                server.recover()
+        if cache:
+            # Fetch once from the authoritative serving owner, not once per
+            # trainer rank. A failed recovery/fetch leaves the cache invalid.
+            self._weight_topology.refresh(self.get_updatable_engines_and_lock())
 
     def clear_updatable_num_new_engines(self):
         if self.serving is not None:
-            return ray.get(self.serving.clear_updatable_num_new_engines.remote())
-        srv = self._get_updatable_server()
-        if srv:
-            srv.num_new_engines = 0
+            result = ray.get(self.serving.clear_updatable_num_new_engines.remote())
+        else:
+            srv = self._get_updatable_server()
+            if srv:
+                srv.num_new_engines = 0
+            result = None
+        if topology := getattr(self, "_weight_topology", None):
+            topology.clear_new()
+        return result
 
     def health_monitoring_pause(self) -> None:
         if self.serving is not None:
             return ray.get(self.serving.health_monitoring_pause.remote())
 
     def health_monitoring_resume(self) -> None:
+        if topology := getattr(self, "_weight_topology", None):
+            topology.invalidate()
         if self.serving is not None:
             self.servers = ray.get(self.serving.health_monitoring_resume.remote())
             return

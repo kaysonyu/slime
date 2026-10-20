@@ -26,6 +26,15 @@ _ROLLOUT_DATA_TENSOR_DTYPES = {
 
 
 def _cpu_tensor(value, dtype: torch.dtype | None = None) -> torch.Tensor:
+    if (
+        type(value) is torch.Tensor
+        and value.device.type == "cpu"
+        and (dtype is None or value.dtype == dtype)
+        and not value.requires_grad
+        and value.is_contiguous()
+        and not value.__dict__
+    ):
+        return value
     if isinstance(value, np.ndarray) and not value.flags.writeable:
         value = value.copy()
     tensor = torch.as_tensor(value, dtype=dtype) if dtype is not None else torch.as_tensor(value)
