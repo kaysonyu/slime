@@ -45,7 +45,10 @@ def test_extension_replacement_requires_complete_cleanup_and_held_parent(tmp_pat
 
 
 @pytest.mark.parametrize("nodes", [8, 16])
-def test_extension_inherits_exact_original_parent_environment_without_persisting_secrets(tmp_path, monkeypatch, nodes):
+@pytest.mark.parametrize("relative", [False, True])
+def test_extension_inherits_exact_original_parent_environment_without_persisting_secrets(
+    tmp_path, monkeypatch, nodes, relative
+):
     import psutil
     import socket
 
@@ -62,7 +65,18 @@ def test_extension_inherits_exact_original_parent_environment_without_persisting
     }
     parent = SimpleNamespace(
         pid=32,
-        info={"cmdline": ["python", str(source / "examples/prism/benchmarks/scaling/campaign.py"), str(tmp_path)]},
+        info={
+            "cmdline": [
+                "python",
+                (
+                    "examples/prism/benchmarks/scaling/campaign.py"
+                    if relative
+                    else str(source / "examples/prism/benchmarks/scaling/campaign.py")
+                ),
+                str(tmp_path),
+            ]
+        },
+        cwd=lambda: str(source),
         environ=lambda: dict(environment),
     )
     monkeypatch.setattr(psutil, "process_iter", lambda *args: [parent])

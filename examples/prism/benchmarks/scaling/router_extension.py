@@ -50,7 +50,14 @@ def inherited_job_environment(root, rank):
     parents = []
     for process in psutil.process_iter(["pid", "cmdline"]):
         command = process.info["cmdline"] or []
-        if original in command and str(root) in command:
+        matches = original in command
+        relative_entry = "examples/prism/benchmarks/scaling/campaign.py"
+        if not matches and relative_entry in command and str(root) in command:
+            try:
+                matches = (Path(process.cwd()) / relative_entry).resolve() == Path(original).resolve()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        if matches and str(root) in command:
             parents.append(process)
     if len(parents) != 1:
         raise RuntimeError(f"Expected one original campaign parent, found {len(parents)}")
