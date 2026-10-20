@@ -1,0 +1,829 @@
+{
+  "schema_version": 1,
+  "campaign": "grpo128-20261020",
+  "recorded_at_utc": "2026-10-20T10:56:14.634916+00:00",
+  "status": "closed_by_user",
+  "business_acceptance": false,
+  "evidence_root": "/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/grpo128-20261020",
+  "branch": "perf/prism-grpo-128gpu-20261020",
+  "scope": {
+    "model": "Prism1.7Bv0.4 iteration100000 renderer7",
+    "data": "fullclone_chinese",
+    "dataset_count": 80000,
+    "dataset_sha256": "dbd4368e197362dd7ae284eeca5284df04e000bb3c2658e17636fdbf4ae450df",
+    "candidates_per_prompt": 8,
+    "reward": "Real Qwen3-ASR WER",
+    "asr_fingerprint": "8d55fe2aec5d5a65ce7c92c8e7495ebd9fe0b5beeff7fc637f367330648f6a3f",
+    "max_colocated_learner_rollout_h200": 128,
+    "max_separate_asr_h200": 32,
+    "algorithm_and_reward_unchanged": true
+  },
+  "runtime": {
+    "slime": "cd50e5a934681a54a4cec098dcff7f44512ef085",
+    "slime_snapshot": "source/postprocess-cd50e5a9",
+    "comparison_slime": "f08b40550219da661e6f2732a949b238ea2d6ffa",
+    "comparison_snapshot": "source/lifecycle-client-f08b40550219",
+    "router_adapter": "40487d9223189f24e45b872cd9ed1b8c0d9013f2",
+    "router_snapshot": "source/router-topology-40487d922318",
+    "router_entry_sha256": "6fa3033a38dd5b9e5018bfb3519fc492f53d8f576213fc0a22c77012445208bd",
+    "omni": "b3f9b9bdd9a2a40334c159b5fbe4beda2408dffb",
+    "megatron": "3f49de20de81c1ad5dfc10efa0f7d0c8098f1ce4",
+    "source_base": "c73ed2730d480ba64e71739e7e1de7245e23618c"
+  },
+  "measurement": {
+    "method": "Adjacent generate-start intervals; includes generation, real reward, artifacts, conversion/partition/serialization, training, cleanup and weight publication. Excludes job/model initialization.",
+    "short_run_updates": 25,
+    "steady_window_rollout_ids": [
+      3,
+      23
+    ],
+    "steady_windows_per_short": 21,
+    "discarded_windows": "First3 warmups and final unclosed window; no slow windows removed.",
+    "profiles": "Final unmeasured rollout24 only; no overlap with timed windows. Inclusive sampled GIL fractions are not exclusive wall time.",
+    "checkpoint_scope": "Short-run throughput excludes final checkpoint window; no long-run checkpoint-amortized128 throughput claim."
+  },
+  "results": [
+    {
+      "case": "64-b4096-a16-w32-r8-postopt",
+      "configuration": {
+        "gpus": 64,
+        "batch": 4096,
+        "asr_replicas": 16,
+        "workers": 32,
+        "router_processes": 8,
+        "router_policy": "round_robin",
+        "asr_inflight": 4,
+        "concurrency": 16,
+        "runtime_commit": "cd50e5a934681a54a4cec098dcff7f44512ef085",
+        "runtime_source": "/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/grpo128-20261020/source/postprocess-cd50e5a9",
+        "cache_weight_topology": true,
+        "rollout_packed_tensor_buffer": true
+      },
+      "evidence": "runs/64-b4096-a16-w32-r8-postopt/summary.json",
+      "valid": true,
+      "issues": [],
+      "measurement_exclusion": null,
+      "updates": 25,
+      "steady_steps": 21,
+      "microbatch_schedules": {
+        "[1]": 1600
+      },
+      "asr_identity_count": 1,
+      "asr_fingerprints": [
+        "8d55fe2aec5d5a65ce7c92c8e7495ebd9fe0b5beeff7fc637f367330648f6a3f"
+      ],
+      "gradient_norm_range": [
+        0.10461916029453278,
+        0.12658360600471497
+      ],
+      "step_seconds": 14.532013517285716,
+      "p50_seconds": 14.524706486,
+      "p95_seconds": 15.055521778,
+      "samples_per_second": 281.8604589878643,
+      "frames_per_second": 26001.2537821494,
+      "mean_frames": 92.24867466517857,
+      "phase_seconds": {
+        "generate": 11.774529591380952,
+        "training_completed": 0.001990098142857143,
+        "resume_rollout_admission": 0.0014879004761904763,
+        "update_weights": 1.2763799949047618,
+        "pause_rollout_admission": 0.0007309283333333333,
+        "clear_memory": 0.038582037285714285,
+        "async_train": 1.437846522952381
+      },
+      "gpu_busy_mean": 35.159887295081965,
+      "gpu_peak_memory_gib": 50.435546875,
+      "actor_train_seconds": 0.8023335820152646
+    },
+    {
+      "case": "128-b8192-a32-w64-r16-i8-postopt",
+      "configuration": {
+        "gpus": 128,
+        "batch": 8192,
+        "asr_replicas": 32,
+        "workers": 64,
+        "router_processes": 16,
+        "router_policy": "round_robin",
+        "asr_inflight": 8,
+        "concurrency": 16,
+        "runtime_commit": "cd50e5a934681a54a4cec098dcff7f44512ef085",
+        "runtime_source": "/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/grpo128-20261020/source/postprocess-cd50e5a9",
+        "cache_weight_topology": true,
+        "rollout_packed_tensor_buffer": true
+      },
+      "evidence": "runs/128-b8192-a32-w64-r16-i8-postopt/summary.json",
+      "valid": true,
+      "issues": [],
+      "measurement_exclusion": null,
+      "updates": 25,
+      "steady_steps": 21,
+      "microbatch_schedules": {
+        "[1]": 3200
+      },
+      "asr_identity_count": 1,
+      "asr_fingerprints": [
+        "8d55fe2aec5d5a65ce7c92c8e7495ebd9fe0b5beeff7fc637f367330648f6a3f"
+      ],
+      "gradient_norm_range": [
+        0.07372841238975525,
+        0.08110882341861725
+      ],
+      "step_seconds": 18.68512064995238,
+      "p50_seconds": 18.628875235,
+      "p95_seconds": 19.277625251,
+      "samples_per_second": 438.4237144340236,
+      "frames_per_second": 40662.252573682556,
+      "mean_frames": 92.74647158668155,
+      "phase_seconds": {
+        "generate": 15.39031141304762,
+        "training_completed": 0.00248611280952381,
+        "resume_rollout_admission": 0.0016323910476190476,
+        "update_weights": 1.6101812004761904,
+        "pause_rollout_admission": 0.0006971924761904762,
+        "clear_memory": 0.039191133952380955,
+        "async_train": 1.6400872048571427
+      },
+      "gpu_busy_mean": 30.06490116371752,
+      "gpu_peak_memory_gib": 50.271484375,
+      "actor_train_seconds": 0.8349899564470563
+    },
+    {
+      "case": "128-b8192-a32-w64-r16-i8-postopt-repeat",
+      "configuration": {
+        "gpus": 128,
+        "batch": 8192,
+        "asr_replicas": 32,
+        "workers": 64,
+        "router_processes": 16,
+        "router_policy": "round_robin",
+        "asr_inflight": 8,
+        "concurrency": 16,
+        "runtime_commit": "cd50e5a934681a54a4cec098dcff7f44512ef085",
+        "runtime_source": "/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/grpo128-20261020/source/postprocess-cd50e5a9",
+        "cache_weight_topology": true,
+        "rollout_packed_tensor_buffer": true
+      },
+      "evidence": "runs/128-b8192-a32-w64-r16-i8-postopt-repeat/summary.json",
+      "valid": true,
+      "issues": [],
+      "measurement_exclusion": null,
+      "updates": 25,
+      "steady_steps": 21,
+      "microbatch_schedules": {
+        "[1]": 3200
+      },
+      "asr_identity_count": 1,
+      "asr_fingerprints": [
+        "8d55fe2aec5d5a65ce7c92c8e7495ebd9fe0b5beeff7fc637f367330648f6a3f"
+      ],
+      "gradient_norm_range": [
+        0.07358101010322571,
+        0.185623899102211
+      ],
+      "step_seconds": 18.67280090590476,
+      "p50_seconds": 18.370180868,
+      "p95_seconds": 20.023969414,
+      "samples_per_second": 438.71297301785637,
+      "frames_per_second": 40711.36633041737,
+      "mean_frames": 92.79727027529762,
+      "phase_seconds": {
+        "generate": 15.394735504095237,
+        "training_completed": 0.002630878476190476,
+        "resume_rollout_admission": 0.0016307710476190476,
+        "update_weights": 1.5283745391428571,
+        "pause_rollout_admission": 0.0006990416666666667,
+        "clear_memory": 0.03949549861904762,
+        "async_train": 1.704747111095238
+      },
+      "gpu_busy_mean": 31.36830036688467,
+      "gpu_peak_memory_gib": 50.3125,
+      "actor_train_seconds": 0.834077585311163
+    },
+    {
+      "case": "128-b8192-a32-w64-r16-i8-postopt-nocache",
+      "configuration": {
+        "gpus": 128,
+        "batch": 8192,
+        "asr_replicas": 32,
+        "workers": 64,
+        "router_processes": 16,
+        "router_policy": "round_robin",
+        "asr_inflight": 8,
+        "concurrency": 16,
+        "runtime_commit": "cd50e5a934681a54a4cec098dcff7f44512ef085",
+        "runtime_source": "/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/grpo128-20261020/source/postprocess-cd50e5a9",
+        "cache_weight_topology": false,
+        "rollout_packed_tensor_buffer": true
+      },
+      "evidence": "runs/128-b8192-a32-w64-r16-i8-postopt-nocache/summary.json",
+      "valid": true,
+      "issues": [],
+      "measurement_exclusion": null,
+      "updates": 25,
+      "steady_steps": 21,
+      "microbatch_schedules": {
+        "[1]": 3200
+      },
+      "asr_identity_count": 1,
+      "asr_fingerprints": [
+        "8d55fe2aec5d5a65ce7c92c8e7495ebd9fe0b5beeff7fc637f367330648f6a3f"
+      ],
+      "gradient_norm_range": [
+        0.07382677495479584,
+        0.11670558154582977
+      ],
+      "step_seconds": 20.340370354285714,
+      "p50_seconds": 20.19218127,
+      "p95_seconds": 20.894289682,
+      "samples_per_second": 402.74586240628344,
+      "frames_per_second": 37325.88074215031,
+      "mean_frames": 92.67849586123512,
+      "phase_seconds": {
+        "generate": 15.36445362295238,
+        "training_completed": 0.002583976857142857,
+        "resume_rollout_admission": 0.001736752476190476,
+        "update_weights": 3.2527306208571427,
+        "pause_rollout_admission": 0.000613522761904762,
+        "clear_memory": 0.039384726523809525,
+        "async_train": 1.6784170427142857
+      },
+      "gpu_busy_mean": 28.26822840409956,
+      "gpu_peak_memory_gib": 50.302734375,
+      "actor_train_seconds": 0.8424444312141055
+    },
+    {
+      "case": "64-b4096-a16-w32-r8-clientpool-topology",
+      "configuration": {
+        "gpus": 64,
+        "batch": 4096,
+        "asr_replicas": 16,
+        "workers": 32,
+        "router_processes": 8,
+        "router_policy": "round_robin",
+        "asr_inflight": 4,
+        "concurrency": 16,
+        "runtime_commit": "f08b40550219da661e6f2732a949b238ea2d6ffa",
+        "runtime_source": "/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/grpo128-20261020/source/lifecycle-client-f08b40550219"
+      },
+      "evidence": "runs/64-b4096-a16-w32-r8-clientpool-topology/summary.json",
+      "valid": true,
+      "issues": [],
+      "measurement_exclusion": null,
+      "updates": 25,
+      "steady_steps": 21,
+      "microbatch_schedules": {
+        "[1]": 1600
+      },
+      "asr_identity_count": 1,
+      "asr_fingerprints": [
+        "8d55fe2aec5d5a65ce7c92c8e7495ebd9fe0b5beeff7fc637f367330648f6a3f"
+      ],
+      "gradient_norm_range": [
+        0.1032225489616394,
+        0.1198246106505394
+      ],
+      "step_seconds": 15.519580428714287,
+      "p50_seconds": 15.42515049,
+      "p95_seconds": 16.053471307,
+      "samples_per_second": 263.924660773792,
+      "frames_per_second": 24328.529573518306,
+      "mean_frames": 92.17982700892857,
+      "phase_seconds": {
+        "async_train": 1.4646762155714286,
+        "update_weights": 1.3982858206666666,
+        "training_completed": 0.0020668052857142857,
+        "clear_memory": 0.03803164442857143,
+        "pause_rollout_admission": 0.000638603380952381,
+        "resume_rollout_admission": 0.0017412564761904762,
+        "generate": 12.613670753333333
+      },
+      "gpu_busy_mean": 32.612384881043745,
+      "gpu_peak_memory_gib": 50.43359375,
+      "actor_train_seconds": 0.8077770528339204
+    },
+    {
+      "case": "64-b4096-a16-w32-r8-clientpool-topology-end",
+      "configuration": {
+        "gpus": 64,
+        "batch": 4096,
+        "asr_replicas": 16,
+        "workers": 32,
+        "router_processes": 8,
+        "router_policy": "round_robin",
+        "asr_inflight": 4,
+        "concurrency": 16,
+        "runtime_commit": "f08b40550219da661e6f2732a949b238ea2d6ffa",
+        "runtime_source": "/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/grpo128-20261020/source/lifecycle-client-f08b40550219"
+      },
+      "evidence": "runs/64-b4096-a16-w32-r8-clientpool-topology-end/summary.json",
+      "valid": true,
+      "issues": [],
+      "measurement_exclusion": null,
+      "updates": 25,
+      "steady_steps": 21,
+      "microbatch_schedules": {
+        "[1]": 1600
+      },
+      "asr_identity_count": 1,
+      "asr_fingerprints": [
+        "8d55fe2aec5d5a65ce7c92c8e7495ebd9fe0b5beeff7fc637f367330648f6a3f"
+      ],
+      "gradient_norm_range": [
+        0.10504081845283508,
+        0.14336350560188293
+      ],
+      "step_seconds": 15.821247863523809,
+      "p50_seconds": 15.614751586,
+      "p95_seconds": 16.846959488,
+      "samples_per_second": 258.8923475147246,
+      "frames_per_second": 23892.09531166341,
+      "mean_frames": 92.28583054315476,
+      "phase_seconds": {
+        "async_train": 1.4956198673333334,
+        "update_weights": 1.4115611652857143,
+        "training_completed": 0.002221805,
+        "clear_memory": 0.04177332404761905,
+        "pause_rollout_admission": 0.0007018073333333333,
+        "resume_rollout_admission": 0.0016683505714285714,
+        "generate": 12.867077147190477
+      },
+      "gpu_busy_mean": 32.38205948795181,
+      "gpu_peak_memory_gib": 50.505859375,
+      "actor_train_seconds": 0.8258866582598005
+    },
+    {
+      "case": "128-b8192-a32-w64-r16-i8-clientpool-topology",
+      "configuration": {
+        "gpus": 128,
+        "batch": 8192,
+        "asr_replicas": 32,
+        "workers": 64,
+        "router_processes": 16,
+        "router_policy": "round_robin",
+        "asr_inflight": 8,
+        "concurrency": 16,
+        "runtime_commit": "f08b40550219da661e6f2732a949b238ea2d6ffa",
+        "runtime_source": "/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/grpo128-20261020/source/lifecycle-client-f08b40550219"
+      },
+      "evidence": "runs/128-b8192-a32-w64-r16-i8-clientpool-topology/summary.json",
+      "valid": true,
+      "issues": [],
+      "measurement_exclusion": null,
+      "updates": 25,
+      "steady_steps": 21,
+      "microbatch_schedules": {
+        "[1]": 3200
+      },
+      "asr_identity_count": 1,
+      "asr_fingerprints": [
+        "8d55fe2aec5d5a65ce7c92c8e7495ebd9fe0b5beeff7fc637f367330648f6a3f"
+      ],
+      "gradient_norm_range": [
+        0.07423578202724457,
+        0.17653343081474304
+      ],
+      "step_seconds": 22.980421683238095,
+      "p50_seconds": 22.657886304,
+      "p95_seconds": 24.108618489,
+      "samples_per_second": 356.4773576794389,
+      "frames_per_second": 33051.724720203085,
+      "mean_frames": 92.71759905133929,
+      "phase_seconds": {
+        "async_train": 1.746697546,
+        "update_weights": 3.304536705238095,
+        "training_completed": 0.002759735142857143,
+        "clear_memory": 0.04150924990476191,
+        "pause_rollout_admission": 0.000727766,
+        "resume_rollout_admission": 0.001868535761904762,
+        "generate": 17.88189232104762
+      },
+      "gpu_busy_mean": 24.86824543216276,
+      "gpu_peak_memory_gib": 50.568359375,
+      "actor_train_seconds": 0.8347163540976388
+    },
+    {
+      "case": "64-confirm-clientpool-topology",
+      "configuration": {
+        "gpus": 64,
+        "batch": 4096,
+        "asr_replicas": 16,
+        "workers": 32,
+        "router_processes": 8,
+        "router_policy": "round_robin",
+        "asr_inflight": 4,
+        "concurrency": 16,
+        "runtime_commit": "f08b40550219da661e6f2732a949b238ea2d6ffa",
+        "runtime_source": "/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/grpo128-20261020/source/lifecycle-client-f08b40550219"
+      },
+      "evidence": "runs/64-confirm-clientpool-topology/summary.json",
+      "valid": true,
+      "issues": [],
+      "measurement_exclusion": null,
+      "updates": 100,
+      "steady_steps": 96,
+      "microbatch_schedules": {
+        "[1]": 6400
+      },
+      "asr_identity_count": 1,
+      "asr_fingerprints": [
+        "8d55fe2aec5d5a65ce7c92c8e7495ebd9fe0b5beeff7fc637f367330648f6a3f"
+      ],
+      "gradient_norm_range": [
+        0.0881282314658165,
+        0.4503585398197174
+      ],
+      "step_seconds": 15.791222136885416,
+      "p50_seconds": 15.646906575500001,
+      "p95_seconds": 16.513674407,
+      "samples_per_second": 259.3846102913397,
+      "frames_per_second": 24934.398464339523,
+      "mean_frames": 96.12905883789062,
+      "phase_seconds": {
+        "async_train": 1.497697812375,
+        "checkpoint": 0.0802682991875,
+        "update_weights": 1.4355860096041668,
+        "training_completed": 0.0022862098229166667,
+        "clear_memory": 0.050629153854166664,
+        "pause_rollout_admission": 0.00067396921875,
+        "resume_rollout_admission": 0.00160623696875,
+        "generate": 12.721941940458334
+      },
+      "gpu_busy_mean": 32.91552186468647,
+      "gpu_peak_memory_gib": 50.693359375,
+      "actor_train_seconds": 0.8250047937035561
+    },
+    {
+      "case": "64-resume-clientpool-topology",
+      "configuration": {
+        "gpus": 64,
+        "batch": 4096,
+        "asr_replicas": 16,
+        "workers": 32,
+        "router_processes": 8,
+        "router_policy": "round_robin",
+        "asr_inflight": 4,
+        "concurrency": 16,
+        "runtime_commit": "f08b40550219da661e6f2732a949b238ea2d6ffa",
+        "runtime_source": "/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/grpo128-20261020/source/lifecycle-client-f08b40550219"
+      },
+      "evidence": "runs/64-resume-clientpool-topology/summary.json",
+      "valid": true,
+      "issues": [],
+      "measurement_exclusion": null,
+      "updates": 2,
+      "steady_steps": 0,
+      "microbatch_schedules": {
+        "[1]": 128
+      },
+      "asr_identity_count": 1,
+      "asr_fingerprints": [
+        "8d55fe2aec5d5a65ce7c92c8e7495ebd9fe0b5beeff7fc637f367330648f6a3f"
+      ],
+      "gradient_norm_range": [
+        0.08972273766994476,
+        0.091254822909832
+      ]
+    }
+  ],
+  "same_code_scaling": {
+    "definition": "For batch and GPUs doubled, throughput_speedup=2*T64/T128; weak_scaling_efficiency=T64/T128.",
+    "same_runtime_commit": "cd50e5a934681a54a4cec098dcff7f44512ef085",
+    "control": "64-b4096-a16-w32-r8-postopt",
+    "first": "128-b8192-a32-w64-r16-i8-postopt",
+    "repeat": "128-b8192-a32-w64-r16-i8-postopt-repeat",
+    "first_throughput_speedup": 1.5554637071420516,
+    "first_efficiency": 0.7777318535710258,
+    "repeat_throughput_speedup": 1.5564899546152569,
+    "repeat_efficiency": 0.7782449773076284,
+    "repeat_mean_drift_percent": -0.0659334466093009,
+    "repeat_p95_delta_seconds": 0.7463441629999998,
+    "extra_128_step_seconds": 4.140787388619046,
+    "extra_128_phase_seconds": {
+      "generate": 3.620205912714285,
+      "training_completed": 0.0006407803333333332,
+      "resume_rollout_admission": 0.00014287057142857136,
+      "update_weights": 0.2519945442380953,
+      "pause_rollout_admission": -0.0000318866666666666,
+      "clear_memory": 0.0009134613333333375,
+      "async_train": 0.266900588142857
+    },
+    "limitations": [
+      "Single existing optimized64 control; user waived optimized64 end-bracket.",
+      "Descriptive short-run comparison, not statistical significance.",
+      "Earlier83.5percent mixed old64 with new128 and is not same-code scaling."
+    ]
+  },
+  "optimization_vs_corrected_topology_128_baseline": {
+    "baseline": "128-b8192-a32-w64-r16-i8-clientpool-topology",
+    "candidate": "128-b8192-a32-w64-r16-i8-postopt-repeat",
+    "baseline_seconds": 22.980421683238095,
+    "candidate_seconds": 18.67280090590476,
+    "seconds_saved": 4.307620777333334,
+    "time_reduction_percent": 18.744742097031708,
+    "throughput_gain_percent": 23.068958958220165,
+    "scope": "Same128/B8192/A32/W64/R16/I8 with corrected real router topology. Final optimizations combined, not isolated per-change GPU contributions."
+  },
+  "weight_topology_cache_ablation": {
+    "control_cached": "128-b8192-a32-w64-r16-i8-postopt",
+    "same_runtime_commit": true,
+    "resolved_argument_audit": "Only cache_weight_topology differs apart from per-run output/config paths and ephemeral router endpoint. Identical model, dataset, workload and resource settings.",
+    "cached_step_seconds": 18.68512064995238,
+    "uncached_step_seconds": 20.340370354285714,
+    "uncached_p95_seconds": 20.894289682,
+    "uncached_samples_per_second": 402.74586240628344,
+    "cached_weight_update_seconds": 1.6101812004761904,
+    "uncached_weight_update_seconds": 3.2527306208571427,
+    "cached_generate_seconds": 15.39031141304762,
+    "uncached_generate_seconds": 15.36445362295238,
+    "cache_wall_seconds_saved": 1.6552497043333325,
+    "cache_weight_update_seconds_saved": 1.6425494203809523,
+    "other_phase_seconds_saved": 0.012700283952380209,
+    "cache_throughput_gain_percent": 8.858651412227037,
+    "interpretation": "The additional weight-update time accounts for almost all observed wall-time difference. The optimized repeat remains required to assess run drift; this is not a formal statistical significance claim."
+  },
+  "integrity": {
+    "optimized64": {
+      "summary_valid": true,
+      "independent_json_normalized_reanalysis_matches": true,
+      "issues": [],
+      "updates": 25,
+      "steady_windows": 21,
+      "selected_samples_all_25_updates": 102400,
+      "batch_size_each_update": 4096,
+      "grpo_candidates_per_prompt": 8,
+      "failed_rewards": 0,
+      "zero_frame_samples": 0,
+      "truncated_samples": 0,
+      "stale_policy_samples": 0,
+      "broken_group_steps": [],
+      "gradient_norm_range": [
+        0.10461916029453278,
+        0.12658360600471497
+      ],
+      "actual_router_data_planes": 8,
+      "router_topology_valid": true,
+      "cache_weight_topology_resolved": true,
+      "rollout_packed_tensor_buffer_resolved": true,
+      "participating_nodes": 8,
+      "idle_nodes": 8,
+      "all_16_returncodes_zero": true,
+      "cleanup_receipts": 16
+    },
+    "optimized128_first": {
+      "summary_valid": true,
+      "independent_reanalysis_valid": true,
+      "independent_reanalysis_note": "All fields agree after JSON normalization. The initial raw Python equality check differed only because publications are tuples in memory and lists in JSON; no measurement or validation discrepancy.",
+      "issues": [],
+      "updates": 25,
+      "steady_windows": 21,
+      "selected_samples_all_25_updates": 204800,
+      "batch_size_each_update": 8192,
+      "grpo_candidates_per_prompt": 8,
+      "failed_rewards": 0,
+      "zero_frame_samples": 0,
+      "truncated_samples": 0,
+      "policy_versions": "Every archived training sample matches its rollout's expected policy version; publications 1 through 26 each target128 replicas.",
+      "microbatch_schedules": {
+        "[1]": 3200
+      },
+      "gradient_norm_range": [
+        0.07372841238975525,
+        0.08110882341861725
+      ],
+      "actual_router_data_planes": 16,
+      "cache_weight_topology_resolved": true,
+      "rollout_packed_tensor_buffer_resolved": true,
+      "done_receipts": 16,
+      "all_returncodes_zero": true,
+      "cleanup_receipts": 16,
+      "cleanup_record": "platform/lifecycle-postopt/128-b8192-a32-w64-r16-i8-postopt-clean-*.json",
+      "scope": "Short-run business and data integrity only. Not100-update stability, checkpoint restore or final scaling acceptance."
+    },
+    "optimized128_repeat": {
+      "valid": true,
+      "updates": 25,
+      "steady_windows": 21,
+      "selected_samples_all_updates": 204800,
+      "batch_each_update": 8192,
+      "group_size": 8,
+      "broken_groups": 0,
+      "failed_rewards": 0,
+      "zero_frames": 0,
+      "truncated": 0,
+      "stale_policy_samples": 0,
+      "gradient_norm_range": [
+        0.07358101010322571,
+        0.185623899102211
+      ]
+    }
+  },
+  "baseline64_restore": {
+    "case": "64-resume-clientpool-topology",
+    "runtime_commit": "f08b40550219da661e6f2732a949b238ea2d6ffa",
+    "summary_valid": true,
+    "issues": [],
+    "actual_completed_updates": 2,
+    "completed_rollout_ids": [
+      100,
+      101
+    ],
+    "phase_errors": [],
+    "loaded_checkpoint": "runs/64-confirm-clientpool-topology/checkpoint",
+    "resolved_no_load_optim": null,
+    "resolved_no_load_rng": null,
+    "checkpoint_verification": {
+      "valid": true,
+      "iteration": 101,
+      "optimizer_steps": [
+        102,
+        102
+      ],
+      "scheduler_samples": 417792,
+      "dataset_samples": 417792,
+      "dataset_groups": 52224,
+      "rng_entries": 1,
+      "model_tensors": 302,
+      "model_elements": 1979878400,
+      "optimizer_param_elements": 1979878400,
+      "optimizer_exp_avg_elements": 1979878400,
+      "optimizer_exp_avg_sq_elements": 1979878400
+    },
+    "gradient_norm_range": [
+      0.08972273766994476,
+      0.091254822909832
+    ],
+    "rank_microbatch_records": 128,
+    "microbatch_schedule": [
+      1
+    ],
+    "done_receipts": 16,
+    "all_returncodes_zero": true,
+    "participating_nodes": 8,
+    "successor_clean_receipts": 16,
+    "successor_clean_record": "platform/lifecycle-postopt",
+    "scope": "Actual restore from the completed baseline64 100-update checkpoint, followed by two training updates and a verified new checkpoint. These two updates are not a steady-state throughput measurement and do not validate the optimized128 runtime."
+  },
+  "longrun_limitations": {
+    "baseline64": "f08b4055 completed100 updates and actual2-update restore; not the final optimized runtime.",
+    "optimized64": "No additional confirmation/restore requested after user waived64 revalidation.",
+    "optimized128": "100-update and checkpoint restore plan prepared but never launched. User closed campaign; neither accepted nor claimed.",
+    "quality": "No long-term convergence, perceptual quality or statistical-significance claims."
+  },
+  "optimizations": [
+    {
+      "name": "Multiprocess router plus per-replica HTTP pool",
+      "detail": "Keep8 router processes for64,16 for128; verify actual process topology. Historical64/A8 combined router+HTTP change reduced37.0230 to17.8273s. This is not isolated process-count or hardware scaling.",
+      "evidence": "../grpo64-20261019/runs/"
+    },
+    {
+      "name": "ASR capacity and bounded concurrency",
+      "detail": "64 uses16 ASR/W32/inflight4;128 uses32 ASR/W64/inflight8. Tests include16vs32 ASR, inflight4vs8, W64vs128 and concurrency16vs8."
+    },
+    {
+      "name": "HTTP1 pool reservation ownership",
+      "detail": "Guard active/assigned connection eviction on router and rollout clients; diagnostics do not retry generation POSTs. Optimistic a42 candidate withdrawn; final HTTP files match f08 baseline."
+    },
+    {
+      "name": "Versioned weight topology cache",
+      "commit": "7ce376a9",
+      "detail": "Opt-in revision-aware actor-handle topology cache; refresh at authoritative recovery boundary, invalidate on engine replacement. Weights still published each step; no stale-weight cache.",
+      "measured_wall_seconds_saved": 1.6552497043333325
+    },
+    {
+      "name": "Packed rollout tensor buffer",
+      "commit": "cd50e5a9",
+      "detail": "Pack eligible ordinary contiguous CPU tensors in one arena with dtype/shape/offset metadata; writable receiver copy and fallback for ineligible tensors. Preserve nested Ray ObjectRef ownership."
+    },
+    {
+      "name": "Exact KK partition fast path",
+      "commit": "cd50e5a9",
+      "detail": "Empty partition sentinel, skip empty merges, ownership transfer; exact schedule equivalence across246 golden inputs.",
+      "cpu_b4096_dp64_seconds": [
+        0.497451296,
+        0.192236009
+      ],
+      "cpu_b8192_dp128_seconds": [
+        1.612870288,
+        0.584309247
+      ]
+    },
+    {
+      "name": "CPU tensor identity fast path",
+      "commit": "cd50e5a9",
+      "detail": "Reuse already-correct ordinary contiguous no-grad CPU tensors without custom attributes; retain fallback semantics.",
+      "cpu_transport64_encode_ms": [
+        13.485,
+        10.262
+      ],
+      "cpu_transport64_decode_ms": [
+        8.438,
+        4.867
+      ]
+    },
+    {
+      "name": "Measurement and lifecycle correctness",
+      "detail": "Live topology verification, scoped orphan cleanup/exclusion, native object-store checkpoint checks and sampling outside measured windows. Not counted as independent speedups."
+    }
+  ],
+  "remaining_bottlenecks": {
+    "control64_collection_seconds": 8.828340269270397,
+    "control64_postcollection_seconds": 2.9461893221105546,
+    "repeat128_collection_seconds": 9.2087242603302,
+    "repeat128_postcollection_seconds": 6.186011243765038,
+    "interpretation": "Most remaining64-to128 increase is postcollection CPU/driver work, not actor forward/backward. Postcollection interval includes multiple operations and is not one isolated bottleneck.",
+    "profile": {
+      "returncode": 0,
+      "rollout": 24,
+      "started": 1792492904.5795152,
+      "ended": 1792492916.711819,
+      "last_measured_window_ended": 1792492898.6660144,
+      "overlaps_measured_windows": false,
+      "samples": 522,
+      "nonblocking_errors": 88,
+      "sampled_gil_seconds": 5.272727272727282,
+      "inclusive_gil_fractions": {
+        "deserialize_group": 0.22222222222222165,
+        "split_by_dp_ray_put": 0.2030651340996162,
+        "prism_artifact_log": 0.18965517241379237
+      },
+      "scope": "CPU sampling in final unmeasured round, not exclusive wall time; inclusive entries may overlap. Do not sum them or treat the entire post-collection interval as one operation."
+    },
+    "code_findings": {
+      "replicated_global_metadata": "BatchBuilder.split_by_dp puts full raw_reward and total_lengths into every rank's payload. Packed persistent_id visits all objects; repeated global arrays cause batch-times-DP Python traversal. Investigate shared metadata without changing grouping/pass-rate/load-metric semantics.",
+      "tensor_path": "Packed payload still has per-object persistent_id and per-tensor materialization; final profile confirms decode/encode work.",
+      "artifact_path": "JSON serialization and metric computation are synchronous after collection. Preserve complete artifacts and validate any off-critical-path work; do not disable evidence.",
+      "serving_snapshot": "finish/resume/recover still return complete snapshots in code. This profile does not establish them as the dominant residual bottleneck; retain health/recovery correctness."
+    },
+    "not_implemented": "Shared global metadata, further tensor materialization reductions, asynchronous artifact/metric path and serving snapshot caching; frozen by user."
+  },
+  "excluded_measurements": [
+    "Incorrect actual single-router clientpool cases cannot stand in for8/16-router measurements; see per-run measurement-exclusion overlays.",
+    "Original W128 orphan-contaminated run excluded; clean-repeat retained.",
+    "64-postopt-end cancelled during initialization with0updates and16 cleanup receipts, not a performance or training-failure result."
+  ],
+  "validation_evidence": [
+    "analysis/postprocess-candidate-unit-tests-v2.xml",
+    "analysis/postprocess-candidate.json",
+    "analysis/postprocess-cpu-microbenchmark.json",
+    "analysis/kk-empty-partition-cpu-candidate.json",
+    "analysis/weight-topology-candidate.json",
+    "analysis/weight-topology-candidate-cpu-tests-r2.xml",
+    "analysis/review-64-confirm-clientpool-topology.json",
+    "analysis/review-64-resume-clientpool-topology.json",
+    "analysis/review-128-postopt-repeat.json"
+  ],
+  "closure": {
+    "schema_version": 1,
+    "status": "closed_by_user",
+    "recorded_at_utc": "2026-10-20T10:56:14.634916+00:00",
+    "instruction": "我觉得优化够了，你将目前的优化结果记录一下就可以关闭实验了",
+    "business_acceptance": false,
+    "completion_scope": "Freeze measured optimizations, record results and limitations, push branch, stop experiment. Supersedes all earlier remaining-run requirements.",
+    "performance_status": "validated_short_runs",
+    "optimized_128_stability_100_updates": "not_run_user_closed",
+    "optimized_128_checkpoint_restore": "not_run_user_closed",
+    "resources": {
+      "job": {
+        "name": "prism-grpo128-matrix-1020",
+        "status": "CANCELLED",
+        "finished_at_utc": "2026-10-20T10:52:30Z"
+      },
+      "asr": {
+        "name": "prism-grpo64-asr-1019",
+        "status": "STOPPED",
+        "last_configured_replicas": 16,
+        "instances": 16,
+        "all_instances_terminal": true
+      }
+    },
+    "monitoring": {
+      "watch_pid": 586731,
+      "resume_watch_pid": 586733,
+      "both_exited": true,
+      "campaign_monitors_remaining": 0,
+      "queued_same_thread_submissions": 0
+    },
+    "prepared_128_plan": {
+      "path": "platform/lifecycle-postopt-confirm128.json",
+      "status": "cancelled_before_launch",
+      "controller_directory_exists": false,
+      "trained_updates": 0
+    },
+    "cancelled_64_tail": {
+      "case": "64-b4096-a16-w32-r8-postopt-end",
+      "trained_updates": 0,
+      "cleaned_nodes": 16,
+      "evidence": "runs/64-b4096-a16-w32-r8-postopt-end/operator-cancellation.json",
+      "reason": "User waived further64 revalidation"
+    },
+    "artifacts_retained": [
+      "source/",
+      "runs/",
+      "analysis/",
+      "platform/",
+      "logs, candidate records, samples, checkpoints"
+    ],
+    "result_path": "examples/prism/benchmarks/scaling/results/20261020-final.json",
+    "follow_up": "None. Do not restart jobs, serving, monitors or prepared plans without a new user request."
+  }
+}
