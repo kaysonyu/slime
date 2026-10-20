@@ -99,6 +99,17 @@ def diagnose(run):
     profile = run / "router-profile/router.speedscope.json"
     if profile.exists():
         result["router_profile"] = router_profile(profile)
+    manager = run / "manager-profile/manager.speedscope.json"
+    if manager.exists():
+        result["manager_profile"] = router_profile(manager)
+        receipt = run / "manager-profile/result.json"
+        if receipt.exists():
+            result["manager_profile"]["capture"] = json.loads(receipt.read_text())
+        result["manager_profile"]["scope"] = (
+            "Final unmeasured round only. Sampling may span generation, final training, "
+            "publication and shutdown. Deserialization runs on another thread; do not "
+            "assign all sampled CPU time to the post-collection interval."
+        )
     processes = defaultdict(list)
     for sample in rows(root / "platform/head-processes.jsonl"):
         if steady[0]["started"] <= sample["time"] < steady[-1]["ended"]:

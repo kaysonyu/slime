@@ -36,6 +36,11 @@ def summarize_case(run):
         if not condition:
             issues.append(message)
 
+    exclusion_path = run / "measurement-exclusion.json"
+    exclusion = json.loads(exclusion_path.read_text()) if exclusion_path.exists() else None
+    if exclusion is not None:
+        check(False, f"Measurement excluded: {exclusion['reason']}")
+
     receipts = [json.loads(path.read_text()) for path in run.glob("done-*.json")]
     allocated_nodes = case.get("allocated_nodes", 8)
     check(
@@ -152,6 +157,7 @@ def summarize_case(run):
         "case": case["name"],
         "valid": not issues,
         "issues": issues,
+        "measurement_exclusion": exclusion,
         "updates": len(trained),
         "steady_steps": len(steady),
         "windows": windows,

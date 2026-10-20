@@ -48,6 +48,16 @@ def test_manager_profiler_requires_unique_actor_in_current_run(tmp_path):
         select_manager([manager, process(4, "RolloutManager", run)], run, source)
 
 
+def test_measurement_exclusion_survives_resummarization(tmp_path):
+    run = tmp_path / "run"
+    write_json(run / "case.json", {"name": "run", "steps": 0, "gpus": 128, "batch": 8192})
+    write_json(run / "measurement-exclusion.json", {"reason": "Previous failed run left GPU workers alive"})
+    result = summarize_case(run)
+    assert not result["valid"]
+    assert result["measurement_exclusion"]["reason"] == "Previous failed run left GPU workers alive"
+    assert any("Measurement excluded:" in issue for issue in result["issues"])
+
+
 def test_extension_replacement_requires_complete_cleanup_and_held_parent(tmp_path):
     case = {"name": "supplemental"}
     run = tmp_path / "runs" / case["name"]
