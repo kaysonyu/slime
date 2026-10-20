@@ -59,12 +59,13 @@ def audit_cleanup(root, case, script, output):
 def run(root, rank, plan):
     from analyze import summarize_case
 
-    record = root / "platform/lifecycle-extension"
+    record = root / plan.get("record", "platform/lifecycle-extension")
     manifest = json.loads((root / "manifest.json").read_text())
     nodes = manifest["nodes"]
     source = Path(plan["source"])
     runtime = dict(manifest, source=str(source))
     scripts = source / "examples/prism/benchmarks/scaling"
+    control_scripts = Path(__file__).resolve().parent
     atomic_json(record / f"ready-{rank}.json", {"time": time.time(), "rank": rank, "commit": plan["commit"]})
     wait_for(lambda: all((record / f"ready-{i}.json").exists() for i in range(nodes)), "All recovery ranks", 600)
     # The failed case is complete on all nodes; exact process provenance is
@@ -107,6 +108,19 @@ def run(root, rank, plan):
             )
             atomic_json(output / "prepared.json", {"time": time.time()})
             atomic_json(root / "services/request.json", {"case": case["name"], "replicas": case["asr_replicas"]})
+            if index == 60 and plan.get("takeover"):
+                if case["name"] != plan["takeover"]["held_case"]:
+                    raise RuntimeError("Takeover must resume at its held case")
+                hold_path = root / "platform/admission-hold.json"
+                hold = json.loads(hold_path.read_text())
+                if case["name"] not in hold["cases"] or time.time() >= hold["expires"]:
+                    raise RuntimeError("Takeover admission hold was not maintained")
+                hold["cases"].remove(case["name"])
+                atomic_json(record / "admission-release.json", {
+                    "time": time.time(), "case": case["name"], "all_takeovers": nodes,
+                    "all_cleanup": nodes, "preserved_holds": hold["cases"],
+                })
+                atomic_json(hold_path, hold)
         wait_for(lambda: (output / "prepared.json").exists(), "Recovery case prepared", 180)
         case = json.loads((output / "case.json").read_text())
         wait_for(lambda: (output / "services-ready.json").exists(), "Recovery ASR ready", 3600)
@@ -120,7 +134,7 @@ def run(root, rank, plan):
             if case.get("choose_best") or case.get("resume"):
                 with (output / "checkpoint-verification.log").open("w") as log:
                     subprocess.run(
-                        [sys.executable, str(scripts / "checkpoint.py"), str(output)],
+                        [sys.executable, str(control_scripts / "checkpoint.py"), str(output)],
                         stdout=log, stderr=subprocess.STDOUT, timeout=300,
                     )
             atomic_json(output / "summary.json", summarize_case(output))
@@ -140,19 +154,59 @@ def run(root, rank, plan):
         atomic_json(record / "finished.json", {"time": time.time(), "failed": failed, "business_acceptance": False})
 
 
+def takeover_at_barrier(root, rank, plan):
+    """Replace only the previous idle helper, after its full cleanup barrier."""
+    import psutil
+
+    takeover = plan["takeover"]
+    old_record = root / takeover["record"]
+    completed = takeover["completed_case"]
+    held = takeover["held_case"]
+    record = root / plan["record"]
+
+    def at_barrier():
+        if not all((old_record / f"{completed}-clean-{i}.json").exists() for i in range(16)):
+            return False
+        summary = json.loads((root / "runs" / completed / "summary.json").read_text())
+        if not summary["valid"]:
+            raise RuntimeError("Cannot advance from failed short run")
+        request = json.loads((root / "services/request.json").read_text())
+        return request["case"] == held and (root / "runs" / held / "prepared.json").exists()
+
+    wait_for(at_barrier, "Previous helper reached clean admission barrier", 3600)
+    require_held(root, {"held_case": held})
+    receipt = json.loads((old_record / f"controller-{rank}.json").read_text())
+    process = psutil.Process(receipt["pid"])
+    if process.cmdline() != receipt["command"] or process.children(recursive=True):
+        raise RuntimeError("Previous helper identity/idle check failed; not signalling")
+    identity = {"pid": process.pid, "created": process.create_time(), "command": process.cmdline()}
+    process.terminate()
+    process.wait(timeout=15)
+    atomic_json(record / f"takeover-{rank}.json", {
+        "time": time.time(), "previous": identity, "held_case": held,
+        "completed_case": completed, "no_children": True,
+    })
+    wait_for(
+        lambda: all((record / f"takeover-{i}.json").exists() for i in range(16)),
+        "All helper handoffs", 180,
+    )
+
+
 def main():
     import psutil
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
     parser.add_argument("--launch", action="store_true")
+    parser.add_argument("--plan", default="platform/lifecycle-extension.json")
     args = parser.parse_args()
     root = args.root.resolve()
-    plan = json.loads((root / "platform/lifecycle-extension.json").read_text())
-    record = root / "platform/lifecycle-extension"
+    plan = json.loads((root / args.plan).read_text())
+    record = root / plan.get("record", "platform/lifecycle-extension")
     record.mkdir(exist_ok=True)
     if args.launch:
-        require_held(root, plan)
+        if not plan.get("takeover"):
+            require_held(root, plan)
         ranks = [
             json.loads(path.read_text())["rank"] for path in (root / "platform").glob("node-*.json")
             if json.loads(path.read_text())["host"] == socket.gethostname()
@@ -170,7 +224,7 @@ def main():
         atomic_json(record / f"parent-{rank}.json", provenance)
         parent.suspend()
         wait_for(lambda: parent.status() == psutil.STATUS_STOPPED, "Original parent suspension", 10)
-        command = [sys.executable, "-u", str(Path(__file__).resolve()), str(root)]
+        command = [sys.executable, "-u", str(Path(__file__).resolve()), str(root), "--plan", args.plan]
         with (record / f"rank-{rank}.log").open("a") as log:
             process = subprocess.Popen(
                 command, env=environment, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
@@ -183,6 +237,8 @@ def main():
     else:
         rank = int(os.environ["PET_NODE_RANK"])
         try:
+            if plan.get("takeover"):
+                takeover_at_barrier(root, rank, plan)
             run(root, rank, plan)
         except Exception as error:
             atomic_json(record / f"failed-{rank}.json", {"time": time.time(), "error": repr(error)})

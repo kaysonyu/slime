@@ -48,17 +48,18 @@ def resolve_case(root, candidate):
             case[key] = best[key]
         case["selected_from"] = best["name"]
     if case.get("resume"):
+        from checkpoint import checkpoint_artifacts_valid
+
         parent = root / "runs" / case["resume"]
         previous = json.loads((parent / "case.json").read_text())
         summary = parent / "summary.json"
         verification = parent / "checkpoint-verification.json"
-        commit = parent / "checkpoint/rollout" / f"training_commit_{previous['steps'] - 1}.json"
         if not (
             summary.exists()
             and json.loads(summary.read_text()).get("valid") is True
             and verification.exists()
             and json.loads(verification.read_text()).get("valid") is True
-            and commit.is_file()
+            and checkpoint_artifacts_valid(parent, previous)
         ):
             raise RuntimeError(f"Resume prerequisite failed: {case['resume']} needs valid confirmation and checkpoint")
         for key in ("asr_replicas", "workers", "concurrency", "asr_inflight"):

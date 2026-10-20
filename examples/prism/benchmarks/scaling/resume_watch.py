@@ -16,8 +16,8 @@ from campaign import atomic_json
 def collect_events(root: Path, now: float) -> list[str]:
     manifest = json.loads((root / "manifest.json").read_text())
     events = []
-    for failure in sorted((root / "platform/lifecycle-extension").glob("failed-*.json")):
-        events.append(f"recovery-controller-failed:{failure.stem}:{int(failure.stat().st_mtime)}")
+    for failure in sorted((root / "platform").glob("lifecycle-*/failed-*.json")):
+        events.append(f"recovery-controller-failed:{failure.parent.name}:{failure.stem}:{int(failure.stat().st_mtime)}")
     if (root / "campaign-finished.json").exists() or (root / "platform/monitor-finished.json").exists():
         events.append("terminal")
     for case in manifest["cases"]:

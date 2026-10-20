@@ -227,6 +227,8 @@ def acceptance_status(root, manifest, reports):
     confirmation. Conversely, successful short runs cannot replace confirmation
     and a verified checkpoint restart.
     """
+    from checkpoint import checkpoint_artifacts_valid
+
     required = [case for case in manifest["cases"] if case.get("choose_best") or case.get("resume")]
     by_name = {case["name"]: case for case in required}
     superseded = {}
@@ -255,14 +257,15 @@ def acceptance_status(root, manifest, reports):
             continue
         verification = run / "checkpoint-verification.json"
         checkpoint_valid = verification.exists() and json.loads(verification.read_text()).get("valid") is True
-        commit_exists = (run / "checkpoint/rollout" / f"training_commit_{case['steps'] - 1}.json").is_file()
+        commit_exists = checkpoint_artifacts_valid(run, case)
         passed = summary.get("valid") is True and checkpoint_valid and commit_exists
         results[name] = {
             "status": "passed" if passed else "failed",
             "summary_valid": summary.get("valid") is True,
             "updates": summary.get("updates", 0),
             "checkpoint_verified": checkpoint_valid,
-            "checkpoint_commit_exists": commit_exists,
+            "checkpoint_boundary_intact": commit_exists,
+            "checkpoint_contract": case.get("checkpoint_contract", "training_commit"),
         }
     configured = any(case.get("choose_best") for case in required) and any(case.get("resume") for case in required)
     statuses = {item["status"] for item in results.values()}

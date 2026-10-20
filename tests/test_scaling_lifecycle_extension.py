@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples/prism/benchmarks/scaling"))
 from analyze import acceptance_status
-from lifecycle_extension import recipe_for, require_held
+from lifecycle_extension import recipe_for, require_held, takeover_at_barrier
 from prepare import write_json
 from resume_watch import collect_events
 
@@ -50,4 +50,56 @@ def test_controller_requires_unadmitted_original_parent(tmp_path):
 def test_failed_recovery_controller_wakes_existing_thread(tmp_path):
     write_json(tmp_path / "manifest.json", {"cases": [], "nodes": 16})
     write_json(tmp_path / "platform/lifecycle-extension/failed-3.json", {"error": "preflight"})
-    assert any(e.startswith("recovery-controller-failed:failed-3:") for e in collect_events(tmp_path, 10))
+    assert any(e.startswith("recovery-controller-failed:lifecycle-extension:failed-3:")
+               for e in collect_events(tmp_path, 10))
+
+
+@pytest.mark.parametrize("obstacle", [None, "child", "identity", "admitted", "invalid"])
+def test_helper_takeover_never_interrupts_active_or_unverified_work(tmp_path, monkeypatch, obstacle):
+    import psutil
+    import lifecycle_extension
+
+    plan = {
+        "record": "platform/new",
+        "takeover": {"record": "platform/old", "completed_case": "short", "held_case": "next"},
+    }
+    for rank in range(16):
+        write_json(tmp_path / f"platform/old/short-clean-{rank}.json", {})
+        if rank:
+            write_json(tmp_path / f"platform/new/takeover-{rank}.json", {})
+    write_json(tmp_path / "platform/old/controller-0.json", {"pid": 123, "command": ["old-helper"]})
+    write_json(tmp_path / "runs/short/summary.json", {"valid": obstacle != "invalid"})
+    write_json(tmp_path / "services/request.json", {"case": "next"})
+    write_json(tmp_path / "runs/next/prepared.json", {})
+    if obstacle == "admitted":
+        write_json(tmp_path / "runs/next/services-ready.json", {})
+    signals = []
+
+    class Process:
+        pid = 123
+
+        def cmdline(self):
+            return ["other" if obstacle == "identity" else "old-helper"]
+
+        def children(self, recursive):
+            return [1] if obstacle == "child" else []
+
+        def create_time(self):
+            return 1
+
+        def terminate(self):
+            signals.append("terminate")
+
+        def wait(self, timeout):
+            signals.append("wait")
+
+    monkeypatch.setattr(psutil, "Process", lambda pid: Process())
+    monkeypatch.setattr(lifecycle_extension, "wait_for", lambda predicate, *args: predicate() or pytest.fail("not ready"))
+    if obstacle:
+        with pytest.raises(RuntimeError):
+            takeover_at_barrier(tmp_path, 0, plan)
+        assert not signals
+    else:
+        takeover_at_barrier(tmp_path, 0, plan)
+        assert signals == ["terminate", "wait"]
+        assert (tmp_path / "platform/new/takeover-0.json").is_file()
