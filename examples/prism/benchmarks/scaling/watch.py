@@ -240,7 +240,9 @@ def main():
                             continue
                         if serving.get("replicas") != replicas:
                             cli("serving", "scale", service, "--workspace", workspace, "--replicas", str(replicas))
-                        instances = cli("serving", "instances", service, "--workspace", workspace).get("items", [])
+                        instances = cli("serving", "instances", service, "--workspace", workspace, "--all").get(
+                            "items", []
+                        )
                         if len(instances) == replicas and all(
                             item["status"] == "INSTANCE_RUNNING" for item in instances
                         ):
@@ -257,7 +259,7 @@ def main():
                             atomic_json(run / target, receipt)
                             acknowledged = request["case"]
             elif initial_smoke and time.monotonic() - started > 900 and serving.get("status") == "RUNNING":
-                # Retain the tested deployment configuration while waiting for eight nodes.
+                # Retain the tested deployment configuration while waiting for all nodes.
                 cli("serving", "stop", service, "--workspace", workspace)
             print(
                 json.dumps(

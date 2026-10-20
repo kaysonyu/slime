@@ -1,0 +1,56 @@
+{
+  "schema": "prism128-submission.v1",
+  "observed_utc": "2026-10-20 02:29:16 UTC",
+  "root": "/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/grpo128-20261020",
+  "outcome": "submitted_pending_gpu_evidence",
+  "job": {
+    "name": "prism-grpo128-matrix-1020",
+    "workspace": "CQ-科研驾驶舱",
+    "project": "多模态自进化科学模型",
+    "nodes": 16,
+    "gpus_per_node": 8,
+    "type": "NVIDIA H200 (141GB)",
+    "priority_level": "HIGH",
+    "observed_status": "QUEUING",
+    "runtime_limit_hours": 12,
+    "failed_container_retention_hours": 1
+  },
+  "asr": {
+    "name": "prism-grpo64-asr-1019",
+    "reused": true,
+    "initial_replicas": 16,
+    "maximum_authorized_replicas": 32,
+    "observed_status": "DEPLOYING",
+    "business_smoke_pending": true,
+    "reuse_reason": "Serving create image resolution rejected an existing live project image before workload creation; restart the identical proven service instead.",
+    "telemetry_backup": "../grpo64-20261019/services/history/pre-128-restart-20261020"
+  },
+  "immutable_training_source": {
+    "slime": "1d7c4b3ebd01d32adb1dd8b836f3399b31d95068",
+    "omni": "b3f9b9bdd9a2a40334c159b5fbe4beda2408dffb",
+    "megatron": "3f49de20de81c1ad5dfc10efa0f7d0c8098f1ce4"
+  },
+  "controller_contract": {
+    "cpu_poll_interval_seconds": 60,
+    "same_thread_only": true,
+    "thread_id": "01a154f9-bd6c-79c1-b9cf-2829727494e7",
+    "wake_on": [
+      "all_16_node_receipts",
+      "case_measured_or_failed",
+      "terminal_state",
+      "stale_watcher"
+    ],
+    "training_source_modified": false,
+    "all_asr_instances": true,
+    "queue_smoke_warm_budget_seconds": 900
+  },
+  "planned_case_count": 13,
+  "acceptance": {
+    "paired_controls": "Same allocation 64/B4096 anchors before and after 128 matrix",
+    "performance_target": "At least 1.8x throughput (90% ideal weak scaling) at 128/B8192; must be measured, not promised",
+    "stability": "100 full updates at both scales with true WER and policy/gradient audits",
+    "recovery": "Validated full checkpoints at update 100, then explicit --load and two further updates at both scales",
+    "gpu_result": "pending",
+    "cpu_tests": "See 20261020-preflight.json; all-replica controller regression adds coverage for 16 and 32 replicas"
+  }
+}

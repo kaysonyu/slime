@@ -109,6 +109,48 @@ def test_retry_plan_preserves_evidence_and_retries_only_failed_leaves(tmp_path):
         router_extension.retry_plan(tmp_path, cases)
 
 
+@pytest.mark.parametrize("replicas", [16, 32])
+def test_asr_admission_lists_every_replica_beyond_cli_default_limit(tmp_path, monkeypatch, replicas):
+    import watch
+
+    case = "scale"
+    write_json(
+        tmp_path / "manifest.json",
+        {
+            "workspace": "workspace",
+            "job_name": "job",
+            "asr_name": "asr",
+            "root": str(tmp_path),
+            "approved_asr_replicas": [16, 32],
+            "cases": [{"name": case}],
+        },
+    )
+    write_json(tmp_path / "services/initial-smoke.json", {})
+    write_json(tmp_path / "services/request.json", {"case": case, "replicas": replicas})
+    write_json(tmp_path / "runs" / case / "recipe.json", {"save": None, "save_interval": None})
+
+    def cli(*arguments):
+        if arguments[:2] == ("job", "status"):
+            return {"status": "RUNNING"}
+        if arguments[:2] == ("serving", "status"):
+            return {"status": "RUNNING", "replicas": replicas}
+        assert arguments == ("serving", "instances", "asr", "--workspace", "workspace", "--all")
+        return {"items": [{"status": "INSTANCE_RUNNING", "rank": rank} for rank in range(replicas)]}
+
+    def stop_polling(_):
+        raise RuntimeError("one observation completed")
+
+    monkeypatch.setattr(watch, "cli", cli)
+    monkeypatch.setattr(watch, "smoke", lambda _: {"business_smoke": True})
+    monkeypatch.setattr(sys, "argv", ["watch", str(tmp_path)])
+    monkeypatch.setattr(watch.time, "sleep", stop_polling)
+    with pytest.raises(RuntimeError, match="one observation completed"):
+        watch.main()
+    receipt = json.loads((tmp_path / "runs" / case / "services-ready.json").read_text())
+    assert receipt["replicas"] == len(receipt["instances"]) == replicas
+    assert receipt["business_smoke"]
+
+
 def test_manual_admission_hold_is_scoped_and_expires(tmp_path, monkeypatch):
     import watch
 

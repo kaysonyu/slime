@@ -7,6 +7,18 @@
 
 适用范围：账号 `kayson`，用户指定的 `CQ-科研驾驶舱` 工作空间，项目 `多模态自进化科学模型`。调度配额、可用 GPU 和平台状态每次从 Inspire Live 查询；本文件只记录共享资产及环境合同。
 
+64/128 H200、B4096/B8192 共卡扩展的固定复现入口为
+`/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/grpo128-20261020`，
+适用上述项目与工作空间。`manifest.json` 固定数据哈希、模型、奖励、对照口径和训练源码身份；
+`source/` 为 Slime `1d7c4b3ebd01d32adb1dd8b836f3399b31d95068`、Omni
+`b3f9b9bdd9a2a40334c159b5fbe4beda2408dffb` 的不可变快照。
+Git 真源为 `kaysonyu/slime` 与 `kaysonyu/sglang-omni` 的
+`perf/prism-grpo-128gpu-20261020` 分支；后续 CPU 控制器修订单独固定版本，不覆盖训练快照。
+逐次配置、日志、checkpoint 与业务验收以该目录 `runs/`、`analysis/` 为准，
+资产存在本身不代表性能、稳定性或断点恢复已通过。原 32/64 卡对照输入与证据保留在同级
+`grpo64-20261019`；复用 ASR 日志目录前的副本保存在其
+`services/history/pre-128-restart-20261020`，原证据不得被新的服务运行覆盖。
+
 当前 ttsrl 的 32 卡配对测速产物位于
 `/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/ttsrl-32-ab-20261016-183137/attempt-002`。
 适用同一项目与工作空间；`manifest.json` 固定基线/当前源码及教师接口兼容补丁，
