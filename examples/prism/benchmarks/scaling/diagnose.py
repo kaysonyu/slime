@@ -79,6 +79,36 @@ def router_profile(path):
     }
 
 
+def router_cpu_profile(run, start, end):
+    """Use verified run topology to exclude still-observed historical routers."""
+    topology_path = run / "router-topology.json"
+    allowed = None
+    if topology_path.exists():
+        topology = json.loads(topology_path.read_text())
+        if not topology["valid"]:
+            raise ValueError("Cannot attribute CPU using an invalid router topology")
+        allowed = {topology["pid"], *topology["data_plane_pids"], *topology["control_plane_pids"]}
+    processes = defaultdict(list)
+    for sample in rows(run.parent.parent / "platform/head-processes.jsonl"):
+        if start <= sample["time"] < end:
+            for process in sample["processes"]:
+                if not process["role"].startswith("omni_router") or "cpu_cores_used" not in process:
+                    continue
+                if allowed is not None and process["pid"] not in allowed:
+                    continue
+                processes[(process["pid"], process["role"])].append(process["cpu_cores_used"])
+    return {
+        "router_cpu_cores": [
+            dict(pid=pid, role=role, **distribution(samples)) for (pid, role), samples in sorted(processes.items())
+        ],
+        "router_cpu_scope": (
+            "Filtered to PIDs in this run's verified router-topology.json and measured time interval."
+            if allowed is not None
+            else "Historical unscoped observer: may include previous-run routers. Require separate provenance before attribution."
+        ),
+    }
+
+
 def diagnose(run):
     summary = json.loads((run / "summary.json").read_text())
     steady = [window for window in summary["windows"] if window["steady"]]
@@ -110,15 +140,7 @@ def diagnose(run):
             "publication and shutdown. Deserialization runs on another thread; do not "
             "assign all sampled CPU time to the post-collection interval."
         )
-    processes = defaultdict(list)
-    for sample in rows(root / "platform/head-processes.jsonl"):
-        if steady[0]["started"] <= sample["time"] < steady[-1]["ended"]:
-            for process in sample["processes"]:
-                if process["role"].startswith("omni_router") and "cpu_cores_used" in process:
-                    processes[(process["pid"], process["role"])].append(process["cpu_cores_used"])
-    result["router_cpu_cores"] = [
-        dict(pid=pid, role=role, **distribution(samples)) for (pid, role), samples in sorted(processes.items())
-    ]
+    result.update(router_cpu_profile(run, steady[0]["started"], steady[-1]["ended"]))
     if (service_dir / "snapshot.json").exists():
         result["asr_gpu"] = gpu_profile(service_dir.glob("*/gpu.csv"), steady[0]["started"], steady[-1]["ended"])
         result["asr_snapshot"] = str(service_dir)

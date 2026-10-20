@@ -27,6 +27,36 @@ from slime_plugins.omni_rollout import _prompt
 from slime.utils.misc import should_run_periodic_action
 
 
+def test_router_cpu_uses_verified_topology_not_historical_processes(tmp_path, monkeypatch):
+    import diagnose
+
+    write_json(tmp_path / "router-topology.json", {
+        "valid": True, "pid": 10, "data_plane_pids": [11, 12], "control_plane_pids": [13],
+    })
+    samples = [{
+        "time": 2,
+        "processes": [
+            {"pid": pid, "role": "omni_router_data", "cpu_cores_used": 0.25}
+            for pid in [11, 12, 999]
+        ],
+    }, {"time": 4, "processes": [{"pid": 11, "role": "omni_router_data", "cpu_cores_used": 100}]}]
+    monkeypatch.setattr(diagnose, "rows", lambda _: iter(samples))
+    result = diagnose.router_cpu_profile(tmp_path, 1, 3)
+    assert [p["pid"] for p in result["router_cpu_cores"]] == [11, 12]
+    assert all(p["mean"] == 0.25 for p in result["router_cpu_cores"])
+    assert "verified" in result["router_cpu_scope"]
+
+
+def test_historical_router_cpu_requires_separate_provenance(tmp_path, monkeypatch):
+    import diagnose
+
+    monkeypatch.setattr(diagnose, "rows", lambda _: iter([]))
+    assert "unscoped" in diagnose.router_cpu_profile(tmp_path, 1, 3)["router_cpu_scope"]
+    write_json(tmp_path / "router-topology.json", {"valid": False})
+    with pytest.raises(ValueError, match="invalid router topology"):
+        diagnose.router_cpu_profile(tmp_path, 1, 3)
+
+
 def test_manager_profiler_requires_unique_actor_in_current_run(tmp_path):
     source, run = tmp_path / "source", tmp_path / "run"
 
