@@ -176,25 +176,48 @@ def takeover_at_barrier(root, rank, plan):
     completed = takeover["completed_case"]
     held = takeover["held_case"]
     record = root / plan["record"]
+    cancelled = takeover.get("completed_cancellation", False)
 
     def at_barrier():
         if not all((old_record / f"{completed}-clean-{i}.json").exists() for i in range(16)):
             return False
         summary = json.loads((root / "runs" / completed / "summary.json").read_text())
+        if cancelled:
+            cancellation = root / "runs" / completed / "operator-cancellation.json"
+            if not cancellation.exists() or json.loads(cancellation.read_text()).get("case") != completed:
+                raise RuntimeError("Cancelled takeover requires exact operator cancellation evidence")
+            if summary["valid"]:
+                raise RuntimeError("Cancelled run must remain an invalid diagnostic attempt")
+            for node in range(16):
+                finished = old_record / f"finished-{node}.json"
+                if not finished.exists():
+                    return False
+                if json.loads(finished.read_text()).get("failed") != completed:
+                    raise RuntimeError("Old controller did not stop at the cancelled case")
+            request = json.loads((root / "services/request.json").read_text())
+            if request["case"] != completed:
+                raise RuntimeError("Another case was admitted after cancellation")
+            return True
         if not summary["valid"]:
             raise RuntimeError("Cannot advance from failed short run")
         request = json.loads((root / "services/request.json").read_text())
         return request["case"] == held and (root / "runs" / held / "prepared.json").exists()
 
     wait_for(at_barrier, "Previous helper reached clean admission barrier", 3600)
-    require_held(root, {"held_case": held})
+    if not cancelled:
+        require_held(root, {"held_case": held})
     receipt = json.loads((old_record / f"controller-{rank}.json").read_text())
-    process = psutil.Process(receipt["pid"])
-    if process.cmdline() != receipt["command"] or process.children(recursive=True):
-        raise RuntimeError("Previous helper identity/idle check failed; not signalling")
-    identity = {"pid": process.pid, "created": process.create_time(), "command": process.cmdline()}
-    process.terminate()
-    process.wait(timeout=15)
+    try:
+        process = psutil.Process(receipt["pid"])
+        if process.cmdline() != receipt["command"] or process.children(recursive=True):
+            raise RuntimeError("Previous helper identity/idle check failed; not signalling")
+        identity = {"pid": process.pid, "created": process.create_time(), "command": process.cmdline()}
+        process.terminate()
+        process.wait(timeout=15)
+    except psutil.NoSuchProcess:
+        if not cancelled:
+            raise
+        identity = {"pid": receipt["pid"], "command": receipt["command"], "already_exited_after_verified_cleanup": True}
     atomic_json(record / f"takeover-{rank}.json", {
         "time": time.time(), "previous": identity, "held_case": held,
         "completed_case": completed, "no_children": True,

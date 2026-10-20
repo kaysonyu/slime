@@ -48,6 +48,16 @@ def select_manager(processes, run, source):
     return candidates[0], [candidates[0].pid]
 
 
+def wait_case_ready(run, timeout=7200):
+    """Queue a bounded CPU sampler before the planned GPU case is prepared."""
+    deadline = time.monotonic() + timeout
+    while not (run / "case.json").exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Planned profiling case was never prepared")
+        time.sleep(3)
+    return json.loads((run / "case.json").read_text())
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
@@ -66,8 +76,10 @@ def main():
         raise ValueError("Unknown campaign case")
     run = root / "runs" / args.case
     output = run / f"{args.component}-profile"
-    output.mkdir(exist_ok=True)
+    output.mkdir(parents=True, exist_ok=True)
     if args.launch:
+        if (output / "controller.json").exists():
+            raise FileExistsError("Profiler already launched; inspect it before replacement")
         command = [
             sys.executable,
             str(Path(__file__).resolve()),
@@ -89,7 +101,7 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if (output / "result.json").exists():
             raise FileExistsError("Profile already attempted")
-        case = json.loads((run / "case.json").read_text())
+        case = wait_case_ready(run)
         marker = f"Published policy version={case['steps']} to {case['gpus']} rollout replicas"
         deadline = time.monotonic() + 7200
         while marker not in (run / "node-0/launch.log").read_text(errors="replace"):

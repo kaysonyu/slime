@@ -296,6 +296,16 @@ def acceptance_status(root, manifest, reports):
 
 def analyze(root):
     reports = {path.parent.name: json.loads(path.read_text()) for path in (root / "runs").glob("*/summary.json")}
+    # A running controller may still need its original completion receipt to
+    # reach a safe handoff. Honor a later audit without rewriting that receipt.
+    for name, report in reports.items():
+        exclusion = root / "runs" / name / "measurement-exclusion.json"
+        if exclusion.exists():
+            report["measurement_exclusion"] = json.loads(exclusion.read_text())
+            report["valid"] = False
+            issue = f"Measurement excluded: {report['measurement_exclusion']['reason']}"
+            if issue not in report.setdefault("issues", []):
+                report["issues"].append(issue)
     manifest = json.loads((root / "manifest.json").read_text())
     order = [case["name"] for case in manifest["cases"]]
     aggregate = {

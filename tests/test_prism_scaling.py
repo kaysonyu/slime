@@ -58,6 +58,36 @@ def test_measurement_exclusion_survives_resummarization(tmp_path):
     assert any("Measurement excluded:" in issue for issue in result["issues"])
 
 
+def test_aggregate_honors_late_exclusion_without_rewriting_controller_receipt(tmp_path):
+    case = "control"
+    write_json(tmp_path / "manifest.json", {"cases": [{"name": case}]})
+    summary = tmp_path / "runs" / case / "summary.json"
+    write_json(summary, {"case": case, "valid": True, "issues": [], "updates": 25})
+    original = summary.read_bytes()
+    write_json(summary.with_name("measurement-exclusion.json"), {"reason": "Actual router topology mismatch"})
+    report = analyze(tmp_path)
+    assert not report["all_valid"]
+    assert not report["runs"][case]["valid"]
+    assert report["runs"][case]["issues"] == ["Measurement excluded: Actual router topology mismatch"]
+    assert summary.read_bytes() == original
+
+
+def test_sampler_waits_for_planned_case_then_reads_exact_recipe(tmp_path, monkeypatch):
+    import profile_router
+
+    monkeypatch.setattr(profile_router.time, "sleep", lambda _: write_json(tmp_path / "case.json", {"steps": 25}))
+    assert profile_router.wait_case_ready(tmp_path) == {"steps": 25}
+
+
+def test_sampler_wait_is_bounded(tmp_path, monkeypatch):
+    import profile_router
+
+    ticks = iter([0, 2])
+    monkeypatch.setattr(profile_router.time, "monotonic", lambda: next(ticks))
+    with pytest.raises(TimeoutError, match="never prepared"):
+        profile_router.wait_case_ready(tmp_path, timeout=1)
+
+
 def test_extension_replacement_requires_complete_cleanup_and_held_parent(tmp_path):
     case = {"name": "supplemental"}
     run = tmp_path / "runs" / case["name"]

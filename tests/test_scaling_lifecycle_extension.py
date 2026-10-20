@@ -103,3 +103,38 @@ def test_helper_takeover_never_interrupts_active_or_unverified_work(tmp_path, mo
         takeover_at_barrier(tmp_path, 0, plan)
         assert signals == ["terminate", "wait"]
         assert (tmp_path / "platform/new/takeover-0.json").is_file()
+
+
+@pytest.mark.parametrize("obstacle", [None, "missing_finished", "missing_cancel", "valid_summary", "new_case"])
+def test_cancelled_takeover_requires_completed_cleanup_and_explicit_evidence(tmp_path, monkeypatch, obstacle):
+    import psutil
+    import lifecycle_extension
+
+    plan = {"record": "platform/new", "takeover": {
+        "record": "platform/old", "completed_case": "cancelled", "held_case": "unused",
+        "completed_cancellation": True,
+    }}
+    for rank in range(16):
+        write_json(tmp_path / f"platform/old/cancelled-clean-{rank}.json", {})
+        if obstacle != "missing_finished" or rank != 15:
+            write_json(tmp_path / f"platform/old/finished-{rank}.json", {"failed": "cancelled"})
+        if rank:
+            write_json(tmp_path / f"platform/new/takeover-{rank}.json", {})
+    write_json(tmp_path / "platform/old/controller-0.json", {"pid": 123, "command": ["old-helper"]})
+    write_json(tmp_path / "runs/cancelled/summary.json", {"valid": obstacle == "valid_summary"})
+    if obstacle != "missing_cancel":
+        write_json(tmp_path / "runs/cancelled/operator-cancellation.json", {"case": "cancelled"})
+    write_json(tmp_path / "services/request.json", {"case": "new" if obstacle == "new_case" else "cancelled"})
+    monkeypatch.setattr(psutil, "Process", lambda pid: (_ for _ in ()).throw(psutil.NoSuchProcess(pid)))
+
+    def wait(predicate, *args):
+        if not predicate():
+            raise RuntimeError("Barrier not ready")
+    monkeypatch.setattr(lifecycle_extension, "wait_for", wait)
+    if obstacle:
+        with pytest.raises(RuntimeError):
+            takeover_at_barrier(tmp_path, 0, plan)
+        assert not (tmp_path / "platform/new/takeover-0.json").exists()
+    else:
+        takeover_at_barrier(tmp_path, 0, plan)
+        assert (tmp_path / "platform/new/takeover-0.json").exists()
