@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import tarfile
@@ -76,6 +77,9 @@ def main():
             stream.extractall(destination, filter="data")
         if archive.wait():
             raise RuntimeError(f"Archive failed: {name}")
+    adapter = root / "source/source/examples/prism/benchmarks/scaling/router_python.py"
+    if not os.access(adapter, os.X_OK):
+        raise PermissionError(f"Frozen interpreter adapter must be executable: {adapter}")
     for name in ("data", "configs", "runs", "analysis", "services", "platform"):
         (root / name).mkdir(parents=True, exist_ok=True)
     shutil.copy2(args.previous / "data/train.jsonl", root / "data/train.jsonl")

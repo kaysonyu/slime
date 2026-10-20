@@ -44,16 +44,17 @@ def test_extension_replacement_requires_complete_cleanup_and_held_parent(tmp_pat
         router_extension.assert_idle(tmp_path, [case])
 
 
-def test_extension_inherits_exact_original_parent_environment_without_persisting_secrets(tmp_path, monkeypatch):
+@pytest.mark.parametrize("nodes", [8, 16])
+def test_extension_inherits_exact_original_parent_environment_without_persisting_secrets(tmp_path, monkeypatch, nodes):
     import psutil
     import socket
 
     source = tmp_path / "frozen"
-    write_json(tmp_path / "manifest.json", {"source": str(source)})
+    write_json(tmp_path / "manifest.json", {"source": str(source), "nodes": nodes})
     write_json(tmp_path / "platform/node-2.json", {"address": "10.1.2.3"})
     environment = {
         "PET_NODE_RANK": "2",
-        "PET_NNODES": "8",
+        "PET_NNODES": str(nodes),
         "GLOO_SOCKET_IFNAME": "bond0",
         "NCCL_SOCKET_IFNAME": "bond0",
         "NCCL_IB_HCA": "=mlx5_0",
@@ -75,6 +76,61 @@ def test_extension_inherits_exact_original_parent_environment_without_persisting
     environment.pop("GLOO_SOCKET_IFNAME")
     with pytest.raises(RuntimeError, match="missing GLOO"):
         router_extension.inherited_job_environment(tmp_path, 2)
+
+
+def test_extension_checks_all_sixteen_cleanup_receipts_and_configured_hold(tmp_path):
+    write_json(tmp_path / "manifest.json", {"nodes": 16})
+    write_json(tmp_path / "platform/router-extension.json", {"hold_case": "held128"})
+    output = tmp_path / "runs/retry"
+    write_json(output / "summary.json", {"valid": False})
+    for rank in range(8):
+        write_json(output / f"done-{rank}.json", {})
+    with pytest.raises(RuntimeError, match="Cleanup incomplete"):
+        router_extension.assert_idle(tmp_path, [{"name": "retry"}])
+    for rank in range(8, 16):
+        write_json(output / f"done-{rank}.json", {})
+    router_extension.assert_idle(tmp_path, [{"name": "retry"}])
+    write_json(tmp_path / "runs/held128/services-ready.json", {})
+    with pytest.raises(RuntimeError, match="Original parent was admitted"):
+        router_extension.assert_idle(tmp_path, [{"name": "retry"}])
+
+
+def test_router_interpreter_adapter_is_directly_executable(tmp_path):
+    import os
+    import subprocess
+
+    adapter = Path(router_python.__file__)
+    assert os.access(adapter, os.X_OK), "Interpreter adapters must retain executable mode in Git"
+    if not Path("/opt/venvs/core/bin/python").exists():
+        pytest.skip("Direct shebang smoke requires the deployment interpreter")
+    write_json(tmp_path / "manifest.json", {"source": str(tmp_path / "source")})
+    result = subprocess.run(
+        [str(adapter), "-c", "print('adapter_exec_ok')"],
+        env={**os.environ, "PRISM_SCALE_RUN": str(tmp_path / "runs/check")},
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=True,
+    )
+    assert result.stdout.strip() == "adapter_exec_ok"
+
+
+def test_extension_gloo_preflight_validates_sixteen_nodes_and_direct_adapter(tmp_path, monkeypatch):
+    import torch.distributed as dist
+
+    write_json(tmp_path / "manifest.json", {"nodes": 16, "source": "/source"})
+    write_json(tmp_path / "platform/head.json", {"address": "10.1.2.3"})
+    calls = []
+    monkeypatch.setattr(router_extension.subprocess, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(dist, "init_process_group", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(dist, "all_reduce", lambda value: value.fill_(120))
+    monkeypatch.setattr(dist, "barrier", lambda: None)
+    monkeypatch.setattr(dist, "destroy_process_group", lambda: None)
+    router_extension.preflight(tmp_path, 15, "revision")
+    assert calls[0][0][0][0] == "/source/examples/prism/benchmarks/scaling/router_python.py"
+    assert calls[1][1]["world_size"] == 16 and calls[1][1]["rank"] == 15
+    receipt = json.loads((tmp_path / "platform/router-extension/gloo-15.json").read_text())
+    assert receipt["sum"] == 120 and receipt["nodes"] == 16
 
 
 def test_extension_environment_rejects_unrelated_or_ambiguous_parent(tmp_path, monkeypatch):

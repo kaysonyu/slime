@@ -1,7 +1,7 @@
 """Insert router controls before the final baseline in an existing allocation.
 
-The original eight campaign parents wait at their ASR admission barrier while
-these eight helpers use the same nodes. No new Job, Ray service, or GPU quota.
+The original campaign parents wait at their ASR admission barrier while
+one helper per allocated node uses the same nodes. No new Job or GPU quota.
 Frozen original learner and Omni sources remain untouched. Only the standalone
 Slime router entry is replaced through a pinned interpreter adapter.
 """
@@ -27,13 +27,17 @@ PREVIOUS_CASE = "64-b2048-a4-w16"
 
 def assert_idle(root, cases):
     """Never replace helpers while any admitted GPU case is unfinished."""
+    manifest_path = root / "manifest.json"
+    nodes = json.loads(manifest_path.read_text()).get("nodes", 8) if manifest_path.exists() else 8
+    configuration = root / "platform/router-extension.json"
+    held = json.loads(configuration.read_text())["hold_case"] if configuration.exists() else HOLD_CASE
     for case in cases:
         output = root / "runs" / case["name"]
         if (output / "services-ready.json").exists() and not (output / "summary.json").exists():
             raise RuntimeError(f"Admitted case still running: {case['name']}")
-        if (output / "summary.json").exists() and not all((output / f"done-{i}.json").exists() for i in range(8)):
+        if (output / "summary.json").exists() and not all((output / f"done-{i}.json").exists() for i in range(nodes)):
             raise RuntimeError(f"Cleanup incomplete: {case['name']}")
-    if (root / "runs" / HOLD_CASE / "services-ready.json").exists():
+    if (root / "runs" / held / "services-ready.json").exists():
         raise RuntimeError("Original parent was admitted; do not overlap GPU work")
 
 
@@ -52,7 +56,7 @@ def inherited_job_environment(root, rank):
         raise RuntimeError(f"Expected one original campaign parent, found {len(parents)}")
     parent = parents[0]
     environment = parent.environ()
-    if environment.get("PET_NODE_RANK") != str(rank) or environment.get("PET_NNODES") != "8":
+    if environment.get("PET_NODE_RANK") != str(rank) or environment.get("PET_NNODES") != str(manifest.get("nodes", 8)):
         raise RuntimeError("Original Job environment belongs to a different node/allocation")
     for key in ("GLOO_SOCKET_IFNAME", "NCCL_SOCKET_IFNAME", "NCCL_IB_HCA"):
         if not environment.get(key):
@@ -74,25 +78,35 @@ def inherited_job_environment(root, rank):
 
 
 def preflight(root, rank, generation):
-    """Eight CPU-only ranks validate actual Gloo collectives before admission."""
+    """All allocated CPU ranks validate Gloo collectives before admission."""
     import torch
     import torch.distributed as dist
 
     master = json.loads((root / "platform/head.json").read_text())["address"]
+    manifest = json.loads((root / "manifest.json").read_text())
+    nodes = manifest["nodes"]
+    adapter = Path(manifest["source"]) / "examples/prism/benchmarks/scaling/router_python.py"
+    subprocess.run(
+        [str(adapter), "-c", "print('adapter_exec_ok')"],
+        env={**os.environ, "PRISM_SCALE_RUN": str(root / "runs/preflight")},
+        check=True,
+        timeout=30,
+    )
+    expected = nodes * (nodes - 1) // 2
     dist.init_process_group(
-        "gloo", init_method=f"tcp://{master}:6490", rank=rank, world_size=8, timeout=timedelta(seconds=120)
+        "gloo", init_method=f"tcp://{master}:6490", rank=rank, world_size=nodes, timeout=timedelta(seconds=120)
     )
     try:
         value = torch.tensor([rank], dtype=torch.int64)
         dist.all_reduce(value)
-        if value.item() != 28:
-            raise RuntimeError("Cross-node Gloo sum differs from 0+...+7")
+        if value.item() != expected:
+            raise RuntimeError(f"Cross-node Gloo sum differs from {expected}")
         dist.barrier()
     finally:
         dist.destroy_process_group()
     atomic_json(
         root / "platform/router-extension" / f"gloo-{rank}.json",
-        {"rank": rank, "generation": generation, "sum": 28, "time": time.time()},
+        {"rank": rank, "generation": generation, "sum": expected, "nodes": nodes, "time": time.time()},
     )
 
 
@@ -143,7 +157,10 @@ def repair(root, checkout, *, add_matched_controls=False):
     if add_matched_controls:
         cases, superseded = matched_controls(root, cases)
         config.setdefault("superseded_cases", []).append(
-            {"case": superseded, "reason": "Unadmitted ASR16 control moved to the completed faster eight-process router"}
+            {
+                "case": superseded,
+                "reason": "Unadmitted ASR16 control moved to the completed faster eight-process router",
+            }
         )
     if subprocess.check_output(["git", "-C", str(checkout), "status", "--porcelain"], text=True).strip():
         raise RuntimeError("Commit the repair before pinning it")
@@ -283,6 +300,9 @@ def prepare(root, checkout):
 def run(root, rank):
     extension = json.loads((root / "platform/router-extension.json").read_text())
     manifest = json.loads((root / "manifest.json").read_text())
+    nodes = manifest["nodes"]
+    held_case = extension["hold_case"]
+    previous_case = extension["previous_case"]
     record = root / "platform/router-extension"
     assert_idle(root, extension["cases"])
     with (record / f"rank-{rank}.lock").open("a") as lock:
@@ -297,21 +317,21 @@ def run(root, rank):
             return all(
                 (record / f"{prefix}-{i}.json").exists()
                 and json.loads((record / f"{prefix}-{i}.json").read_text()).get("generation") == generation
-                for i in range(8)
+                for i in range(nodes)
             )
 
-        wait_for(lambda: all_current("ready"), "Current generation of eight helpers", 600)
+        wait_for(lambda: all_current("ready"), f"Current generation of {nodes} helpers", 600)
         preflight(root, rank, generation)
-        wait_for(lambda: all_current("gloo"), "All eight Gloo preflight results", 180)
+        wait_for(lambda: all_current("gloo"), "All allocated Gloo preflight results", 180)
         if rank == 0:
 
             def original_waiting():
                 request = json.loads((root / "services/request.json").read_text())
-                return request["case"] == HOLD_CASE and (root / "runs" / PREVIOUS_CASE / "summary.json").exists()
+                return request["case"] == held_case and (root / "runs" / previous_case / "summary.json").exists()
 
             if not (record / "claimed.json").exists():
                 wait_for(original_waiting, "Original parents reach the admission hold", 6 * 3600)
-            if (root / "runs" / HOLD_CASE / "services-ready.json").exists():
+            if (root / "runs" / held_case / "services-ready.json").exists():
                 raise RuntimeError("Original baseline was admitted; do not overlap GPU work")
             if not (record / "claimed.json").exists():
                 atomic_json(record / "claimed.json", {"time": time.time()})
@@ -319,6 +339,7 @@ def run(root, rank):
         address = json.loads((root / "platform" / f"node-{rank}.json").read_text())["address"]
         master = json.loads((root / "platform/head.json").read_text())["address"]
         for index, case in enumerate(extension["cases"], start=30):
+            case = dict(case, allocated_nodes=nodes)
             output = root / "runs" / case["name"]
             if (output / "summary.json").exists():
                 continue
@@ -361,7 +382,9 @@ def run(root, rank):
             except Exception as error:
                 receipt = {"rank": rank, "returncode": 1, "participating": True, "error": repr(error)}
             atomic_json(output / f"done-{rank}.json", receipt)
-            wait_for(lambda: all((output / f"done-{i}.json").exists() for i in range(8)), "Supplemental cleanup", 6000)
+            wait_for(
+                lambda: all((output / f"done-{i}.json").exists() for i in range(nodes)), "Supplemental cleanup", 6000
+            )
             if rank == 0:
                 from analyze import summarize_case
 
@@ -375,8 +398,8 @@ def run(root, rank):
                 120,
             )
             atomic_json(record / "finished.json", {"time": time.time()})
-            held = json.loads((root / "runs" / HOLD_CASE / "case.json").read_text())
-            atomic_json(root / "services/request.json", {"case": HOLD_CASE, "replicas": held["asr_replicas"]})
+            held = json.loads((root / "runs" / held_case / "case.json").read_text())
+            atomic_json(root / "services/request.json", {"case": held_case, "replicas": held["asr_replicas"]})
 
 
 def main():
@@ -402,9 +425,21 @@ def main():
             parser.error("--pin-router requires --cases")
         pin_router(args.root, args.pin_router, args.cases, diagnostics_only=args.diagnostics_only)
         return
-    rank = int(os.environ["PET_NODE_RANK"])
-    if int(os.environ["PET_NNODES"]) != 8 or rank not in range(8):
-        raise ValueError("Use only the authorized existing eight-node Job")
+    manifest = json.loads((args.root / "manifest.json").read_text())
+    nodes = manifest["nodes"]
+    if args.launch:
+        matches = [
+            json.loads(path.read_text())["rank"]
+            for path in (args.root / "platform").glob("node-*.json")
+            if json.loads(path.read_text())["host"] == socket.gethostname()
+        ]
+        if len(matches) != 1:
+            raise RuntimeError("Interactive shell must match exactly one recorded allocation host")
+        rank = matches[0]
+    else:
+        rank = int(os.environ["PET_NODE_RANK"])
+        if int(os.environ["PET_NNODES"]) != nodes or rank not in range(nodes):
+            raise ValueError("Use only the authorized existing allocation")
     record = args.root / "platform/router-extension"
     record.mkdir(exist_ok=True)
     if args.launch:
@@ -412,6 +447,8 @@ def main():
 
         config = json.loads((args.root / "platform/router-extension.json").read_text())
         environment, network = inherited_job_environment(args.root, rank)
+        if (record / f"controller-{rank}.json").exists() and not args.replace_idle:
+            raise FileExistsError("Helper already launched; inspect its recorded identity before replacing it")
         if args.replace_idle:
             assert_idle(args.root, config["cases"])
             receipt_path = record / f"controller-{rank}.json"
