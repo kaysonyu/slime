@@ -1,4 +1,4 @@
-"""Sample a case's router only during its final, unmeasured generation round."""
+"""Sample a router or rollout manager during the final, unmeasured round."""
 
 import argparse
 import fcntl
@@ -32,12 +32,29 @@ def select_router(processes, run, source, *, multiprocess=False):
     return max(candidates, key=lambda item: item[0])[1], [p.pid for _, p in candidates]
 
 
+def select_manager(processes, run, source):
+    """Require exactly one run-scoped manager, never another campaign's actor."""
+    candidates = []
+    for process in processes:
+        if role(process.info["cmdline"], source) != "RolloutManager":
+            continue
+        try:
+            if process.environ().get("PRISM_SCALE_RUN") == str(run):
+                candidates.append(process)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    if len(candidates) != 1:
+        raise RuntimeError(f"Expected one run-scoped RolloutManager, found {len(candidates)}")
+    return candidates[0], [candidates[0].pid]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
     parser.add_argument("case")
     parser.add_argument("--launch", action="store_true")
     parser.add_argument("--duration", type=int, default=15)
+    parser.add_argument("--component", choices=("router", "manager"), default="router")
     args = parser.parse_args()
     if not 1 <= args.duration <= 30:
         parser.error("--duration must be between 1 and 30 seconds")
@@ -48,7 +65,7 @@ def main():
     if args.case not in [case["name"] for case in manifest["cases"]]:
         raise ValueError("Unknown campaign case")
     run = root / "runs" / args.case
-    output = run / "router-profile"
+    output = run / f"{args.component}-profile"
     output.mkdir(exist_ok=True)
     if args.launch:
         command = [
@@ -58,6 +75,8 @@ def main():
             args.case,
             "--duration",
             str(args.duration),
+            "--component",
+            args.component,
         ]
         with (output / "controller.log").open("a") as log:
             process = subprocess.Popen(
@@ -85,7 +104,12 @@ def main():
             raise RuntimeError("Final generation already completed; do not profile another phase")
         source = Path(case["router_python"]).parents[4] if "router_python" in case else Path(manifest["source"])
         multiprocess = case.get("router_processes", 1) > 1
-        process, candidates = select_router(psutil.process_iter(["cmdline"]), run, source, multiprocess=multiprocess)
+        if args.component == "manager":
+            process, candidates = select_manager(psutil.process_iter(["cmdline"]), run, source)
+        else:
+            process, candidates = select_router(
+                psutil.process_iter(["cmdline"]), run, source, multiprocess=multiprocess
+            )
         command = [
             "/opt/sglang/bin/py-spy",
             "record",
@@ -100,7 +124,7 @@ def main():
             "--format",
             "speedscope",
             "--output",
-            str(output / "router.speedscope.json"),
+            str(output / f"{args.component}.speedscope.json"),
         ]
         started = time.time()
         with (output / "py-spy.log").open("w") as log:
@@ -109,9 +133,17 @@ def main():
             "started": started,
             "ended": time.time(),
             "pid": process.pid,
-            "role": "omni_router_data" if multiprocess else "omni_router",
+            "role": (
+                "RolloutManager"
+                if args.component == "manager"
+                else ("omni_router_data" if multiprocess else "omni_router")
+            ),
             "candidate_pids": candidates,
-            "selection": "Highest cumulative CPU among run-scoped eligible router processes; one representative, not all data planes",
+            "selection": (
+                "The unique run-scoped rollout manager"
+                if args.component == "manager"
+                else "Highest cumulative CPU among run-scoped eligible router processes; one representative, not all data planes"
+            ),
             "command": command,
             "returncode": result.returncode,
             "excluded_from_timing": "Final rollout has no adjacent generate start and is never in steady_windows",

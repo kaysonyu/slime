@@ -15,7 +15,7 @@ from analyze import acceptance_status, analyze, percentile, summarize_case
 from campaign import finish_campaign, resolve_case
 from diagnose import gpu_profile
 from observe_processes import role
-from profile_router import select_router
+from profile_router import select_manager, select_router
 from prepare import convert_prompt, write_json
 from prepare128 import matrix
 from resume_watch import collect_events
@@ -25,6 +25,27 @@ from watch import admission_held, prepare_case_recipe, snapshot_service_telemetr
 from slime_plugins import tts_reward
 from slime_plugins.omni_rollout import _prompt
 from slime.utils.misc import should_run_periodic_action
+
+
+def test_manager_profiler_requires_unique_actor_in_current_run(tmp_path):
+    source, run = tmp_path / "source", tmp_path / "run"
+
+    def process(pid, label, owner):
+        return SimpleNamespace(
+            pid=pid,
+            info={"cmdline": [f"ray::{label}"]},
+            environ=lambda: {"PRISM_SCALE_RUN": str(owner)},
+        )
+
+    manager = process(1, "RolloutManager", run)
+    stale = process(2, "RolloutManager", tmp_path / "old")
+    engine = process(3, "OmniEngine", run)
+    chosen, candidates = select_manager([stale, engine, manager], run, source)
+    assert chosen is manager and candidates == [1]
+    with pytest.raises(RuntimeError, match="found 0"):
+        select_manager([stale, engine], run, source)
+    with pytest.raises(RuntimeError, match="found 2"):
+        select_manager([manager, process(4, "RolloutManager", run)], run, source)
 
 
 def test_extension_replacement_requires_complete_cleanup_and_held_parent(tmp_path):
