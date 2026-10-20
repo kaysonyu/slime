@@ -169,8 +169,7 @@ def main():
         provenance.update(parent_created=parent.create_time(), before_status=parent.status())
         atomic_json(record / f"parent-{rank}.json", provenance)
         parent.suspend()
-        if parent.status() != psutil.STATUS_STOPPED:
-            raise RuntimeError("Original parent did not stop")
+        wait_for(lambda: parent.status() == psutil.STATUS_STOPPED, "Original parent suspension", 10)
         command = [sys.executable, "-u", str(Path(__file__).resolve()), str(root)]
         with (record / f"rank-{rank}.log").open("a") as log:
             process = subprocess.Popen(
