@@ -103,7 +103,7 @@ def install_active_close_diagnostics(*, component="omni_router"):
     AsyncHTTP11Connection.aclose = close
 
 
-def install_reserved_connection_guard():
+def install_reserved_connection_guard(*, exclusive_assignment=True):
     """Keep HTTP/1 pool assignments alive until their request releases them.
 
     httpcore 1.0.9 can evict a connection between assigning it and starting
@@ -111,12 +111,19 @@ def install_reserved_connection_guard():
     and #1111; neither a larger pool nor a retry establishes safe ownership.
     This process-local compatibility guard preserves limits, expiry, and
     errors. It does not modify installed packages or retry requests.
+
+    ``exclusive_assignment=False`` preserves httpcore's normal optimistic
+    assignment to a not-yet-started HTTP/1 connection. ConnectionNotAvailable
+    still reschedules pool assignment before sending; this is not a POST retry.
+    Both modes protect every assigned connection from eviction.
     """
     import httpcore
     from httpcore._async.connection_pool import AsyncConnectionPool
 
     original = AsyncConnectionPool._assign_requests_to_connections
     if getattr(original, "_prism_reserved_connection_guard", False):
+        if getattr(original, "_prism_exclusive_assignment", True) != exclusive_assignment:
+            raise RuntimeError("HTTP pool guard assignment mode cannot change after installation")
         return
     if httpcore.__version__ != "1.0.9":
         raise RuntimeError("Revalidate the router pool compatibility guard for this httpcore version")
@@ -145,7 +152,9 @@ def install_reserved_connection_guard():
                 (
                     item
                     for item in pool._connections
-                    if item not in reserved and item.can_handle_request(origin) and item.is_available()
+                    if (not exclusive_assignment or item not in reserved)
+                    and item.can_handle_request(origin)
+                    and item.is_available()
                 ),
                 None,
             )
@@ -165,6 +174,7 @@ def install_reserved_connection_guard():
         return closing
 
     assign._prism_reserved_connection_guard = True
+    assign._prism_exclusive_assignment = exclusive_assignment
     AsyncConnectionPool._assign_requests_to_connections = assign
 
 

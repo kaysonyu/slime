@@ -25,6 +25,7 @@ def test_sharded_client_installs_guard_and_preserves_limits(monkeypatch):
     transport = http_utils._ShardedHTTPTransport(65)
     assert transport._pool_sizes == [22, 22, 21]
     assert getattr(AsyncConnectionPool._assign_requests_to_connections, "_prism_reserved_connection_guard")
+    assert not AsyncConnectionPool._assign_requests_to_connections._prism_exclusive_assignment
     assert getattr(AsyncHTTP11Connection.aclose, "_prism_active_close_diagnostics")
     assert getattr(httpx.AsyncClient.send, "_prism_transport_diagnostics")
 

@@ -109,8 +109,8 @@ def run(root, rank, plan):
             atomic_json(output / "prepared.json", {"time": time.time()})
             atomic_json(root / "services/request.json", {"case": case["name"], "replicas": case["asr_replicas"]})
             if index == 60 and plan.get("takeover"):
-                if case["name"] != plan["takeover"]["held_case"]:
-                    raise RuntimeError("Takeover must resume at its held case")
+                if case["name"] != plan["takeover"].get("admit_case", plan["takeover"]["held_case"]):
+                    raise RuntimeError("Takeover must start at its explicitly planned admission case")
                 hold_path = root / "platform/admission-hold.json"
                 hold = json.loads(hold_path.read_text())
                 if case["name"] not in hold["cases"] or time.time() >= hold["expires"]:

@@ -5,6 +5,7 @@ import importlib.util
 from pathlib import Path
 
 import httpcore
+import httpx
 import pytest
 from httpcore._async.connection_pool import AsyncConnectionPool, AsyncPoolRequest
 
@@ -44,13 +45,14 @@ def request(host):
 
 @pytest.mark.parametrize("guarded", [False, True])
 @pytest.mark.parametrize("pressure", ["expiry", "retention", "capacity"])
-def test_assigned_but_not_started_connection_survives_eviction(monkeypatch, guarded, pressure):
+@pytest.mark.parametrize("exclusive", [False, True])
+def test_assigned_but_not_started_connection_survives_eviction(monkeypatch, guarded, pressure, exclusive):
     async def exercise():
         monkeypatch.setattr(
             AsyncConnectionPool, "_assign_requests_to_connections", AsyncConnectionPool._assign_requests_to_connections
         )
         if guarded:
-            router.install_reserved_connection_guard()
+            router.install_reserved_connection_guard(exclusive_assignment=exclusive)
         pool = AsyncConnectionPool(max_connections=1, max_keepalive_connections=0 if pressure == "retention" else 1)
         owner = request("worker-a")
         connection = Connection(owner.request.url.origin, expired=pressure == "expiry")
@@ -71,6 +73,32 @@ def test_assigned_but_not_started_connection_survives_eviction(monkeypatch, guar
             assert connection in closing
             assert waiter.connection is not connection
         assert len(pool.connections) <= 1
+
+    asyncio.run(exercise())
+
+
+def test_optimistic_mode_preserves_assignment_but_never_evicts_owners(monkeypatch):
+    async def exercise():
+        monkeypatch.setattr(
+            AsyncConnectionPool, "_assign_requests_to_connections", AsyncConnectionPool._assign_requests_to_connections
+        )
+        router.install_reserved_connection_guard(exclusive_assignment=False)
+        pool = AsyncConnectionPool(max_connections=1, max_keepalive_connections=1)
+        first, second, other = request("worker-a"), request("worker-a"), request("worker-b")
+        connection = Connection(first.request.url.origin)
+        pool._connections = [connection]
+        pool._requests = [first, second, other]
+        assert pool._assign_requests_to_connections() == []
+        assert first.connection is second.connection is connection
+        assert other.is_queued()
+        pool._requests.remove(first)
+        assert pool._assign_requests_to_connections() == []
+        assert other.is_queued()  # The second owner still protects it.
+        pool._requests.remove(second)
+        assert pool._assign_requests_to_connections() == [connection]
+        assert other.connection is not connection
+        with pytest.raises(RuntimeError, match="mode cannot change"):
+            router.install_reserved_connection_guard(exclusive_assignment=True)
 
     asyncio.run(exercise())
 
@@ -126,3 +154,64 @@ def test_guard_is_idempotent_and_requires_the_validated_dependency(monkeypatch):
     installed = AsyncConnectionPool._assign_requests_to_connections
     router.install_reserved_connection_guard()
     assert AsyncConnectionPool._assign_requests_to_connections is installed
+
+
+@pytest.mark.parametrize("exclusive", [False, True])
+def test_real_http1_waves_preserve_parallelism_limits_and_exactly_once_posts(monkeypatch, exclusive):
+    async def exercise():
+        monkeypatch.setattr(
+            AsyncConnectionPool, "_assign_requests_to_connections", AsyncConnectionPool._assign_requests_to_connections
+        )
+        router.install_reserved_connection_guard(exclusive_assignment=exclusive)
+        active, peak, count = 0, 0, 0
+        handlers = set()
+
+        async def handle(reader, writer):
+            nonlocal active, peak, count
+            handlers.add(asyncio.current_task())
+            try:
+                while True:
+                    header = await reader.readuntil(b"\r\n\r\n")
+                    length = next(
+                        int(line.split(b":", 1)[1])
+                        for line in header.split(b"\r\n")
+                        if line.lower().startswith(b"content-length:")
+                    )
+                    body = await reader.readexactly(length)
+                    count += 1
+                    active += 1
+                    peak = max(peak, active)
+                    await asyncio.sleep(0.01)
+                    writer.write(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: "
+                        + str(len(body)).encode() + b"\r\n\r\n" + body
+                    )
+                    await writer.drain()
+                    active -= 1
+            except asyncio.IncompleteReadError:
+                pass
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                handlers.discard(asyncio.current_task())
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        url = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/generate"
+        try:
+            async with httpx.AsyncClient(
+                limits=httpx.Limits(max_connections=4, max_keepalive_connections=4),
+                trust_env=False, timeout=5,
+            ) as client:
+                for wave in range(3):
+                    payloads = [f"{wave}:{i}".encode() for i in range(12)]
+                    responses = await asyncio.gather(*(client.post(url, content=p) for p in payloads))
+                    assert [response.content for response in responses] == payloads
+            if handlers:
+                await asyncio.gather(*handlers)
+        finally:
+            server.close()
+            await server.wait_closed()
+        assert count == 36
+        assert peak == 4
+
+    asyncio.run(exercise())

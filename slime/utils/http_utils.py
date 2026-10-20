@@ -173,7 +173,10 @@ class _ShardedHTTPTransport(httpx.AsyncBaseTransport):
             install_transport_error_diagnostics,
         )
 
-        install_reserved_connection_guard()
+        # Protect eviction without eagerly assigning a distinct socket to
+        # every queued request. Preserve httpcore's established client-side
+        # assignment/ramp-up behavior; routers retain their pinned mode.
+        install_reserved_connection_guard(exclusive_assignment=False)
         install_transport_error_diagnostics(component="slime_http_client")
         install_active_close_diagnostics(component="slime_http_client")
         count = max(1, (max_connections + 31) // 32)
