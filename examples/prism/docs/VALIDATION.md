@@ -3,6 +3,203 @@
 本文记录固定源码、配置和资产对应的验收结果；各轮结论只适用于其记录的范围。
 当前训练入口见 [EXAMPLE_RUNS.md](EXAMPLE_RUNS.md)，输出目录与 Ray 生命周期见 [RAY.md](RAY.md)。
 
+## Prism GRPO 64/128 H200 扩展与优化（2026-10-20 UTC，按用户要求结束）
+
+最终优化版在 64 卡 / B4096 达到 **14.532 秒/步**，128 卡 / B8192 两次
+独立 25 步短跑为 **18.685 / 18.673 秒/步**。同代码吞吐扩展为 **1.556×**，
+弱扩展效率约 **77.8%**，不是线性 2×。用户要求记录当前优化结果并关闭实验，
+因此不再启动准备中的 128 卡 100 步与 checkpoint 恢复，也不再复核 64 卡。
+本节是实际短跑结果与用户终止范围的记录，不是原始全量验收通过声明。
+
+本次移植以 `VoiceAgentGroup/slime` 的 `tts-dev@468d9e9a` 为基线，
+保留该基线的语言展示、独立音频奖励客户端、总并发预算以及 accent/prosody 评分。
+**下表 GPU 数字来自历史固定源码，不是 `468d9e9a` 移植版的 GPU 复测结果。**
+移植只做 CPU、真实 HTTP 多进程和 CPU Ray 回归，不重新分配 GPU。
+不引入实验排队、定时回调、平台登录、孤儿清理或特定集群控制器代码。
+本次移植的 [回归记录](../benchmarks/scaling/results/20261020-pr-port.json)：
+优化 CI 入口 116 项通过（含真实 2/4/8/16 router 进程与 5 项真实 CPU Ray），
+另有 84 项 straw 传输回归通过；新版奖励、metadata、组批与恢复兼容性回归
+574 项通过、14 项跳过、无失败。跳过项为缺少可选 `librosa` / `threadpoolctl`
+以及未提供真实 HF 制品的检查；不将跳过项计为通过。静态检查与 Python 3.10
+语法解析通过，测试解释器为 Python 3.12.3，所有 Ray 测试均使用 `num_gpus=0`。
+
+机器可读结果、逐项配置、统计及证据索引见
+[`20261020-final.json`](../benchmarks/scaling/results/20261020-final.json)。
+完整产物位于
+`/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/grpo128-20261020`。
+所有失败、排除、主动取消和未启动的记录均保留，不混入有效吞吐。
+
+### 固定版本与测量方法
+
+最终训练源码为 Slime `cd50e5a934681a54a4cec098dcff7f44512ef085`，
+不可变快照为 `source/postprocess-cd50e5a9`；优化前的正确 router 拓扑基线是
+`f08b40550219da661e6f2732a949b238ea2d6ffa`，router 启动适配器固定为
+`40487d9223189f24e45b872cd9ed1b8c0d9013f2`。Omni 固定为
+`b3f9b9bdd9a2a40334c159b5fbe4beda2408dffb`；Megatron 为 `3f49de20`。
+Git 分支为 `perf/prism-grpo-128gpu-20261020`，上述 runtime pin 不随记录提交改变。
+
+沿用 Prism 1.7B v0.4、iteration 100000 / renderer 7、8 万条
+fullclone_chinese、每 prompt 8 候选和真实 Qwen3-ASR WER 奖励；
+模型、训练算法和奖励语义没有为测速简化。训推共卡最多 128 张 H200，
+ASR 独立最多 32 张；数据及 ASR 身份哈希记录在 JSON 中。
+最终 64 卡配置为 B4096 / ASR16 / workers32 / router8 / ASR inflight4；
+128 卡为 B8192 / ASR32 / workers64 / router16 / ASR inflight8。
+两者 concurrency16、round_robin，并启用 topology cache 和 packed tensor buffer。
+
+每个短跑完成 25 次更新，用相邻 generate 开始时间统计 rollout 3–23 的
+21 个完整窗口，排除前三步预热及末尾未闭合窗口，不删除慢步。整步包括生成、
+真实评分、归档、转换与分片、训练、清理和权重发布；不包括初始化及末尾 checkpoint。
+CPU profile 仅在末尾未计时的 rollout 24 采样，不污染表中窗口。
+
+| 配置 / 实验 | 秒/步 | P95 秒 | samples/s | generate 秒 | async_train 秒 | 权重发布秒 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 优化前 128 / B8192，正确 router 拓扑 | 22.980 | 24.109 | 356.48 | 17.882 | 1.747 | 3.305 |
+| 最终 64 / B4096 | 14.532 | 15.056 | 281.86 | 11.775 | 1.438 | 1.276 |
+| 最终 128 / B8192，首次 | 18.685 | 19.278 | 438.42 | 15.390 | 1.640 | 1.610 |
+| 最终 128 / B8192，重复 | 18.673 | 20.024 | 438.71 | 15.395 | 1.705 | 1.528 |
+| 同版 128，仅关闭 topology cache | 20.340 | 20.894 | 402.75 | 15.364 | 1.678 | 3.253 |
+
+128 卡相对正确拓扑优化前版本减少 **4.308 秒/步（18.74%）**，吞吐增加
+**23.07%**。两次最终 128 均值仅差 **0.066%**，但重复组 P95 高 **0.746 秒**，
+不能据此宣称尾延迟完全一致或统计显著。最终 128 平均生成长度为 92.75 / 92.80
+帧，64 为 92.25 帧；同时保留 audio frames/s 供核对，未用截短生成换取吞吐。
+
+弱扩展效率定义为 `T64 / T128`，吞吐倍率为 `2 × T64 / T128`。
+最终比较使用同一 `cd50e5a9` 的现有 64 卡对照；用户免除了末尾 64 复核，
+因此没有优化版前后双对照漂移区间。早先以旧 64 基线与新 128 混算的 83.5%
+不是同代码扩展效率，最终结论不采用该数字。
+
+### 已保留的优化与消融
+
+1. **Router 多进程与独立连接池。** 最终使用真实 8 / 16 个 router 数据面进程，
+   使用 Omni 原生共享 control/data-plane supervisor，并核对实际拓扑。
+   单进程原本已有按后端副本隔离的 HTTP 池，多进程改用原生 pool；
+   上一轮 64 卡、ASR8 的这次 router/HTTP 路径切换从 37.023 降至 17.827 秒，
+   吞吐 2.077×。这是组合优化，不是纯进程数或硬件扩展收益，也不重复计算
+   基线中已有的连接池隔离收益。
+2. **ASR 容量和在途并发匹配。** 64 卡采用 16 个 ASR，128 卡采用 32 个，
+   128 的 inflight 从 4 调为 8；同时测过 workers64/128 和 concurrency16/8。
+   最终保留 W64/I8，没有因 worker 更多就默认更快。
+3. **HTTP1 连接所有权保护。** Router 和 rollout 客户端保护已分配连接，避免
+   pool eviction 关闭活动流；不通过重试生成 POST 掩盖错误。中间的乐观分配
+   `a42aa468` 候选已撤回，最终 HTTP 实现与 `f08b4055` 对照一致。
+4. **带版本的权重拓扑缓存（`7ce376a9`）。** 缓存 actor handle 拓扑，
+   在权威恢复边界刷新，engine 替换时失效；每步权重仍完整发布，不缓存旧权重。
+   同源码开关消融节省 1.655 秒整步，其中权重发布节省 1.643 秒，
+   其余阶段合计只差约 0.013 秒；该消融吞吐提高 8.86%。
+5. **Packed tensor 传输（`cd50e5a9`）。** 将符合条件的普通连续 CPU tensor
+   合入一个 buffer，携带 dtype/shape/offset，接收端保持可写副本；不符合条件
+   时走原路径，保留嵌套 Ray ObjectRef 所有权。CPU 64-sample 微测 encode
+   13.485→10.262 ms、decode 8.438→4.867 ms，不直接当作整步 GPU 收益。
+6. **保持精确结果的 KK 分片优化。** 复用空分片 sentinel、跳过空合并并转移
+   所有权，246 个 golden case 分片完全一致。CPU B4096/DP64 为
+   0.497→0.192 秒，B8192/DP128 为 1.613→0.584 秒。
+7. **CPU tensor 快路径。** 对 dtype、连续性、设备、梯度及附加属性均满足
+   条件的普通 tensor 直接复用，避免重复转换；其余情况保留原语义。
+   没有该项独立的 GPU 消融，不为它分配单独的整步收益。
+
+ASR 与并发消融的详细输入、摘要哈希和计算结果见
+[`20261020-asr-ablation.json`](../benchmarks/scaling/results/20261020-asr-ablation.json)：
+
+| 对照（其他配置固定） | 秒/步变化 | 吞吐变化 | 选择 |
+| --- | ---: | ---: | --- |
+| 64 卡 / B4096 / R8，ASR8→16 | 17.827→15.872 | +12.32% | ASR16 |
+| 128 卡 / B8192 / W64 / I4，ASR16→32 | 26.507→24.469 | +8.33% | ASR32 |
+| 128 卡 / ASR32 / W64，ASR 每 worker inflight4→8 | 24.469→23.207 | +5.44% | I8 |
+| 128 卡 / ASR32 / I4，workers64→128 | 24.469→23.446 | +4.36% | 未选；慢于 W64/I8 |
+| 128 卡 / ASR32 / W64 / I4，生成并发16→8 | 24.469→24.433 | +0.15% | 无充分收益证据，保留16 |
+
+64 卡 ASR 对照的队列等待均值为 1.751→0.828 秒，减少约 52.7%；
+ASR16 组增加了仅错误路径的 transport diagnostics，因此该对照不是字节级
+相同 router 源码。所有 ASR 扩容收益均额外计入 ASR 卡，不能归给训推卡本身。
+历史短跑及当时未通过长跑的事实分别保留在
+[`20261019-r8.json`](../benchmarks/scaling/results/20261019-r8.json)、
+[`20261019-r8-asr16.json`](../benchmarks/scaling/results/20261019-r8-asr16.json)、
+[`20261019-final.json`](../benchmarks/scaling/results/20261019-final.json)，
+这些历史文件中的 pending/remaining 状态不是重新启动实验的计划。
+
+关闭 topology cache 的后处理优化版为 20.340 秒，对比正确拓扑旧基线 22.980 秒，
+观察到后处理组合节省约 2.640 秒；这覆盖 packed、KK 与 CPU tensor 快路径，
+不是其中任一项的独立 GPU 消融。CPU 原始微测见
+[`20261020-postprocess-cpu.json`](../benchmarks/scaling/results/20261020-postprocess-cpu.json)，
+可用 `PYTHONPATH=. python examples/prism/benchmarks/scaling/benchmark_postprocess.py
+--baseline-source /path/to/preoptimization-checkout --output /tmp/postprocess.json`
+复测。不同阶段、不同控制组的提升百分比不可直接相加。
+
+实际拓扑校验、失败后精确进程清理、污染测量排除、native object-store
+checkpoint 校验和计时窗外 profile 是验收可靠性修复，不另算吞吐收益。
+部署前 CPU、精确分片、集成与真实 Ray 测试证据保存在 JSON 索引中；
+本次关闭阶段没有重新运行 GPU 训练。
+
+### 在 `468d9e9a` 基线上启用
+
+新增开关均显式启用；默认 router 进程数仍为 1，两个 buffer/cache 新开关为关闭。
+精确 KK 分片、CPU tensor 快路径和现有 HTTP1 池的所有权保护则直接生效，
+不额外增加一套配置开关。
+在已有共卡 recipe 上设置以下片段，资产路径和其余训练参数沿用对应配置：
+
+```text
+--omni-router-policy round_robin
+--omni-router-processes 16
+--cache-weight-topology
+--rollout-data-transport object-store
+--rollout-tensor-buffer
+--rollout-packed-tensor-buffer
+```
+
+64 卡将 router 改为 8。多进程不支持只维护局部计数的 `least_request`；
+共享准入、worker PUT 的全 DP snapshot 确认、权重发布版本以及请求失败语义均保留。
+HTTP1 reservation 兼容层按 `httpcore==1.0.9` 验证，其他版本明确要求重新验证；
+HTTP2 继续原分配路径，生成 POST 不增加自动重试。Omni 依赖固定在
+`b3f9b9bdd9a2a40334c159b5fbe4beda2408dffb` 或经等价验证的版本，
+其中包含 transient shared-admission 写入处理；它不属于本 Slime PR。
+拓扑缓存仅在既有 recovery/barrier 后使用，engine/lock/并行布局变化使 revision
+更新；无恢复边界的 external serving 保留原 live-fetch 路径。
+Packed 对不符合条件的 tensor 保留原序列化方式，每个接收者持有独立可写内存，
+不改变奖励、候选分组、样本筛选、训练 microbatch 或权重发布频率。
+
+**新版奖励配置不接受旧的每 worker `max_inflight`。** 按
+[CONCURRENCY_CONFIG.md](../reward_services/CONCURRENCY_CONFIG.md) 使用服务总预算：
+64 卡 / workers32 / I4 对应 `services.wer.concurrency: 128`；
+128 卡 / workers64 / I8 对应 `services.wer.concurrency: 512`。
+这只是并发额度的对应关系，新奖励 HTTP 客户端与服务协议不同，
+不承诺仅修改该数字即可复现历史耗时。ASR 的 16 / 32 GPU 副本仍需要单独部署，
+不由这些训练开关创建。本次没有更改新基线的默认奖励配置。
+
+### 剩余瓶颈与验证边界
+
+64→128 的整步增加约 4.141 秒，其中 generate 增加 3.620 秒，
+async_train 增加 0.267 秒，权重发布增加 0.252 秒。实际 actor_train
+仅 0.802→0.834 秒，主要拖慢量不在 learner 的前后向计算。
+collection 为 8.828→9.209 秒，而 collection 结束到 driver 返回为
+2.946→6.186 秒，后者是剩余扩展损失的主要区间。
+
+128 重复组末轮 GIL 采样中，deserialize_group、split_by_dp/Ray put 和
+Prism artifact/log 的 inclusive 占比分别约 22.2%、20.3%、19.0%。
+这是 522 次采样、88 次非阻塞采样错误的定位证据，**不是互斥 wall-time 分解**，
+不能相加或把整个后处理区间归因到单一函数。代码中仍存在各 DP payload
+重复遍历全局 raw_reward/total_lengths、逐 tensor materialization、同步归档与
+指标计算等工作；共享元数据、进一步异步化及 serving snapshot 缓存没有继续实施。
+最终 128 GPU 平均 busy 约 30–31%，ASR 约 19%，峰值显存约 50.3 GiB；
+这些设备采样是辅助证据，不单独证明瓶颈。
+
+最终 64 短跑的 102,400 条样本，以及两次 128 各 204,800 条样本，逐条核验
+无失败奖励、零帧、截断、错组或陈旧策略样本，梯度有限且非零。128 每组的
+3200 份 rank/step microbatch 记录均为 `[1]`，版本 1–26 每次发布至 128 副本。
+这些证明短跑业务完整性，不证明长期收敛或语音主观质量。
+
+优化前的 `f08b4055` **64 卡**已完成 100 更新及从 checkpoint 实际恢复后
+追加 2 更新：optimizer `[100,100]→[102,102]`、scheduler/data
+409600→417792，模型及 Adam 状态完整。该结果不能替代最终 `cd50e5a9`
+**128 卡**长跑与恢复验收；后者按用户关闭指示没有启动。
+
+关闭记录为 `campaign-finished.json` 与 `platform/user-closure.json`：
+训练 Job `prism-grpo128-matrix-1020` 于 10:52:30 UTC 取消，ASR
+`prism-grpo64-asr-1019` 停止，两条 CPU 监控退出，同线程待触发队列为零。
+64 卡末尾复核在初始化阶段主动取消、0 更新、16 节点完成清理；
+不将其视为训练失败或有效测量。所有日志、源码快照、样本与已有 checkpoint
+保留；没有为关闭实验删除证据或释放后重新申请 GPU。
+
 ## 当前 ttsrl 的 32 卡配对测速（2026-10-16 UTC）
 
 当前组为 Slime `43683a89` 加动作流校验工作区补丁、Omni `ttsrl@0cc51ec4e`；

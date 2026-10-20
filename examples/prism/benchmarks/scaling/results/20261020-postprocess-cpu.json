@@ -1,0 +1,41 @@
+{
+  "scope": "Synthetic Prism-like CPU tensors and deterministic lengths, not a GPU result",
+  "transport": {
+    "8": {
+      "False": {
+        "bytes": 210998,
+        "serialize_median_seconds": 0.0016132192686200142,
+        "deserialize_median_seconds": 0.0009245304390788078
+      },
+      "True": {
+        "bytes": 208464,
+        "serialize_median_seconds": 0.0012154653668403625,
+        "deserialize_median_seconds": 0.0005535436794161797
+      }
+    },
+    "64": {
+      "False": {
+        "bytes": 2181218,
+        "serialize_median_seconds": 0.013485273346304893,
+        "deserialize_median_seconds": 0.008437683805823326
+      },
+      "True": {
+        "bytes": 2162816,
+        "serialize_median_seconds": 0.010262294672429562,
+        "deserialize_median_seconds": 0.004866998642683029
+      }
+    }
+  },
+  "kk": {
+    "4096/64": {
+      "exact_partition_equal": true,
+      "baseline_median_seconds": 0.49745129607617855,
+      "candidate_median_seconds": 0.19223600905388594
+    },
+    "8192/128": {
+      "exact_partition_equal": true,
+      "baseline_median_seconds": 1.6128702880814672,
+      "candidate_median_seconds": 0.5843092473223805
+    }
+  }
+}

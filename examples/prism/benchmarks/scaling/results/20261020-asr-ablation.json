@@ -1,0 +1,223 @@
+{
+  "evidence_root": "/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/prism17b-v04/grpo128-20261020",
+  "measured_source": "1d7c4b3ebd01d32adb1dd8b836f3399b31d95068",
+  "method": "25updates,21 adjacent-generate-start steady windows; actual real ASR and8 candidates per prompt. Historical isolated configuration comparisons, not a GPU rerun on468d9e9.",
+  "cases": [
+    {
+      "case": "128-b8192-a16-w64-r16",
+      "summary_sha256": "b8dbbeb4374d4d78647e7a219b399b94c1ea9e264c82ec0dbe8a9fc0f7bee0f9",
+      "evidence": "runs/128-b8192-a16-w64-r16/summary.json",
+      "configuration": {
+        "gpus": 128,
+        "batch": 8192,
+        "asr_replicas": 16,
+        "workers": 64,
+        "router_processes": 16,
+        "router_policy": "round_robin",
+        "asr_inflight": 4,
+        "concurrency": 16
+      },
+      "metrics": {
+        "valid": true,
+        "updates": 25,
+        "steady_steps": 21,
+        "step_seconds": 26.506993799666663,
+        "p95_seconds": 27.693293099,
+        "samples_per_second": 309.05051179749466,
+        "phase_seconds": {
+          "resume_rollout_admission": 0.0016994401904761906,
+          "async_train": 1.7085080734285714,
+          "clear_memory": 0.03850362423809524,
+          "update_weights": 3.214211898714286,
+          "training_completed": 0.0027482526190476192,
+          "pause_rollout_admission": 0.0007237648095238095,
+          "generate": 21.54008996295238
+        },
+        "measurement_exclusion": null
+      }
+    },
+    {
+      "case": "128-b8192-a32-w64-r16",
+      "summary_sha256": "eacd2dfb2abff067375aa2c5c593381e49805bf4b118f3ab84b1ab9972ed5860",
+      "evidence": "runs/128-b8192-a32-w64-r16/summary.json",
+      "configuration": {
+        "gpus": 128,
+        "batch": 8192,
+        "asr_replicas": 32,
+        "workers": 64,
+        "router_processes": 16,
+        "router_policy": "round_robin",
+        "asr_inflight": 4,
+        "concurrency": 16
+      },
+      "metrics": {
+        "valid": true,
+        "updates": 25,
+        "steady_steps": 21,
+        "step_seconds": 24.469044703523807,
+        "p95_seconds": 25.700147487,
+        "samples_per_second": 334.7903483465484,
+        "phase_seconds": {
+          "resume_rollout_admission": 0.001804963619047619,
+          "async_train": 1.7508985849047618,
+          "clear_memory": 0.04095379066666667,
+          "update_weights": 3.3212759097142857,
+          "training_completed": 0.002855804095238095,
+          "pause_rollout_admission": 0.0007425734285714286,
+          "generate": 19.350029713190477
+        },
+        "measurement_exclusion": null
+      }
+    },
+    {
+      "case": "128-b8192-a32-w64-r16-c8",
+      "summary_sha256": "66eb4ec3707f4ad705a97c048dfa7a361836eff92425ecb6677db83c2e7473c7",
+      "evidence": "runs/128-b8192-a32-w64-r16-c8/summary.json",
+      "configuration": {
+        "gpus": 128,
+        "batch": 8192,
+        "asr_replicas": 32,
+        "workers": 64,
+        "router_processes": 16,
+        "router_policy": "round_robin",
+        "asr_inflight": 4,
+        "concurrency": 8
+      },
+      "metrics": {
+        "valid": true,
+        "updates": 25,
+        "steady_steps": 21,
+        "step_seconds": 24.43294134304762,
+        "p95_seconds": 25.715121635,
+        "samples_per_second": 335.28505164324105,
+        "phase_seconds": {
+          "resume_rollout_admission": 0.0017157583333333333,
+          "async_train": 1.7739128874285714,
+          "clear_memory": 0.03921887542857143,
+          "update_weights": 3.3180416747142853,
+          "training_completed": 0.0026488006190476194,
+          "pause_rollout_admission": 0.0006951498571428572,
+          "generate": 19.296015200238095
+        },
+        "measurement_exclusion": null
+      }
+    },
+    {
+      "case": "128-b8192-a32-w64-r16-i8",
+      "summary_sha256": "ebdf5851485b8085f282896a9bb5165028720cf63526acd9d5dd18f67d2f30a1",
+      "evidence": "runs/128-b8192-a32-w64-r16-i8/summary.json",
+      "configuration": {
+        "gpus": 128,
+        "batch": 8192,
+        "asr_replicas": 32,
+        "workers": 64,
+        "router_processes": 16,
+        "router_policy": "round_robin",
+        "asr_inflight": 8,
+        "concurrency": 16
+      },
+      "metrics": {
+        "valid": true,
+        "updates": 25,
+        "steady_steps": 21,
+        "step_seconds": 23.206570030238094,
+        "p95_seconds": 24.246702229,
+        "samples_per_second": 353.0034808817437,
+        "phase_seconds": {
+          "resume_rollout_admission": 0.0019073599047619047,
+          "async_train": 1.804498446761905,
+          "clear_memory": 0.04112672176190476,
+          "update_weights": 3.284506536190476,
+          "training_completed": 0.0029725280476190475,
+          "pause_rollout_admission": 0.0007561457619047619,
+          "generate": 18.070352365285714
+        },
+        "measurement_exclusion": null
+      }
+    },
+    {
+      "case": "128-b8192-a32-w128-r16-clean-repeat",
+      "summary_sha256": "b71c9110c7f9c51a54061ed69d475f4f493dae0e6f20ecec29b43127280e8852",
+      "evidence": "runs/128-b8192-a32-w128-r16-clean-repeat/summary.json",
+      "configuration": {
+        "gpus": 128,
+        "batch": 8192,
+        "asr_replicas": 32,
+        "workers": 128,
+        "router_processes": 16,
+        "router_policy": "round_robin",
+        "asr_inflight": 4,
+        "concurrency": 16
+      },
+      "metrics": {
+        "valid": true,
+        "updates": 25,
+        "steady_steps": 21,
+        "step_seconds": 23.446128905380952,
+        "p95_seconds": 24.65376308,
+        "samples_per_second": 349.39669712896244,
+        "phase_seconds": {
+          "training_completed": 0.002688407761904762,
+          "resume_rollout_admission": 0.001697823238095238,
+          "update_weights": 3.3434552160476194,
+          "async_train": 1.7846171854285715,
+          "pause_rollout_admission": 0.0006832608095238095,
+          "clear_memory": 0.04128713595238095,
+          "generate": 18.27118362547619
+        },
+        "measurement_exclusion": null
+      }
+    }
+  ],
+  "comparisons": {
+    "asr_16_to_32": {
+      "before": "128-b8192-a16-w64-r16",
+      "after": "128-b8192-a32-w64-r16",
+      "before_seconds": 26.506993799666663,
+      "after_seconds": 24.469044703523807,
+      "throughput_gain_percent": 8.32868271252687,
+      "time_reduction_percent": 7.688344863039442
+    },
+    "asr_inflight_4_to_8": {
+      "before": "128-b8192-a32-w64-r16",
+      "after": "128-b8192-a32-w64-r16-i8",
+      "before_seconds": 24.469044703523807,
+      "after_seconds": 23.206570030238094,
+      "throughput_gain_percent": 5.440160573668207,
+      "time_reduction_percent": 5.159476753515857
+    },
+    "generation_concurrency_16_to_8": {
+      "before": "128-b8192-a32-w64-r16",
+      "after": "128-b8192-a32-w64-r16-c8",
+      "before_seconds": 24.469044703523807,
+      "after_seconds": 24.43294134304762,
+      "throughput_gain_percent": 0.14776510109562047,
+      "time_reduction_percent": 0.1475470780066379
+    },
+    "workers_64_to_128_at_inflight4": {
+      "before": "128-b8192-a32-w64-r16",
+      "after": "128-b8192-a32-w128-r16-clean-repeat",
+      "before_seconds": 24.469044703523807,
+      "after_seconds": 23.446128905380952,
+      "throughput_gain_percent": 4.362834488673695,
+      "time_reduction_percent": 4.180448442253826
+    }
+  },
+  "selection": "Keep W64/I8/C16. W128/I4 is1.03% slower than W64/I8; C8 improvement0.15% is insufficient evidence of a meaningful benefit. Exclude original contaminated W128 case, use only clean repeat.",
+  "port_mapping": {
+    "base": "468d9e9a4c7887534d5a4733a9d4a8ba6e2f9888",
+    "old": "max_inflight was per worker",
+    "new": "services.wer.concurrency is total budget divided over actual workers",
+    "recipe64": {
+      "workers": 32,
+      "old_inflight": 4,
+      "new_total_concurrency": 128
+    },
+    "recipe128": {
+      "workers": 64,
+      "old_inflight": 8,
+      "new_total_concurrency": 512
+    },
+    "caveat": "Arithmetic mapping of request budget only. New audio reward transport/protocol is not byte-identical to historical WER service; do not promise identical runtime."
+  }
+}

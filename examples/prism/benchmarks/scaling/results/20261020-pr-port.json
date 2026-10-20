@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-10-20T13:16:37.014975+00:00",
+  "repository": "VoiceAgentGroup/slime",
+  "base_branch": "tts-dev",
+  "base_commit": "468d9e9a4c7887534d5a4733a9d4a8ba6e2f9888",
+  "creation_target_tip_observed": "8f6bf4de8937a5637b77598954b71ccd85069535",
+  "target_advance_note": "tts-dev added seven-domain evaluation (#22) after branch creation. Head remains based on requested468d9e9; all13 added/changed target files are disjoint from this PR. git merge-tree reports a clean merge. CPU tests above refer to the port on468d9e9, not a GPU or merged-target evaluation run.",
+  "head_branch": "perf/prism-grpo-scaling-64-128",
+  "implementation_commit": "b81f23306c3c89bed2d91e3bab4f082e461911ae",
+  "measured_source": {
+    "repository": "kaysonyu/slime",
+    "commit": "cd50e5a934681a54a4cec098dcff7f44512ef085",
+    "delivery_commit": "876339c8862a88afb1dcaecc9c6e009cd23a069a",
+    "common_ancestor": "c73ed2730d480ba64e71739e7e1de7245e23618c",
+    "omni": "b3f9b9bdd9a2a40334c159b5fbe4beda2408dffb"
+  },
+  "scope": "Port measured runtime optimizations and tests onto the requested base. No GPU jobs, ASR serving or scheduled campaign monitors restarted. Historical GPU results are not measurements of this merged baseline.",
+  "compatibility": {
+    "core_runtime_files_ast_identical_to_measured_source": 13,
+    "allowed_integration_changes": [
+      "Preserve rollout_worker_index/count in GroupWorker and test packed transport with that context.",
+      "Preserve current language/task metadata and waveform handling; add generation timing only.",
+      "Preserve reward_timing_summary and current artifact schema; add generation_client_timing only.",
+      "Make CPU microbenchmark standalone without importing a cluster campaign prepare module.",
+      "Pin httpcore==1.0.9 as required by the measured compatibility guard.",
+      "Add executable CPU CI aggregator and style/CLI-default tests."
+    ],
+    "unchanged_target_paths": [
+      "slime_plugins/audio_rewards/",
+      "slime_plugins/prism/reward_adapter.py",
+      "slime_plugins/prism/language.py",
+      "slime_plugins/prism/metrics.py",
+      "slime/rollout/fully_async_distributed.py",
+      "examples/prism/rewards/",
+      "examples/prism/configs/rewards.yaml",
+      "setup.py"
+    ],
+    "excluded": [
+      "Old slime_plugins/tts_reward.py was not restored.",
+      "No platform-specific campaign scheduling, monitor, authentication, job control or orphan cleanup modules."
+    ]
+  },
+  "environment": {
+    "python": "3.12.3",
+    "torch": "2.13.0+cu130",
+    "ray": "2.56.0",
+    "httpx": "0.28.1",
+    "httpcore": "1.0.9",
+    "numpy": "2.3.5",
+    "pytest": "8.4.2",
+    "straw_queue": "0.1.3",
+    "cuda_visible_devices": "",
+    "ray_num_gpus": 0,
+    "native_router_source": "Historical pinned Omni snapshot",
+    "test_only_dependency_setup": "straw-queue and ruff installed to a private /tmp target, not shared training environment; PYTHONUSERBASE exposed dependencies to child processes; local tests namespace shim avoided unrelated /opt/megatron/tests package."
+  },
+  "checks": {
+    "test_reports": {
+      "optimization_ci": {
+        "sha256": "f9760c55d7f445d23deeccaf5e51736b9dc83a0262ce5292212da5ae808a9d6e",
+        "counts": {
+          "passed": 116,
+          "skipped": 0,
+          "failure": 0,
+          "error": 0
+        },
+        "seconds": 94.427,
+        "test_files": [
+          "tests.test_omni_arguments",
+          "tests.test_omni_router_diagnostics",
+          "tests.test_omni_router_multiprocess",
+          "tests.test_omni_router_pool_ownership",
+          "tests.test_rollout_data_utils",
+          "tests.test_rollout_execution_pool",
+          "tests.test_rollout_group_serialization",
+          "tests.test_rollout_http_pool_guard",
+          "tests.test_seqlen_balancing_equivalence",
+          "tests.test_training_tensor_buffer",
+          "tests.test_weight_topology_cache"
+        ],
+        "skipped_reasons": []
+      },
+      "extended_unit": {
+        "sha256": "fa39262f0805de76f99e3331a5bf047843e56143df904477664296dc73e9c153",
+        "counts": {
+          "passed": 190,
+          "skipped": 0,
+          "failure": 0,
+          "error": 0
+        },
+        "seconds": 31.785,
+        "test_files": [
+          "tests.test_omni_arguments",
+          "tests.test_omni_router_diagnostics",
+          "tests.test_omni_router_pool_ownership",
+          "tests.test_rollout_data_utils",
+          "tests.test_rollout_execution_pool",
+          "tests.test_rollout_group_serialization",
+          "tests.test_rollout_http_pool_guard",
+          "tests.test_rollout_straw_transport",
+          "tests.test_seqlen_balancing_equivalence",
+          "tests.test_training_tensor_buffer",
+          "tests.test_weight_topology_cache"
+        ],
+        "skipped_reasons": [],
+        "additional_straw_transport_passed": 84
+      },
+      "compatibility": {
+        "sha256": "847fff4ae0a735a3c1971b90d67f7b8be6d172de1680aaa07489af886114bc72",
+        "counts": {
+          "passed": 574,
+          "skipped": 14,
+          "failure": 0,
+          "error": 0
+        },
+        "seconds": 370.822,
+        "test_files": [
+          "tests.test_audio_reward_clients",
+          "tests.test_audio_reward_concurrency",
+          "tests.test_audio_reward_lifecycle",
+          "tests.test_audio_reward_package",
+          "tests.test_audio_reward_prosody",
+          "tests.test_audio_reward_prosody_processes",
+          "tests.test_audio_reward_scorers",
+          "tests.test_audio_reward_shared_texts",
+          "tests.test_audio_reward_timing",
+          "tests.test_dp_schedule",
+          "tests.test_omni_deployment",
+          "tests.test_omni_rollout_plugin",
+          "tests.test_prism_argument_configuration",
+          "tests.test_prism_attribute_rewards",
+          "tests.test_prism_experiment_artifacts",
+          "tests.test_prism_metrics",
+          "tests.test_prism_reward_categories",
+          "tests.test_prism_reward_composition",
+          "tests.test_prism_reward_workflow",
+          "tests.test_prism_rollout_integration",
+          "tests.test_rollout_manager_recovery"
+        ],
+        "skipped_reasons": [
+          "Set PRISM_HF_TEST_ARTIFACT to inspect a real exported HF artifact",
+          "could not import 'librosa': No module named 'librosa'",
+          "could not import 'threadpoolctl': No module named 'threadpoolctl'"
+        ]
+      }
+    },
+    "overlap_note": "Do not add optimization_ci116 to extended_unit190: they overlap. The latter adds84 straw transport cases. Compatibility574/14 uses other files.",
+    "ruff": "passed",
+    "black": "passed",
+    "isort": "passed",
+    "python310_syntax": "all30 changed Python files parsed",
+    "diff_check": "passed",
+    "baseline_preservation": "Byte-identical new reward/metadata/async-worker paths listed above;13 core runtime ASTs match measured source.",
+    "initial_attempts": "Missing straw-queue caused collection failure; later9 compatibility failures were missing child dependency path and installed tests namespace shadowing. Environment-only corrections followed by the successful complete rerun; no production fix inferred from those failures."
+  },
+  "commands": {
+    "optimization_ci": "CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:/path/to/pinned-omni python tests/test_prism_scaling_optimizations.py -q -o addopts=''",
+    "extra_transport": "python -m pytest -q -o addopts='' tests/test_rollout_straw_transport.py",
+    "compatibility": "python -m pytest -q -o addopts='' tests/test_audio_reward_*.py tests/test_prism_attribute_rewards.py tests/test_prism_reward_categories.py tests/test_prism_reward_composition.py tests/test_prism_reward_workflow.py tests/test_prism_experiment_artifacts.py tests/test_prism_metrics.py tests/test_omni_rollout_plugin.py tests/test_omni_deployment.py tests/test_rollout_manager_recovery.py tests/test_prism_rollout_integration.py tests/test_prism_argument_configuration.py tests/test_dp_schedule.py"
+  },
+  "interpretation": {
+    "gpu_retested_on_this_base": false,
+    "optimized128_100_update_stability": "Not run; user-directed campaign closure.",
+    "optimized128_checkpoint_restore": "Not run; do not substitute older64GPU baseline recovery.",
+    "performance": "Use historical configuration-specific results with their versions and limitations; new audio reward client/protocol means migrated concurrency budgets are not a guarantee of the same step time.",
+    "optional_skips": [
+      "Set PRISM_HF_TEST_ARTIFACT to inspect a real exported HF artifact",
+      "could not import 'librosa': No module named 'librosa'",
+      "could not import 'threadpoolctl': No module named 'threadpoolctl'"
+    ]
+  },
+  "evidence": [
+    "20261020-final.json",
+    "20261019-r8.json",
+    "20261019-r8-asr16.json",
+    "20261019-final.json",
+    "20261020-asr-ablation.json",
+    "20261020-postprocess-cpu.json"
+  ]
+}
