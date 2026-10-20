@@ -9,6 +9,11 @@
 | MoPD | [run-mopd.sh](run-mopd.sh) | [mopd.example.jsonl](data/mopd.example.jsonl) | 冻结教师，默认不生成波形 |
 
 三个 JSONL 分别有 2、4、2 条记录，用于说明输入格式。训练时替换为自己的数据；MixRL 的参考音频路径也需要填写。
+`metadata.task_type` 记录任务类型，`domain` 选择 MoPD 教师，`reward_category` 选择 MixRL 奖励；三者独立。
+样例的 `metadata.language` 使用 Chinese、English 等规范全名，`metadata.show_language`
+显式决定是否把语言加入模型全局指令；正文只在顶层 script 保存。
+[language-control.example.jsonl](data/language-control.example.jsonl) 另给出显示、隐藏与局部指令示例，
+完整 25 种语言及中文说明见 [语言元数据与显示开关](docs/GUIDE.md#语言元数据与显示开关)。
 奖励公式按类别拆分在 [rewards/](rewards/)，共享客户端和缓存位于 `common.py`，MixRL 分发位于 `__init__.py`。[ray.sh](ray.sh) 是两个入口共享的生命周期实现，不是独立的启动命令。
 
 ## 准备和运行

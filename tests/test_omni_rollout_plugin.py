@@ -14,6 +14,7 @@ import sys
 import time
 import types
 import wave
+from pathlib import Path
 
 import pytest
 import torch
@@ -24,6 +25,7 @@ from slime_plugins import omni_rollout as plugin
 from slime_plugins.prism import http_client as prism_http
 from slime_plugins.prism import protocol as prism_protocol
 from slime_plugins.prism import teacher as teacher_plugin
+from slime_plugins.prism.language import SUPPORTED_LANGUAGES
 
 NUM_GPUS = 0
 
@@ -320,6 +322,142 @@ def test_unified_prompt_keeps_segments_music_attributes_and_reward_language_sepa
         ]["Language"]
         == "Chinese"
     )
+
+
+@pytest.mark.parametrize("task_type", ["TTS", "Instruction Voice Clone", "Local Instruction", "sing", "custom-task"])
+def test_task_type_is_metadata_and_does_not_select_model_conditions_teacher_or_reward(task_type):
+    from examples.prism import rewards
+
+    item = sample()
+    item.metadata["reward_category"] = "base"
+    args = types.SimpleNamespace()
+    baseline = plugin.build_generate_payload(args, item, {"max_new_tokens": 12})
+    item.metadata["task_type"] = task_type
+    original = copy.deepcopy(item.metadata)
+    payload = plugin.build_generate_payload(args, item, {"max_new_tokens": 12})
+    assert payload == baseline
+    assert item.metadata == original
+    assert rewards._category(item) == "base"
+    config = {
+        "models": {"domain_teacher": {"endpoint": "http://teacher"}},
+        "by_domain": {"chinese": "domain_teacher"},
+    }
+    assert opd.select_teacher(config, item)[0] == "domain_teacher"
+    plugin.parse_rollout(output(), item, geometry())
+    assert item.metadata["task_type"] == task_type
+    assert "task_type" not in item.metadata["omni_prompt"]
+    assert item.metadata["reward_category"] == "base"
+    assert item.policy_teacher == "domain_teacher"
+
+
+@pytest.mark.parametrize("task_type", [None, "", " ", False, 1, [], {}])
+def test_task_type_rejects_empty_or_non_string_labels(task_type):
+    item = sample()
+    item.metadata["task_type"] = task_type
+    with pytest.raises(ValueError, match="metadata.task_type must be a nonempty string"):
+        plugin.build_generate_payload(types.SimpleNamespace(), item, {"max_new_tokens": 12})
+
+
+@pytest.mark.parametrize("language", SUPPORTED_LANGUAGES)
+def test_show_language_uses_canonical_metadata_without_mutating_source(language):
+    item = sample()
+    item.metadata.update(language=f" {language.swapcase()} ", show_language=True)
+    item.metadata["omni_prompt"]["global_instruction"] = {
+        "Language": "English",
+        " language ": "French",
+        "Gender": "female",
+    }
+    original = copy.deepcopy(item.metadata)
+    payload = plugin.build_generate_payload(types.SimpleNamespace(), item, {"max_new_tokens": 12})
+    assert payload["prompt"]["global_instruction"] == {"Language": language, "Gender": "female"}
+    assert "show_language" not in payload["prompt"]
+    assert "language" not in payload["prompt"]
+    assert item.metadata == original
+
+
+@pytest.mark.parametrize("language", [None, "zh", ""])
+def test_hide_language_removes_explicit_headers_without_requiring_a_renderer_language(language):
+    item = sample()
+    item.metadata.update(language=language, show_language=False)
+    item.metadata["omni_prompt"]["global_instruction"] = {
+        "Language": "Chinese",
+        " LANGUAGE ": "English",
+        "Gender": "female",
+    }
+    original = copy.deepcopy(item.metadata)
+    payload = plugin.build_generate_payload(types.SimpleNamespace(), item, {"max_new_tokens": 12})
+    assert payload["prompt"]["global_instruction"] == {"Gender": "female"}
+    assert item.metadata == original
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", "false", [], {}])
+def test_language_display_switch_requires_a_json_boolean(value):
+    item = sample()
+    item.metadata.update(language="Chinese", show_language=value)
+    with pytest.raises(ValueError, match="metadata.show_language must be a Boolean"):
+        plugin.build_generate_payload(types.SimpleNamespace(), item, {"max_new_tokens": 12})
+
+
+@pytest.mark.parametrize("language", [None, "", " ", "zh", "en", "Portuguese", "Spanish", "unknown", 1, False, []])
+def test_show_language_rejects_missing_names_codes_and_unsupported_languages(language):
+    item = sample()
+    item.metadata.pop("language")
+    item.metadata["show_language"] = True
+    if language is not None:
+        item.metadata["language"] = language
+    with pytest.raises(ValueError, match="metadata.language to be a supported Prism language name"):
+        plugin.build_generate_payload(types.SimpleNamespace(), item, {"max_new_tokens": 12})
+
+
+@pytest.mark.parametrize("direct_request", [False, True])
+@pytest.mark.parametrize("show_language", [False, True])
+def test_language_display_keeps_local_segments_and_complete_request_inputs(direct_request, show_language):
+    item = sample()
+    segments = [{"text": "你好"}, {"text": "。", "local_instruction": {"Emotion": "happy"}}]
+    instruction = {"Language": "English", "Gender": "female", "Appearance": "tall"}
+    item.metadata.update(language="Chinese", show_language=show_language)
+    if direct_request:
+        item.prompt = {"script": segments, "global_instruction": instruction}
+    else:
+        item.prompt = segments
+        item.metadata["omni_prompt"]["global_instruction"] = instruction
+    original = copy.deepcopy((item.prompt, item.metadata))
+    payload = plugin.build_generate_payload(types.SimpleNamespace(), item, {"max_new_tokens": 12})
+    expected = {"Gender": "female", "Appearance": "tall"}
+    if show_language:
+        expected["Language"] = "Chinese"
+    assert payload["prompt"]["global_instruction"] == expected
+    assert payload["prompt"]["script"] == segments
+    assert (item.prompt, item.metadata) == original
+    plugin.parse_rollout(output(), item, geometry())
+    assert item.metadata["omni_prompt"] == payload["prompt"]
+    assert item.metadata["show_language"] is show_language
+    assert item.metadata["language"] == "Chinese"
+    assert plugin._prompt(item) == payload["prompt"]
+
+
+def test_example_datasets_load_with_explicit_language_controls():
+    from slime.utils.data import Dataset
+
+    directory = Path(__file__).resolve().parents[1] / "examples/prism/data"
+    for path in sorted(directory.glob("*.jsonl")):
+        dataset = Dataset(
+            str(path), tokenizer=None, processor=None, max_length=None, prompt_key="script", metadata_key="metadata"
+        )
+        for item in dataset.samples:
+            assert isinstance(item.metadata["task_type"], str) and item.metadata["task_type"].strip(), path
+            assert item.metadata["language"] in SUPPORTED_LANGUAGES, path
+            assert type(item.metadata["show_language"]) is bool, path
+            assert "script" not in item.metadata["omni_prompt"], path
+            assert "Language" not in item.metadata["omni_prompt"].get("global_instruction", {}), path
+            payload = plugin.build_generate_payload(types.SimpleNamespace(), item, {"max_new_tokens": 12})
+            assert "task_type" not in payload["prompt"], path
+            actual = payload["prompt"]["global_instruction"].get("Language")
+            expected = item.metadata["language"] if item.metadata["show_language"] else None
+            assert actual == expected, path
+            script = payload["prompt"]["script"]
+            text = script if isinstance(script, str) else "".join(segment["text"] for segment in script)
+            assert text == item.metadata["transcript_target"], path
 
 
 @pytest.mark.parametrize("legacy", [{"task_type": "TTS"}, {"show_language": False}, {"tokens_control": False}])
@@ -832,8 +970,11 @@ def test_cancellation_cleanup_does_not_wait_forever_for_remote_transport(monkeyp
     asyncio.run(exercise())
 
 
-def test_generate_uses_router_and_preserves_sample_identity(monkeypatch, tmp_path):
+@pytest.mark.parametrize("show_language", [None, False, True])
+def test_generate_uses_router_and_preserves_sample_identity(monkeypatch, tmp_path, show_language):
     item = sample()
+    if show_language is not None:
+        item.metadata.update(language="Chinese", show_language=show_language)
     response = output()
     blob = io.BytesIO()
     with wave.open(blob, "wb") as wav:
@@ -863,7 +1004,10 @@ def test_generate_uses_router_and_preserves_sample_identity(monkeypatch, tmp_pat
     assert item.metadata["omni_audio_seconds"] == pytest.approx(32 / 24000)
     assert item.metadata["transcript_target"] == "你好"
     assert "transcript_target" not in item.metadata["omni_prompt"]
-    assert item.metadata["language"] == "zh"
+    assert item.metadata["language"] == ("zh" if show_language is None else "Chinese")
+    assert item.metadata.get("show_language") is show_language
+    assert item.metadata["omni_prompt"] == calls[0][1]["prompt"]
+    assert item.metadata["omni_prompt"]["global_instruction"].get("Language") == ("Chinese" if show_language else None)
     assert plugin.generate.abort_mode == "request"
 
 

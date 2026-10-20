@@ -833,10 +833,16 @@ def test_resolved_config_records_real_types_and_redacts_nested_credentials(tmp_p
     assert value["binding"]["auth_token_env"] == "INF_API_KEY"
 
 
-def test_unified_archive_preserves_segment_text_and_reference_slots(args):
+@pytest.mark.parametrize("show_language", [None, False, True])
+def test_unified_archive_preserves_segment_text_and_reference_slots(args, show_language):
+    from slime_plugins.omni_rollout import _prompt
+
     item = sample(args)
     reference = item.metadata["omni_prompt"]["references"]["audio1"]
-    item.metadata["language"] = "zh"
+    item.metadata["language"] = "Chinese"
+    if show_language is not None:
+        item.metadata["show_language"] = show_language
+        item.metadata["task_type"] = "Local Instruction"
     item.metadata["omni_prompt"] = {
         "modality": "speech",
         "script": [{"text": "你好", "local_instruction": {"Emotion": "happy"}}, {"text": "。"}],
@@ -845,11 +851,16 @@ def test_unified_archive_preserves_segment_text_and_reference_slots(args):
         "global_instruction": {},
         "global_tokens": None,
     }
+    item.metadata["omni_prompt"] = _prompt(item)
     asyncio.run(archive_and_score(args, item))
     artifact = item.metadata["prism_artifact"]
     record = json.loads(Path(artifact["record_path"]).read_text())
     assert record["text"] == "你好。"
-    assert record["language"] == "zh"
+    assert record["language"] == "Chinese"
+    assert record["show_language"] is show_language
+    assert record["task_type"] == ("Local Instruction" if show_language is not None else None)
+    assert "task_type" not in record["prompt"]
+    assert record["prompt"]["global_instruction"].get("Language") == ("Chinese" if show_language else None)
     assert record["prompt"]["references"] == {"audio3": reference}
     directory = Path(record["audio_path"]).parent
     assert (directory / "prompt_text.txt").read_text() == "你好。"

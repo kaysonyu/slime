@@ -86,7 +86,7 @@ def _finite(value, field):
 def normalized_tokens(text: str, language: str) -> list[str]:
     text = unicodedata.normalize("NFKC", text).casefold()
     text = "".join(ch for ch in text if not unicodedata.category(ch).startswith(("P", "S")))
-    if language.lower().replace("_", "-").split("-")[0] in CHAR_LANGUAGES:
+    if language.strip().lower().replace("_", "-").split("-")[0] in CHAR_LANGUAGES:
         return [ch for ch in text if not ch.isspace()]
     return text.split()
 

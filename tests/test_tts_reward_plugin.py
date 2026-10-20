@@ -258,6 +258,10 @@ def test_all_rewards_preserve_raw_and_use_frozen_protocol(tmp_path, service):
         ("Japanese", "今日は", "今日", 1 / 3),
         ("ko", "안녕", "안", 0.5),
         ("zh", "你", "你好世界", 3),
+        ("English", "Ａ dog, runs!", "a dog", 1 / 3),
+        (" Chinese ", "你好", "你", 0.5),
+        (" Japanese ", "今日は", "今日", 1 / 3),
+        (" Korean ", "안녕", "안", 0.5),
     ],
 )
 def test_inverse_error_multilingual_and_unclipped_raw(tmp_path, service, language, target, hypothesis, raw):

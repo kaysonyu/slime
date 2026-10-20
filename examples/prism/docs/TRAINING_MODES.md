@@ -39,6 +39,7 @@ GRPO 的候选组由数据源复制同一行产生，不需要在数据集里预
 | [grpo-base.example.jsonl](../data/grpo-base.example.jsonl) | 固定 WER/CER 奖励 | `transcript_target`、`language` |
 | [mixrl.example.jsonl](../data/mixrl.example.jsonl) | 混合 base、voiceclone、instruction、voiceclone_gated | 每行显式 `reward_category` |
 | [mopd.example.jsonl](../data/mopd.example.jsonl) | 按 chinese/english 配置教师路由 | 每行显式 `domain` |
+| [language-control.example.jsonl](../data/language-control.example.jsonl) | 显示/隐藏模型语言，包含顶层局部指令 | 规范语言全名与显式 `show_language` |
 
 模板中的 `/assets/reference-*.wav` 是待替换路径。基础模型、codec、评分服务和教师
 必须使用实际资产；模板本身不启动这些服务。
@@ -59,23 +60,26 @@ GRPO 的候选组由数据源复制同一行产生，不需要在数据集里预
 上例对应原 `Attribute Clone Triplet`：音色/口音取 `audio1`，韵律/情绪取 `audio2`。
 完整克隆可只提供 `audio1`，并将四项属性显式映射到它。无参考时省略
 `references` 或写 `{}`。槽位允许跳号及两个以上参考；SIM 使用
-`reference_attributes.timbre`。旧任务标签、参考列表与 `show_language` 数据通过
-[统一 request 格式](GUIDE.md#jsonl-输入) 在数据准备阶段转换后再训练。
+`reference_attributes.timbre`。旧任务标签和参考列表在数据准备阶段转换。
+预训练的语言开关放到 `metadata.show_language`，解析后的语言全名放到 `metadata.language`；
+参见 [语言元数据与显示开关](GUIDE.md#语言元数据与显示开关)。
 
 字段的职责分别是：
 
-- `script`：实际交给 Prism 生成的文本。
+- `script`：实际交给 Prism 生成的文本或局部指令片段数组。
 - `metadata.id`：建议填写唯一、稳定的数据 ID，用于音频目录及跨实验定位。
+- `metadata.task_type`：非空任务类型标签，例如 TTS、Full VoiceClone、Local Instruction；原样记录，不影响模型条件或教师/奖励路由。旧数据可省略。
 - `metadata.omni_prompt.modality`：`speech` 或 `sing`，默认 `speech`。
-- `metadata.omni_prompt.script`：可选的文本覆盖或带 `local_instruction` 的分段数组。
+- `metadata.omni_prompt.script`：可选的正文覆盖；新样本只在顶层保存一份 script。
 - `metadata.omni_prompt.references` 与 `reference_attributes`：参考音频及模型可见的属性来源。
-- `metadata.omni_prompt.global_instruction.Language`：显式的模型语言条件；缺省时不渲染语言行。
-- `metadata.language`：仅用于 WER/CER 归一化，不会自动生成语言指令。
+- `metadata.language`：目标语言的规范全名，如 Chinese、English；用于 WER/CER，并作为显示语言时的来源。
+- `metadata.show_language`：布尔开关；true 注入规范 Language，false 去掉语言行。开关不进入模型 request。
+- `metadata.omni_prompt.global_instruction`：全局属性对象。新数据不重复填写 Language；未填写开关的旧数据仍保留显式 Language 行为。
 - `metadata.transcript_target`：期望的 ASR 转写文本，模板中与 script 相同。
 - `metadata.reward_category`：MixRL 的奖励选择；固定函数模式不要求填写。
 - `metadata.domain`：MOPD 的教师选择；GRPO 中可作为统计标签。domain 也可以是业务领域，不限于语言。
 
-模型 request、`reward_category`、`domain` 三者独立。例如，完整语音克隆输入可以
+任务标签 `task_type`、模型 request、`reward_category`、`domain` 相互独立。例如，完整语音克隆输入可以
 只用 WER 奖励，也可以用 voiceclone 或 voiceclone_gated；设置哪个函数/类别由实验决定。
 同一 category 的整个 reward 乘以正常数通常会被 GRPO 组内标准差归一化抵消；
 需要改变类别占比时，应调整数据采样或明确的训练权重。

@@ -21,6 +21,7 @@ import torch
 from slime.utils.misc import load_function
 from slime.utils.types import Sample
 from slime_plugins.prism.http_client import _request
+from slime_plugins.prism.language import canonical_language
 from slime_plugins.prism.protocol import (
     AUDIO,
     LAYOUT,
@@ -45,6 +46,10 @@ __all__ = [
 
 def _prompt(sample):
     metadata = sample.metadata or {}
+    if "task_type" in metadata:
+        task_type = metadata["task_type"]
+        if not isinstance(task_type, str) or not task_type.strip():
+            raise ValueError("metadata.task_type must be a nonempty string")
     source = sample.prompt if isinstance(sample.prompt, dict) else metadata.get("omni_prompt", {})
     if not isinstance(source, dict):
         raise ValueError("Prism prompt must be an object")
@@ -82,6 +87,19 @@ def _prompt(sample):
     instruction = source.get("global_instruction", {})
     if not isinstance(instruction, dict):
         raise ValueError("Prism global_instruction must be an object")
+    if "show_language" in metadata:
+        show_language = metadata["show_language"]
+        if type(show_language) is not bool:
+            raise ValueError("metadata.show_language must be a Boolean")
+        # Metadata owns the language condition when the switch is explicit.
+        # Strip an old rendered header without modifying the source instruction.
+        instruction = {
+            key: value
+            for key, value in instruction.items()
+            if not isinstance(key, str) or key.strip().casefold() != "language"
+        }
+        if show_language:
+            instruction = {"Language": canonical_language(metadata.get("language")), **instruction}
     references = source.get("references", {})
     if not isinstance(references, dict) or any(
         not isinstance(slot, str)

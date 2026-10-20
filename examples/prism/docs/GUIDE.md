@@ -221,19 +221,22 @@ MOPD 可使用独立的音频质量 eval，配置见 [训练与评测说明](TRA
 
 ## JSONL 输入
 
-脚本使用 `--input-key script --metadata-key metadata`。外层 `script` 保留完整文本，
-`metadata.omni_prompt` 使用 HF processor 的统一 request；实际渲染发生在 Omni。
-模型字段只从该对象读取；程序化调用也可直接把完整 request 放在 `Sample.prompt`。
-WER 的 `language`、`transcript_target` 只从顶层 metadata 读取。运行时不接受旧任务标签、
-JSON 字符串 instruction 或列表 references，也不在两种存储位置之间回退。
+脚本使用 `--input-key script --metadata-key metadata`。外层 `script` 保存正文字符串，
+有局部指令时直接保存分段数组。`metadata.omni_prompt` 保存参考音频、全局属性等生成条件；
+适配器补入正文及可选语言行，形成 HF processor 的统一 request，实际渲染发生在 Omni。
+程序化调用也可直接把完整 request 放在 `Sample.prompt`，语言开关仍读取样本 metadata。
+WER 的 `language`、`transcript_target` 只从顶层 metadata 读取。任务标签写在
+`metadata.task_type`；模型 request 不接受 task_type、JSON 字符串 instruction 或列表 references。
 参见 [mixrl.example.jsonl](../data/mixrl.example.jsonl)：
 
 ```json
 {
   "script": "你好，欢迎来到今天的节目。",
   "metadata": {
+    "task_type": "Full VoiceClone",
     "domain": "chinese",
-    "language": "zh",
+    "language": "Chinese",
+    "show_language": true,
     "transcript_target": "你好，欢迎来到今天的节目。",
     "omni_prompt": {
       "modality": "speech",
@@ -248,9 +251,10 @@ JSON 字符串 instruction 或列表 references，也不在两种存储位置之
 }
 ```
 
-`modality` 为 `speech` 或 `sing`，默认 `speech`。`omni_prompt.script` 可以覆盖
-外层文本，接受字符串或 `[{"text":"你好。","local_instruction":{"Emotion":"happy"}}]`
-这样的分段数组。`global_instruction` 和分段 `local_instruction` 都使用对象；
+`modality` 为 `speech` 或 `sing`，默认 `speech`。顶层 `script` 可以使用字符串或
+`[{"text":"你好。","local_instruction":{"Emotion":"happy"}}]` 这样的分段数组。
+新样本只在顶层保存正文；`omni_prompt.script` 仍支持显式覆盖，但不必重复保存，
+也不能用 null 表示回退。`global_instruction` 和分段 `local_instruction` 都使用对象；
 属性名、规范化与字段排序由 HF 制品中的 renderer 校验。
 
 `references` 把 `audio1`、`audio2` 等槽位映射到非空路径/URI，允许槽位跳号及
@@ -259,13 +263,16 @@ JSON 字符串 instruction 或列表 references，也不在两种存储位置之
 SIM 使用显式 `reference_attributes.timbre`，必须指向实际存在的参考音频。
 `global_tokens` 为正整数或 null，表示目标音频帧数；生成上限仍由 rollout 参数控制。
 
-模型语言仅由 `global_instruction.Language` 决定是否展示。上例的
-`metadata.language="zh"` 只用于 WER/CER 归一化，不会自动插入 `Language: Chinese`。
-`metadata.transcript_target` 和 `metadata.language` 不传给 ASR 解码器。
+新数据使用规范英文语言全名和显式的 `metadata.show_language` 布尔开关，原始
+`global_instruction` 只保存属性标注。上例生成时注入 `Language: Chinese`；
+改为 false 时只去掉语言行，Gender 和其他条件保持不变。开关规则与完整语言名单见下节。
+`metadata.transcript_target` 和 `metadata.language` 仍用于 WER/CER 归一化，不传给 ASR 解码器。
 revision 7 支持歌唱音乐属性并按字典序渲染；显式属性输入不依赖自然语言编译服务。
 
-输入数据应直接使用上述统一 request 格式。旧任务标签、列表 references 和隐藏语言设置
-需要在数据准备阶段按目标 HF processor 的协议转换；运行入口不执行数据迁移。
+预训练任务名称可以保留到 `metadata.task_type`；原任务隐含的参考映射仍须转换成显式
+reference_attributes，列表 references 和预训练 instruction JSON 字符串也需要在数据准备阶段转换。
+预训练行的 `show_language` 可保留到 `metadata.show_language`，语言需从该行实际使用的
+数据路径或 info 中解析后写入 `metadata.language`；RL 入口不猜测路径、正文或 domain 中的语言。
 
 学生的 `--hf-checkpoint`、Omni `model_path` 与教师制品一起切换，教师绑定填写服务地址。
 教师模型路径由服务端配置，客户端不校验模型身份哈希或权重 checksum。
@@ -278,6 +285,84 @@ JudgeCLAP 读取实际全局 instruction 对象，忽略 `Language` 这一生成
 全局评分目标。样本级 `metadata.id` 仍用于归档定位，与参考槽位名无关。
 
 MOPD 使用 `metadata.domain` 选择教师。domain 的采样比例由数据记录比例及数据源决定，不由教师响应速度决定。显式 domain 没有教师映射时会报错。
+
+### 任务类型与路由字段
+
+`metadata.task_type` 是任务标签，例如 TTS、Full VoiceClone、Instruction、Local Instruction
+或 Instruction Voice Clone。它可以是自定义的非空字符串，不限定为预训练任务枚举，也不自动推断。
+新数据建议显式填写；旧数据可省略，归档中对应值为 null。已提供的 null、空字符串、纯空白、
+布尔值和其他非字符串会在生成前报错。
+
+| 字段 | 职责 |
+| --- | --- |
+| `metadata.task_type` | 描述任务类型，在 rollout 和逐样本归档中原样保留，供追踪和后续筛选分析 |
+| `metadata.domain` | MoPD 根据 by_domain 选择教师 |
+| `metadata.reward_category` | MixRL 根据 CATEGORY_REWARDS 选择奖励函数 |
+| `metadata.omni_prompt` | 提供实际生成条件，包括模态、参考属性和指令 |
+
+任务标签不进入 Omni 的模型 prompt，不改变 modality，不自动生成参考映射或指令，
+也不切换教师和奖励。例如，task_type=Full VoiceClone 的样本仍可显式选择 base 奖励，
+实际参考来源由 reference_attributes 决定。即使标签叫 sing，生成模态也要在 modality 中明确设置。
+这与预训练 renderer 根据 task_type 选择固定模板的行为不同。
+
+### 语言元数据与显示开关
+
+`metadata.language` 保存目标语音语言，推荐统一使用下表中的规范全名。
+`metadata.show_language` 决定是否把它作为模型条件；属性字典不需要再保存一份 Language。
+参见 [language-control.example.jsonl](../data/language-control.example.jsonl)，包含显示、隐藏及局部指令示例。
+
+| metadata.show_language | 生成请求中的 global_instruction | language 要求 |
+| --- | --- | --- |
+| `true` | 去掉已有语言键，再加入规范的 `Language` | 必须是支持的语言全名；忽略首尾空白与大小写 |
+| `false` | 去掉所有大小写/首尾空白等价的语言键，保留其他属性 | 不为生成校验语言；WER/CER 仍需要非空目标语言 |
+| 未填写 | 保留已有显式 Language，兼容原统一 request 数据 | metadata.language 不会自动注入模型输入 |
+
+显式开关优先于属性字典中已有的 Language，避免旧的已渲染请求在隐藏语言时残留语言行。
+开关只能是 JSON `true` / `false`，不能是 null、0/1 或字符串。它属于 metadata，
+不是 Omni request 字段；放进 `omni_prompt` 会被拒绝。构造请求时复制属性对象，不修改来源标注。
+
+新样本建议始终显式填写开关。需要随机展示语言时，在构造样本或 GRPO prompt group 前
+决定该布尔值，组内所有候选继承同一条件；运行入口不会自行随机改变开关。
+`parse_rollout` 会保存与生成请求一致的有效 `omni_prompt`，保留 language 和 show_language，
+样本归档也记录 show_language（旧数据未填写时为 null）。教师沿用学生实际编码的 prompt 重放。
+
+WER/CER 接受规范全名，Chinese、Japanese、Korean 继续按字符计算；原有 zh/ja/ko 等
+评分语言别名仍可使用，但显示语言时不把这些缩写自动映射成模型条件，应先迁移为全名。
+JudgeCLAP 忽略注入的 Language；只有语言而没有其他可评分全局属性时，不能使用 instruction 奖励。
+
+下表与预训练及 HF renderer revision 7 的 `SUPPORTED_LANGUAGES` 对齐，共 25 项。
+适配器名单位于 [language.py](../../../slime_plugins/prism/language.py)，每项均有中文注释。
+
+| 规范值 | 中文名称 |
+| --- | --- |
+| Chinese | 中文 |
+| Czech | 捷克语 |
+| Danish | 丹麦语 |
+| Dutch | 荷兰语 |
+| English | 英语 |
+| Finnish | 芬兰语 |
+| French | 法语 |
+| German | 德语 |
+| Greek | 希腊语 |
+| Hindi | 印地语 |
+| Hungarian | 匈牙利语 |
+| Indonesian | 印度尼西亚语 |
+| Italian | 意大利语 |
+| Japanese | 日语 |
+| Korean | 韩语 |
+| Malay | 马来语 |
+| Polish | 波兰语 |
+| Portuguese (Portugal) | 葡萄牙语（葡萄牙） |
+| Romanian | 罗马尼亚语 |
+| Russian | 俄语 |
+| Spanish (Spain) | 西班牙语（西班牙） |
+| Swedish | 瑞典语 |
+| Thai | 泰语 |
+| Turkish | 土耳其语 |
+| Vietnamese | 越南语 |
+
+`Portuguese (Portugal)` 和 `Spanish (Spain)` 保留地区限定；这是模板允许的语言条件名单，
+不表示各语种训练量或质量相同。新增规范语言时需与目标 HF processor 的支持范围同步。
 
 ## Ray 与吞吐配置
 

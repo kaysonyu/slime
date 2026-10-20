@@ -97,11 +97,18 @@ reward.close = reward_states.close
 参见 [mixrl.example.jsonl](../data/mixrl.example.jsonl)，填写实际参考音频路径后作为数据模板使用。
 每行填写 `metadata.reward_category`，其他 Prism 输入沿用已有协议：
 
+`metadata.task_type` 仅记录任务类型，不推断或切换奖励类别；例如 Full VoiceClone 输入仍可选择 base 奖励。
+
 - `base`：需要 `metadata.transcript_target` 和 `metadata.language`，不需要 SIM 参考或 JudgeCLAP 属性。
 - `voiceclone`：还需要有效的音色参考。示例在 `metadata.omni_prompt` 填写
   `references.audio1` 与 `reference_attributes.timbre="audio1"`。
 - `instruction`：还需要可被 JudgeCLAP 评分的全局属性对象；`Language` 不参与评分，
   当前服务未支持的音乐属性（如 `Genre`）会报错。该类别不会调用 SIM。
+
+新数据使用 Chinese、English 等规范全名，并用 `metadata.show_language` 控制是否向
+模型注入 Language。隐藏语言时，`metadata.language` 仍用于 WER/CER；切换显示状态不改变
+评分语言或奖励类别。JudgeCLAP 读取 rollout 保存的有效全局属性对象并跳过 Language。
+完整语言名单和兼容规则见 [语言元数据与显示开关](GUIDE.md#语言元数据与显示开关)。
 
 这些输入会严格验证，技术故障继续抛错。合法零帧 stop 的所选奖励分量均记录为明确的
 `zero_frame` 结果，reward 为零。分类路由同时支持单样本和混合类别的样本列表；
