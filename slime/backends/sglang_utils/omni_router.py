@@ -100,6 +100,71 @@ def install_active_close_diagnostics():
     AsyncHTTP11Connection.aclose = close
 
 
+def install_reserved_connection_guard():
+    """Keep HTTP/1 pool assignments alive until their request releases them.
+
+    httpcore 1.0.9 can evict a connection between assigning it and starting
+    its request. Socket closure then races that request. See upstream #1110
+    and #1111; neither a larger pool nor a retry establishes safe ownership.
+    This process-local compatibility guard preserves limits, expiry, and
+    errors. It does not modify installed packages or retry requests.
+    """
+    import httpcore
+    from httpcore._async.connection_pool import AsyncConnectionPool
+
+    original = AsyncConnectionPool._assign_requests_to_connections
+    if getattr(original, "_prism_reserved_connection_guard", False):
+        return
+    if httpcore.__version__ != "1.0.9":
+        raise RuntimeError("Revalidate the router pool compatibility guard for this httpcore version")
+
+    def assign(pool):
+        if pool._http2:
+            return original(pool)
+        reserved = {request.connection for request in pool._requests if request.connection is not None}
+        closing = []
+        for connection in list(pool._connections):
+            if connection.is_closed():
+                pool._connections.remove(connection)
+            elif connection not in reserved and (
+                connection.has_expired()
+                or (connection.is_idle() and len(pool._connections) > pool._max_keepalive_connections)
+            ):
+                # Keep 1.0.9's existing retention policy, changing ownership
+                # only. In particular, do not expand the connection budget.
+                pool._connections.remove(connection)
+                closing.append(connection)
+        for request in pool._requests:
+            if not request.is_queued():
+                continue
+            origin = request.request.url.origin
+            available = next(
+                (
+                    item
+                    for item in pool._connections
+                    if item not in reserved and item.can_handle_request(origin) and item.is_available()
+                ),
+                None,
+            )
+            if available is None and len(pool._connections) >= pool._max_connections:
+                idle = next(
+                    (item for item in pool._connections if item not in reserved and item.is_idle()), None
+                )
+                if idle is None:
+                    continue
+                pool._connections.remove(idle)
+                closing.append(idle)
+            if available is None:
+                available = pool.create_connection(origin)
+                pool._connections.append(available)
+            request.assign_to_connection(available)
+            reserved.add(available)
+        return closing
+
+    assign._prism_reserved_connection_guard = True
+    AsyncConnectionPool._assign_requests_to_connections = assign
+
+
 class WorkerTransport(httpx.AsyncBaseTransport):
     """Keep each replica's upstream connection pool independent of other replicas."""
 
@@ -263,6 +328,7 @@ def run_data_plane():
 
     install_transport_error_diagnostics()
     install_active_close_diagnostics()
+    install_reserved_connection_guard()
     config = load_config_from_env()
     # Slime enables/disables every replica concurrently. Shared-socket accept
     # is not guaranteed fair: a DP may receive an entire publication burst.

@@ -4,12 +4,14 @@ import argparse
 import asyncio
 import collections
 import importlib.metadata
+import importlib.util
 import json
 import time
 import traceback
 from pathlib import Path
 
 import httpx
+from httpcore._async.connection_pool import AsyncConnectionPool
 from httpcore._async.http11 import AsyncHTTP11Connection, HTTPConnectionState
 
 
@@ -17,6 +19,7 @@ async def probe(mode, origins, requests, concurrency):
     servers, tasks = [], set()
     closed_active, errors = [], collections.Counter()
     original_close = AsyncHTTP11Connection.aclose
+    original_assignment = AsyncConnectionPool._assign_requests_to_connections
 
     async def observe_close(connection):
         if connection._state == HTTPConnectionState.ACTIVE:
@@ -54,10 +57,16 @@ async def probe(mode, origins, requests, concurrency):
 
     AsyncHTTP11Connection.aclose = observe_close
     try:
+        if mode == "reserved-guard":
+            entry = Path(__file__).resolve().parents[4] / "slime/backends/sglang_utils/omni_router.py"
+            spec = importlib.util.spec_from_file_location("probe_router_guard", entry)
+            router = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(router)
+            router.install_reserved_connection_guard()
         for _ in range(origins):
             servers.append(await asyncio.start_server(serve, "127.0.0.1", 0))
         urls = [f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/generate" for server in servers]
-        keepalive = concurrency // 8 if mode == "shared" else concurrency * 2
+        keepalive = concurrency * 2 if mode == "retained-idle" else concurrency // 8
         limits = httpx.Limits(max_connections=concurrency * 2, max_keepalive_connections=keepalive)
         slots = asyncio.Semaphore(concurrency)
         async with httpx.AsyncClient(limits=limits, timeout=30, trust_env=False) as client:
@@ -92,6 +101,7 @@ async def probe(mode, origins, requests, concurrency):
         }
     finally:
         AsyncHTTP11Connection.aclose = original_close
+        AsyncConnectionPool._assign_requests_to_connections = original_assignment
         for server in servers:
             server.close()
             await server.wait_closed()
@@ -106,6 +116,9 @@ async def main():
     parser.add_argument("--requests", type=int, default=8192)
     parser.add_argument("--concurrency", type=int, default=256)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--modes", nargs="+", choices=["shared", "retained-idle", "reserved-guard"], default=["shared", "retained-idle"]
+    )
     args = parser.parse_args()
     if not 1 <= args.origins <= 128 or not 1 <= args.concurrency <= 512 or not 1 <= args.requests <= 32768:
         parser.error("Keep the loopback probe bounded")
@@ -114,9 +127,7 @@ async def main():
     result = {
         "started": time.time(),
         "versions": {name: importlib.metadata.version(name) for name in ("httpx", "httpcore", "anyio")},
-        "runs": [
-            await probe(mode, args.origins, args.requests, args.concurrency) for mode in ("shared", "retained-idle")
-        ],
+        "runs": [await probe(mode, args.origins, args.requests, args.concurrency) for mode in args.modes],
         "scope": "Loopback CPU reproduction with real HTTP sockets; no retries. Active-close observer records stacks without adding await points before the original close. Not a GPU throughput benchmark.",
     }
     args.output.write_text(json.dumps(result, indent=2) + "\n")
