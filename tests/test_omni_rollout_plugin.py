@@ -1011,6 +1011,40 @@ def test_generate_uses_router_and_preserves_sample_identity(monkeypatch, tmp_pat
     assert plugin.generate.abort_mode == "request"
 
 
+def test_direct_routing_posts_to_an_engine_of_the_model_router(monkeypatch, tmp_path):
+    item = sample()
+    args = types.SimpleNamespace(
+        hf_checkpoint="fixture", omni_audio_dir=str(tmp_path), omni_model_name="prism", omni_routing="direct"
+    )
+    response = output()
+    blob = io.BytesIO()
+    with wave.open(blob, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(24000)
+        wav.writeframes(b"\0\0" * 32)
+    response["audio"] = dict(data=base64.b64encode(blob.getvalue()).decode(), format="wav", sample_rate=24000)
+    calls = []
+
+    async def post_to_engine(args, router, model, path, payload, *, headers=None):
+        calls.append((router, model, path, payload))
+        return copy.deepcopy(response)
+
+    monkeypatch.setattr(plugin, "post_to_engine", post_to_engine)
+    monkeypatch.setattr(plugin, "_config", lambda path: geometry())
+    monkeypatch.setitem(
+        sys.modules,
+        "slime.rollout.sglang_rollout",
+        types.SimpleNamespace(
+            get_model_url=lambda args, model, endpoint="/generate": f"http://router/{model}{endpoint}"
+        ),
+    )
+    assert asyncio.run(plugin.generate(args, item, {"max_new_tokens": 12})) is item
+    assert [call[:3] for call in calls] == [("http://router/prism", "prism", "/generate")]
+    assert item.metadata["omni_prompt"] == calls[0][3]["prompt"]
+    assert set(item.metadata["omni_client_timing"]) == {"prepare_s", "http_s", "parse_audio_s", "finished_unix"}
+
+
 @pytest.mark.parametrize("override,expected", [(None, False), (True, True), (False, False)])
 def test_eval_audio_override_does_not_change_training(override, expected):
     args = types.SimpleNamespace(omni_return_audio=False, omni_eval_return_audio=override)

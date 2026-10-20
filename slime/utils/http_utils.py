@@ -163,10 +163,11 @@ class _ShardedHTTPTransport(httpx.AsyncBaseTransport):
     connections per pool. That idle limit is separate from active concurrency.
     """
 
-    def __init__(self, max_connections: int):
+    def __init__(self, max_connections: int, *, keepalive_expiry: float = 5.0):
         count = max(1, (max_connections + 31) // 32)
         size, remainder = divmod(max(1, max_connections), count)
         self._pool_sizes = [size + (i < remainder) for i in range(count)]
+        self._keepalive_expiry = keepalive_expiry
         self._tls = ssl.create_default_context()
         self._transports = {}
         self._next = {}
@@ -178,7 +179,11 @@ class _ShardedHTTPTransport(httpx.AsyncBaseTransport):
                 httpx.AsyncHTTPTransport(
                     verify=self._tls,
                     trust_env=False,
-                    limits=httpx.Limits(max_connections=size, max_keepalive_connections=size),
+                    limits=httpx.Limits(
+                        max_connections=size,
+                        max_keepalive_connections=size,
+                        keepalive_expiry=self._keepalive_expiry,
+                    ),
                 )
                 for size in self._pool_sizes
             ]
@@ -257,8 +262,12 @@ def init_http_client(args, *, concurrency: int | None = None):
 
     _client_concurrency = concurrency if concurrency is not None else args.sglang_server_concurrency * num_engines
     if _http_client is None:
+        # Omni engines and routers keep idle connections for 120 s. Holding ours
+        # for 60 s spans the training phase, so a step boundary does not expire a
+        # whole wave of sockets at once, and the server still never closes first.
+        omni = getattr(args, "rollout_backend", "sglang") == "sglang-omni"
         _http_client = httpx.AsyncClient(
-            transport=_ShardedHTTPTransport(_client_concurrency),
+            transport=_ShardedHTTPTransport(_client_concurrency, keepalive_expiry=60.0 if omni else 5.0),
             timeout=httpx.Timeout(None),
             trust_env=False,  # internal SGLang comm only — never route through system proxy
         )

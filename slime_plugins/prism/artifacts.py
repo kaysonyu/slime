@@ -155,6 +155,7 @@ def _record(sample, *, reward_value=None, reward_status="pending", error=None, f
         "model_identity": trace.get("model_identity"),
         "sampling": trace.get("sampling"),
         "request_id": trace.get("request_id"),
+        "generation_client_timing": metadata.get("omni_client_timing"),
         "teacher": {
             name.removeprefix("omni_teacher_"): value
             for name, value in metadata.items()

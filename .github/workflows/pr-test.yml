@@ -894,6 +894,14 @@ jobs:
             },
             {
               "num_gpus": 0,
+              "test_file": "test_seqlen_balancing_equivalence.py"
+            },
+            {
+              "num_gpus": 0,
+              "test_file": "test_weight_topology_cache.py"
+            },
+            {
+              "num_gpus": 0,
               "test_file": "test_rollout_metrics.py"
             },
             {
@@ -956,6 +964,10 @@ jobs:
             {
               "num_gpus": 0,
               "test_file": "test_omni_deployment.py"
+            },
+            {
+              "num_gpus": 0,
+              "test_file": "test_omni_endpoints.py"
             },
             {
               "num_gpus": 0,

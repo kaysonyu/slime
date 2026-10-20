@@ -58,6 +58,27 @@ def test_cli_defaults_keep_original_backend():
     assert args.custom_megatron_log_prob_function_path is None
     assert not args.use_rollout_logprobs
     assert args.policy_loss_weights is None
+    assert args.omni_routing == "direct"
+    assert not args.cache_weight_topology
+    assert not args.rollout_packed_tensor_buffer
+
+
+def test_cli_accepts_relayed_routing_and_opt_in_transport_options():
+    parser = get_slime_extra_args_provider()(argparse.ArgumentParser())
+    args = parser.parse_args(
+        [
+            "--rollout-batch-size",
+            "1",
+            "--omni-routing",
+            "router",
+            "--omni-router-policy",
+            "least_request",
+            "--cache-weight-topology",
+            "--rollout-packed-tensor-buffer",
+        ]
+    )
+    assert (args.omni_routing, args.omni_router_policy) == ("router", "least_request")
+    assert args.cache_weight_topology and args.rollout_packed_tensor_buffer
 
 
 def test_cli_accepts_an_explicit_weight_update_stage_and_router_capabilities():

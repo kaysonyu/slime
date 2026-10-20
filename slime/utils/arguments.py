@@ -55,7 +55,22 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 "--omni-python", help="Python interpreter containing SGLang-Omni; defaults to this interpreter."
             )
             parser.add_argument(
-                "--omni-router-policy", choices=["round_robin", "least_request", "random"], default="round_robin"
+                "--omni-router-policy",
+                choices=["round_robin", "least_request", "random"],
+                default="round_robin",
+                help=(
+                    "Engine selection policy. With --omni-routing direct each rollout worker applies it "
+                    "to the engines it owns; with --omni-routing router the Omni router applies it."
+                ),
+            )
+            parser.add_argument(
+                "--omni-routing",
+                choices=["direct", "router"],
+                default="direct",
+                help=(
+                    "direct posts generation from rollout workers straight to engines, using the Omni router "
+                    "only for membership, health and admission; router relays every request through it."
+                ),
             )
             parser.add_argument(
                 "--omni-admin-key", help="Optional shared admin key for Omni workers and their router."
@@ -186,6 +201,16 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "Quantize block-FP8 rollout weights with power-of-two FP32 scales, "
                     "independent of the training GPU architecture. Blackwell-only scale "
                     "packing remains controlled by the rollout runtime requirements."
+                ),
+            )
+            parser.add_argument(
+                "--cache-weight-topology",
+                action="store_true",
+                default=False,
+                help=(
+                    "Reuse unchanged engine actor handles between weight publications instead of sending every "
+                    "handle to every trainer rank. Refreshed at each engine recovery boundary; external serving "
+                    "without fault tolerance keeps fetching live handles."
                 ),
             )
             # Delta weight sync.
@@ -669,6 +694,15 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "Shared directory for straw rollout payloads, mounted at the same absolute path on all nodes. "
                     "Defaults to <save>/rollout_data. Required for straw transport when --save is unset. "
                     "Files are retained for pending samples, checkpoints and debug archives."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-packed-tensor-buffer",
+                action="store_true",
+                default=False,
+                help=(
+                    "Serialize CPU tensors of rollout groups into one contiguous arena per payload, which each "
+                    "receiver copies once. Also applies to training partitions with --rollout-tensor-buffer."
                 ),
             )
             parser.add_argument(

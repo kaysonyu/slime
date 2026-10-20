@@ -11,6 +11,7 @@ import copy
 import io
 import os
 import re
+import time
 import uuid
 import wave
 from functools import lru_cache
@@ -20,6 +21,7 @@ import torch
 
 from slime.utils.misc import load_function
 from slime.utils.types import Sample
+from slime_plugins.omni_endpoints import post_to_engine
 from slime_plugins.prism.http_client import _request
 from slime_plugins.prism.language import canonical_language
 from slime_plugins.prism.protocol import (
@@ -459,12 +461,19 @@ async def generate(args, sample, sampling_params, *, evaluation=False):
 
     if sample.status not in (Sample.Status.PENDING, Sample.Status.ABORTED):
         raise ValueError(f"Prism generation requires a pending sample, got {sample.status}")
+    started = time.perf_counter()
     payload = build_generate_payload(args, sample, sampling_params, evaluation=evaluation)
     config = _config(str(args.hf_checkpoint))
     headers = None
     if sample.session_id and getattr(args, "router_policy", None) == "consistent_hashing":
         headers = {"X-SMG-Routing-Key": sample.session_id}
-    response = await _request(args, get_model_url(args, payload["model"]), payload, headers=headers)
+    submitted = time.perf_counter()
+    if getattr(args, "omni_routing", "router") == "direct":
+        router = get_model_url(args, payload["model"], endpoint="")
+        response = await post_to_engine(args, router, payload["model"], "/generate", payload, headers=headers)
+    else:
+        response = await _request(args, get_model_url(args, payload["model"]), payload, headers=headers)
+    received = time.perf_counter()
     parse_rollout(
         response,
         sample,
@@ -475,6 +484,12 @@ async def generate(args, sample, sampling_params, *, evaluation=False):
         ),
     )
     _write_audio(response, args, sample, config, payload["return_audio"], evaluation=evaluation)
+    sample.metadata["omni_client_timing"] = {
+        "prepare_s": submitted - started,
+        "http_s": received - submitted,
+        "parse_audio_s": time.perf_counter() - received,
+        "finished_unix": time.time(),
+    }
     return sample
 
 

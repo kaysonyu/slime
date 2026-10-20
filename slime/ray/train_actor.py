@@ -122,5 +122,6 @@ class TrainRayActor(RayActor):
 
     def set_rollout_manager(self, rollout_manager):
         self.rollout_manager = rollout_manager
+        self._weight_topology_client = None
         if not self.args.debug_rollout_only and self.args.rank == 0:
             ray.get(self.rollout_manager.set_train_parallel_config.remote(self.train_parallel_config))

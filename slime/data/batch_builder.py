@@ -551,7 +551,10 @@ class BatchBuilder:
             if transport == "nixl":
                 result.append(Box(ray.put(value, _tensor_transport="nixl")))
             elif transport == "object-store" and getattr(self.args, "rollout_tensor_buffer", False):
-                result.append(Box(ray.put(SerializedTensorPayload(value))))
+                payload = SerializedTensorPayload(
+                    value, packed=getattr(self.args, "rollout_packed_tensor_buffer", False)
+                )
+                result.append(Box(ray.put(payload)))
             elif transport in {"straw", "object-store"}:
                 result.append(Box(ray.put(value)))
             else:
