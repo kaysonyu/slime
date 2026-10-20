@@ -153,3 +153,27 @@ Omni 诊断增强在远端 `perf/prism-timeline-20261013`。32 卡配对 Job
 - 32 卡、B2048、2000 步的可复现 manifest 为上述实验根目录下 `configs/train-32-2000.json`。
   配置与实际校验见 `analysis/preflight-summary.json`；运行状态从平台 live 查询。
   `scripts/watch-training.py` 管理本轮冻结教师生命周期，Job 与 Serving 条目始终保留。
+
+2026-10-18 的冻结 reward 服务资产（同一 CQ 工作空间和项目）：
+
+- 服务端和轻量客户端实现位于 `slime_plugins/audio_rewards/`，Prism 样本适配位于
+  `slime_plugins/prism/reward_adapter.py`；启动脚本、运行时准备与测量入口位于
+  `examples/prism/reward_services/`，公开接口与客户端配置见该目录 README。
+- ASR 镜像：`docker.sii.shaipower.online/inspire-studio/vox-vllm-asr:v0.32.0-cu129-audio-20261018`。
+  Qwen 权重：`/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/models/Qwen3-ASR-1.7B`；
+  Whisper 权重：`/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/models/whisper-large-v3`。
+- ReDimNet2 权重：`/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/models/redimnet2/b6-vb2+vox2+cnc2_v0-lm.pt`，
+  SHA256 `287365f6f485b19e65e5176554f8f7123bfa8d85185f3d2c040eab51acec9868`。
+- JudgeCLAP 的基座为 `/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/denglongtai/models/Qwen2.5-Omni-7B`；
+  RUN 为 `/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/denglongtai/experiments/judge_clap/judge_clap_mosstts2instr_margin_cal_novirt_fixw/judge_clap_mosstts2instr_margin_cal_novirt_fixw-20261011-014703_job-ea14bce9-496d-4579-93b1-ac93c86bb224/running_round_0`，
+  使用其 `final` adapter 和 `atom_stats.npz`，27 个指令类别（无 Loudness）。
+- 完整 LibriSpeech test-clean/test-other 数据及带校验信息的 manifest 位于
+  `/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/data/reward-bench/librispeech`。
+- 本轮 embedding 容器使用 `ngc-pytorch:25.02-cuda12.8.0-py3` 与共享 Python 环境
+  `/inspire/ssd/project/cq-scientific-cooperation-zone/public/kyu/venvs/vox-reward-models-v1/bin/python`；
+  FA2 2.8.3 overlay 位于
+  `/inspire/qb-ilm2/project/cq-scientific-cooperation-zone/public/kyu/vox-slime-validation/reward-services-20261018/runtime/flash-attn`，
+  启动时加入 `PYTHONPATH`。
+  新环境可用仓库的 `prepare_runtime.sh` 创建，不原地修改此共享环境。
+
+历史容量、扩容、并发与网关实验的复现资产保存在[独立实验归档](https://github.com/VoiceAgentGroup/slime/blob/e57ed66c1ed6bb35015db134e5a0dc1a508caff3/examples/prism/reward_services/experiments/ASSETS.md)。

@@ -14,7 +14,11 @@
 显式决定是否把语言加入模型全局指令；正文只在顶层 script 保存。
 [language-control.example.jsonl](data/language-control.example.jsonl) 另给出显示、隐藏与局部指令示例，
 完整 25 种语言及中文说明见 [语言元数据与显示开关](docs/GUIDE.md#语言元数据与显示开关)。
-奖励公式按类别拆分在 [rewards/](rewards/)，共享客户端和缓存位于 `common.py`，MixRL 分发位于 `__init__.py`。[ray.sh](ray.sh) 是两个入口共享的生命周期实现，不是独立的启动命令。
+奖励使用从 [rewards/README.md](rewards/README.md) 开始：服务调用、组件评分、组合、
+过滤和诊断均有对应入口。类别公式在 `rewards/`；自定义评分示例在 `scorers.py`，
+过滤示例在 `filters.py`，MixRL 分发在 `__init__.py`。`common.py` 连接共享状态和聚合流程；
+HTTP 客户端与向量缓存由 `slime_plugins.audio_rewards.client.AudioRewardClient` 管理。
+[ray.sh](ray.sh) 是两个入口共享的生命周期实现，不是独立的启动命令。
 
 ## 准备和运行
 
@@ -64,7 +68,10 @@ ${OUTPUT_ROOT}/${RUN_NAME}/${JOB_NAME}_${TRAIN_JOB_ID}/running_round_${RUNNING_R
 | [EXAMPLE_RUNS.md](docs/EXAMPLE_RUNS.md) | GRPO、MixRL、MoPD 的最小运行命令和多节点示例 |
 | [RAY.md](docs/RAY.md) | 平台环境、目录规则、Ray 启停与恢复 |
 | [TRAINING_MODES.md](docs/TRAINING_MODES.md) | 数据字段、训练方式和可选评测 |
+| [奖励使用入口](rewards/README.md) | 启动服务 → client → scorer → reward 组合 → 过滤 → 诊断，含完整命令 |
 | [REWARD_CATEGORIES.md](docs/REWARD_CATEGORIES.md) | 奖励组合、类别路由和自定义公式 |
+| [reward_services/README.md](reward_services/README.md) | 四个服务的部署脚本、运行环境、协议及验证工具 |
+| [REWARD_SERVICES.md](docs/REWARD_SERVICES.md) | 评分耗时、客户端排队、缓存和联合评分诊断 |
 | [GUIDE.md](docs/GUIDE.md) | 模型协议、动作流、性能、归档与诊断 |
 | [TOOLS.md](docs/TOOLS.md) | 位于 `scripts/` 的 GPU 与数值诊断工具 |
 | [VALIDATION.md](docs/VALIDATION.md) | 历史验证记录与验收范围 |

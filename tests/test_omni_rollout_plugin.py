@@ -260,7 +260,7 @@ def test_prompt_payload_uses_structured_business_fields_not_tokenization():
 )
 def test_reference_slots_keep_explicit_names_and_reward_mapping(references, attributes):
     from pathlib import Path
-    from slime_plugins import tts_reward
+    from slime_plugins.prism import reward_adapter
 
     item = sample()
     item.metadata["omni_prompt"].update(references=references, reference_attributes=attributes)
@@ -274,7 +274,7 @@ def test_reference_slots_keep_explicit_names_and_reward_mapping(references, attr
     assert "language" not in item.metadata["omni_prompt"]
     assert item.metadata["language"] == "zh"
     if references:
-        assert tts_reward._reference(item.metadata["omni_prompt"], must_exist=False) == (
+        assert reward_adapter.reference_audio(item.metadata["omni_prompt"], must_exist=False) == (
             attributes["timbre"],
             Path("/shared/speaker.wav"),
         )

@@ -35,6 +35,11 @@ setup(
     version="0.4.0",
     packages=find_packages(include=["slime*", "slime_plugins*"]),
     include_package_data=True,
+    package_data={
+        "slime_plugins.audio_rewards.serving.vendor": ["SOURCES.md"],
+        "slime_plugins.audio_rewards.serving.vendor.judge_clap": ["categories.json"],
+        "slime_plugins.audio_rewards.serving.vendor.redimnet2": ["LICENSE", "LICENSE-APACHE-2.0"],
+    },
     install_requires=_fetch_requirements("requirements.txt"),
     extras_require={},
     python_requires=">=3.10",

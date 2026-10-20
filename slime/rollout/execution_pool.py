@@ -22,11 +22,13 @@ from slime.utils.types import Sample
 
 
 class GroupWorker:
-    def __init__(self, args, concurrency):
+    def __init__(self, args, concurrency, *, worker_index=0, worker_count=1):
         from slime.rollout.sglang_rollout import GenerateState
 
         configure_rollout_gc(getattr(args, "rollout_gc_threshold", None))
         self.args = copy.copy(args)
+        self.args.rollout_worker_index = worker_index
+        self.args.rollout_worker_count = worker_count
         self.args.rollout_execution_workers = 0
         self.args.use_distributed_post = False
         init_http_client(self.args, concurrency=concurrency)
@@ -144,7 +146,7 @@ class RolloutExecutionPool:
                             )
                         },
                     )
-                    .remote(args, concurrency)
+                    .remote(args, concurrency, worker_index=index, worker_count=count)
                 )
             for slot in range(max(self.capacities)):
                 for index, capacity in enumerate(self.capacities):

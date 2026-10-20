@@ -401,13 +401,14 @@ def test_quality_metrics_keep_attribute_coverage_and_service_errors():
 
 @pytest.mark.parametrize("category", [None, "base"])
 def test_fixed_reward_archives_the_executed_category(args, monkeypatch, category):
-    from test_tts_reward_plugin import Service, config
+    from test_audio_reward_clients import Service, config
 
-    from slime_plugins import tts_reward
+    from slime_plugins.audio_rewards import client as audio_client
 
     service = Service()
-    monkeypatch.setattr(tts_reward, "get", service.get)
-    monkeypatch.setattr(tts_reward, "post", service.post)
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "get", staticmethod(service.get))
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "post", staticmethod(service.post))
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "post_file", staticmethod(service.post_file))
     args.custom_rm_path = "examples.prism.rewards.voiceclone.reward"
     args.omni_reward_config = config(wer=1, sim=1)
     item = sample(args)
@@ -474,14 +475,16 @@ def _template_groups(args, filename, group_size):
 def test_grpo_templates_route_native_groups_and_archive_actual_rewards(
     args, tmp_path, monkeypatch, filename, reward_path, categories
 ):
+    from test_audio_reward_clients import Service, config
     from test_omni_rollout_plugin import geometry, output
-    from test_tts_reward_plugin import Service, config
 
-    from slime_plugins import omni_rollout, tts_reward
+    from slime_plugins import omni_rollout
+    from slime_plugins.audio_rewards import client as audio_client
 
     service = Service()
-    monkeypatch.setattr(tts_reward, "get", service.get)
-    monkeypatch.setattr(tts_reward, "post", service.post)
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "get", staticmethod(service.get))
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "post", staticmethod(service.post))
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "post_file", staticmethod(service.post_file))
     args.custom_rm_path = reward_path
     args.omni_reward_config = config(wer=1, sim=1, judge_clap=1)
     groups = _template_groups(args, filename, 2)
@@ -588,11 +591,12 @@ def test_mopd_quality_eval_generates_audio_uses_dataset_reward_and_skips_teacher
     import copy
     import types
 
+    from test_audio_reward_clients import Service, config
     from test_omni_rollout_plugin import geometry, output
-    from test_tts_reward_plugin import Service, config
 
     from slime.utils.eval_config import build_eval_dataset_configs
-    from slime_plugins import omni_rollout, tts_reward
+    from slime_plugins import omni_rollout
+    from slime_plugins.audio_rewards import client as audio_client
 
     args.omni_return_audio = False
     args.omni_eval_return_audio = True
@@ -624,8 +628,9 @@ def test_mopd_quality_eval_generates_audio_uses_dataset_reward_and_skips_teacher
     args.opd_teacher_config = {"models": {}, "by_domain": {}}
     args.omni_reward_config = config(wer=1)
     service = Service()
-    monkeypatch.setattr(tts_reward, "get", service.get)
-    monkeypatch.setattr(tts_reward, "post", service.post)
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "get", staticmethod(service.get))
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "post", staticmethod(service.post))
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "post_file", staticmethod(service.post_file))
     monkeypatch.setattr(omni_rollout, "_config", lambda path: geometry())
     monkeypatch.setitem(
         sys.modules,
@@ -700,19 +705,21 @@ def test_explicit_archive_config_uses_native_hooks_without_overriding_audio(args
     assert all(row["reward_function_path"] == args.custom_rm_path for row in rows)
 
 
-def test_native_generation_reward_and_tensorboard_pipeline(args, tmp_path, monkeypatch):
+def test_native_generation_reward_and_tensorboard_pipeline(args, tmp_path, monkeypatch, caplog):
     from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+    from test_audio_reward_clients import Service, config
     from test_omni_rollout_plugin import geometry, output
     from test_omni_rollout_plugin import sample as omni_sample
-    from test_tts_reward_plugin import Service, config
 
     from slime.rollout import sglang_rollout
     from slime.utils.misc import SingletonMeta
-    from slime_plugins import omni_rollout, tts_reward
+    from slime_plugins import omni_rollout
+    from slime_plugins.audio_rewards import client as audio_client
 
     service = Service()
-    monkeypatch.setattr(tts_reward, "get", service.get)
-    monkeypatch.setattr(tts_reward, "post", service.post)
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "get", staticmethod(service.get))
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "post", staticmethod(service.post))
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "post_file", staticmethod(service.post_file))
     monkeypatch.setattr(omni_rollout, "_config", lambda path: geometry())
     response = output()
     blob = io.BytesIO()
@@ -764,13 +771,20 @@ def test_native_generation_reward_and_tensorboard_pipeline(args, tmp_path, monke
     assert actual.reward == pytest.approx(2 / 3)
     assert actual.metadata["omni_reward"]["category"] == "base"
     assert Path(actual.metadata["omni_audio_path"]).read_bytes() == blob.getvalue()
-    assert artifacts.log_rollout_data(7, args, [actual], {}, 0.1) is False
+    with caplog.at_level("INFO", logger="slime_plugins.prism.artifacts"):
+        assert artifacts.log_rollout_data(7, args, [actual], {}, 0.1) is False
+    assert "Prism reward timing train rollout_0000007:" in caplog.text
+    assert "last_completed=wer" in caplog.text
     accumulator = EventAccumulator(args.tensorboard_dir).Reload()
     event = accumulator.Scalars("rollout/prism/selected/reward/mean")[0]
     assert event.step == 7 and event.value == pytest.approx(actual.reward)
     assert accumulator.Scalars("rollout/prism/reward_category/base/component/wer/raw/mean")[0].value == pytest.approx(
         0.5
     )
+    latency = accumulator.Scalars("rollout/prism/selected/component/wer/timing/total_s/p95")[0]
+    assert latency.step == 7 and latency.value > 0
+    assert accumulator.Scalars("rollout/prism/selected/component/wer/timing/http_requests")[0].value == 1
+    assert accumulator.Scalars("rollout/prism/selected/component/wer/timing/last_completed")[0].value == 1
 
 
 def test_tensorboard_explicit_directory_beats_worker_environment_and_flushes(tmp_path, monkeypatch):

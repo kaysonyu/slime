@@ -253,11 +253,13 @@ class RolloutScheduler:
 class _GenerationActor:
     """Maintain a local generation pool and expose completed groups to the collector."""
 
-    def __init__(self, reader_config, concurrency):
+    def __init__(self, reader_config, concurrency, *, worker_index=0, worker_count=1):
         from slime.rollout.sglang_rollout import GenerateState
 
         logging_utils.configure_logger(prefix=f" fully-async-{reader_config.reader_id}")
         self.args = copy.copy(reader_config.args)
+        self.args.rollout_worker_index = worker_index
+        self.args.rollout_worker_count = worker_count
         self.args.use_distributed_post = False
         self.args.use_wandb = self.args.use_tensorboard = False
         self.args.dump_details = None
@@ -523,7 +525,7 @@ class DistributedRollout(RolloutScheduler):
                         scheduling_strategy=NodeAffinitySchedulingStrategy(node["NodeID"], soft=False),
                         runtime_env={"env_vars": add_default_ray_env_vars()},
                     )
-                    .remote(reader, capacity * args.n_samples_per_prompt)
+                    .remote(reader, capacity * args.n_samples_per_prompt, worker_index=i, worker_count=len(nodes))
                 )
             sizes = ray.get([worker.dataset_size.remote() for worker in workers])
             if any(size != len(data_source) for size in sizes):

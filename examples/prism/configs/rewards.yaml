@@ -1,29 +1,57 @@
 # Shared service bindings. GRPO uses WER only; MixRL selects components per sample category.
+# Workflow, custom scoring, composition and filters: ../rewards/README.md
 # Fill endpoints and authentication only for the services used by your training/eval rewards.
 # URLs are service roots.
+# concurrency is the TOTAL per-service request budget for this training run.
+# It is divided across rollout workers automatically, independently of generation.
+# Defaults below are starting points; tune total budgets to deployed service capacity.
+# Defaults and allocation: ../reward_services/CONCURRENCY_CONFIG.md
+# Timing diagnostics: ../docs/REWARD_SERVICES.md
 services:
   wer:
+    # start_qwen3_asr.sh; for start_whisper.sh use model: whisper-large-v3.
+    api: openai_audio
+    model: Qwen3-ASR-1.7B
+    max_completion_tokens: 1024
     endpoint: https://replace-wer.invalid
     auth_token_env: INF_API_KEY
-    audio_transport: path
-    max_inflight: 4
+    audio_transport: upload
+    concurrency: 128
     timeout_s: 300
     max_retries: 2
   sim:
+    api: voxrl_embedding
     endpoint: https://replace-sim.invalid
     auth_token_env: INF_API_KEY
     audio_transport: path
-    max_inflight: 4
+    concurrency: 64
+    # Optional versioned reference table from reward_services/bench/precompute.py:
+    # embedding_cache: /shared/references.sqlite
     timeout_s: 300
     max_retries: 2
   judge_clap:
+    api: voxrl_embedding
     endpoint: https://replace-judge-clap.invalid
     auth_token_env: INF_API_KEY
     audio_transport: path
-    max_inflight: 2
+    concurrency: 64
+    # Optional versioned atomic-instruction table:
+    # embedding_cache: /shared/instruction-texts.sqlite
     timeout_s: 300
     max_retries: 2
 weights:
   wer: 1.0
   sim: 1.0
   judge_clap: 1.0
+# Optional component math, independent of services and final reward aggregation.
+# Omitted components retain their default scorers.
+# Runnable scorer examples: ../rewards/scorers.py
+# scorers:
+#   wer:
+#     path: examples.prism.rewards.scorers.exponential_wer
+#     kwargs:
+#       alpha: 2.0
+#   judge_clap:
+#     path: examples.prism.rewards.scorers.minimum_judge_clap
+# Select aggregation with --custom-rm-path and filtering with Slime's native
+# --dynamic-sampling-filter-path / --rollout-sample-filter-path (not YAML keys).

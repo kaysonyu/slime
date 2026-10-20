@@ -1,34 +1,49 @@
-"""Shared component clients and scalar/batch contracts for category rewards.
+"""Wire shared reward state, category aggregation and scalar/batch contracts.
 
-Category files own their formulas. This module owns frozen service/cache
-lifetime, complete component records, failure draining, and final reward logs.
+Category files own their formulas. RewardStateCache owns loop-local state;
+AudioRewardClient owns HTTP clients and embedding caches. This module connects
+them to category hooks, drains failures, and records the final reward.
 """
 
 import asyncio
 import inspect
 import math
+import time
 from collections.abc import Mapping
 from numbers import Real
 
-from slime_plugins import tts_reward
+from slime_plugins.audio_rewards.protocol import finite
+from slime_plugins.prism.reward_adapter import PrismRewardAdapter, RewardStateCache
 
 
 class _RewardState:
-    def __init__(self, config):
-        if not isinstance(config, Mapping) or set(config) not in ({"services"}, {"services", "weights"}):
-            raise ValueError("omni_reward_config requires services and optional weights mappings")
-        self.scorer = tts_reward.RewardScorer(config["services"])
+    def __init__(self, config, *, worker_index=0, worker_count=1):
+        if (
+            not isinstance(config, Mapping)
+            or "services" not in config
+            or set(config) - {"services", "weights", "scorers"}
+        ):
+            raise ValueError("omni_reward_config requires services and optional weights/scorers mappings")
+        self.scorer = PrismRewardAdapter(
+            config["services"],
+            scorers=config.get("scorers"),
+            worker_index=worker_index,
+            worker_count=worker_count,
+        )
         self.weights = None
         if "weights" in config:
             weights = config["weights"]
             if not isinstance(weights, Mapping) or set(weights) - {"wer", "sim", "judge_clap"}:
                 raise ValueError("reward weights must map wer, sim, and judge_clap to coefficients")
-            self.weights = {name: tts_reward._finite(value, f"{name} weight") for name, value in weights.items()}
+            self.weights = {name: finite(value, f"{name} weight") for name, value in weights.items()}
             if any(value < 0 for value in self.weights.values()):
                 raise ValueError("reward weights must be nonnegative")
 
+    async def aclose(self):
+        await self.scorer.aclose()
 
-reward_states = tts_reward.RewardStateCache(_RewardState)
+
+reward_states = RewardStateCache(_RewardState)
 
 
 def component_weights(args, components):
@@ -64,6 +79,7 @@ async def score(args, sample, *, category, components, aggregate, weights=None):
     if not isinstance(getattr(sample, "metadata", None), dict):
         raise ValueError("Prism category rewards require sample.metadata")
     sample.metadata.pop("omni_reward", None)
+    started_at, clock = time.time(), time.perf_counter()
     try:
         records = await reward_states.get(args).scorer.score_components(sample, components)
         outcome = {"status": "success", "components": records}
@@ -90,3 +106,8 @@ async def score(args, sample, *, category, components, aggregate, weights=None):
         outcome = sample.metadata.get("omni_reward")
         if isinstance(outcome, dict):
             outcome["category"] = category
+            outcome["timing"] = {
+                "started_at": started_at,
+                "finished_at": time.time(),
+                "total_s": time.perf_counter() - clock,
+            }

@@ -22,7 +22,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from slime.rollout.sample_hooks import get_current_rollout_id
-from slime_plugins.prism.metrics import compute_metrics, path_component
+from slime_plugins.prism.metrics import compute_metrics, path_component, reward_timing_summary
 
 logger = logging.getLogger(__name__)
 INDEX_LOCK = threading.Lock()
@@ -412,6 +412,9 @@ def _summarize(args, rollout_id, samples, *, dataset=None, group_size=None):
             populations[identity] = compute_metrics(subset, group_size or args.n_samples_per_prompt)
         metrics.update({f"{prefix}/{subset_name}/{key}": value for key, value in populations[identity].items()})
     _write_json(destination / f"{name}.metrics.json", metrics)
+    selected_identity = tuple(row["record_id"] for row in selected_rows)
+    if summary := reward_timing_summary(selected_rows, populations[selected_identity]):
+        logger.info("Prism reward timing %s %s: %s", split, name, summary)
     return metrics
 
 

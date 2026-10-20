@@ -44,6 +44,26 @@ def group(offset=0):
     return [Sample(index=offset + i, group_index=offset // 2, prompt="test", metadata={}) for i in range(2)]
 
 
+def test_worker_context_is_available_to_reward_hooks_without_mutating_driver_args(worker_args):
+    worker = execution_pool.GroupWorker(worker_args, 2, worker_index=1, worker_count=8)
+    assert (worker.args.rollout_worker_index, worker.args.rollout_worker_count) == (1, 8)
+    assert worker.args.rollout_execution_workers == 0
+    assert not hasattr(worker_args, "rollout_worker_index")
+    assert not hasattr(worker_args, "rollout_worker_count")
+
+
+def test_distributed_async_reader_exposes_its_actual_worker_context(monkeypatch, worker_args):
+    from slime.rollout import fully_async_distributed
+
+    worker_args.dynamic_sampling_filter_path = None
+    monkeypatch.setattr(fully_async_distributed, "init_http_client", lambda *a, **kw: None)
+    monkeypatch.setattr(fully_async_distributed.logging_utils, "configure_logger", lambda **kw: None)
+    reader = SimpleNamespace(args=worker_args, reader_id="test", open=lambda args: [])
+    worker = fully_async_distributed._GenerationActor(reader, 4, worker_index=2, worker_count=4)
+    assert (worker.args.rollout_worker_index, worker.args.rollout_worker_count) == (2, 4)
+    assert not hasattr(worker_args, "rollout_worker_index")
+
+
 def test_group_execution_preserves_hooks_rewards_and_rollout_boundary(monkeypatch, worker_args):
     seen = []
 

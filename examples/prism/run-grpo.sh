@@ -88,6 +88,10 @@ GRPO_ARGS=(
     --custom-rm-path examples.prism.rewards.base.reward
     --omni-reward-config "${REPO_ROOT}/examples/prism/configs/rewards.yaml"
     # MixRL: choose examples.prism.rewards.reward and provide metadata.reward_category.
+    # Reward workflow and opt-in scorer/filter examples: rewards/README.md.
+    # These filters are disabled by default; pass either option on the command line:
+    # --dynamic-sampling-filter-path examples.prism.rewards.filters.keep_group_with_wer_pass
+    # --rollout-sample-filter-path examples.prism.rewards.filters.mask_high_wer
 )
 
 OPTIMIZER_ARGS=(

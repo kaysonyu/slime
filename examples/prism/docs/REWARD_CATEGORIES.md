@@ -4,10 +4,14 @@ orphan: true
 
 # Prism 样本奖励类别
 
+完整流程与文件入口见[奖励使用指南](../rewards/README.md)。
+本页专门说明组合公式、类别路由和样本输入；组件算法示例见
+[`scorers.py`](../rewards/scorers.py)，训练过滤示例见 [`filters.py`](../rewards/filters.py)。
+
 `examples.prism.rewards.reward` 是 MixRL 的奖励入口。各类别的公式分别放在
 [rewards/](../rewards/) 的独立文件中，`__init__.py` 的 `CATEGORY_REWARDS` 按 `metadata.reward_category` 选择函数。
-`common.py` 复用 `slime_plugins.tts_reward.RewardScorer` 的 WER、SIM、JudgeCLAP 基础评分，
-管理共享缓存、批量调用和结果记录。domain、Prism request 与奖励类别分别保留。
+`common.py` 复用 `slime_plugins.prism.reward_adapter.PrismRewardAdapter` 的 WER、SIM、JudgeCLAP 基础评分，
+复用共享客户端状态，处理批量调用和结果记录。domain、Prism request 与奖励类别分别保留。
 
 | `metadata.reward_category` | 文件 | 当前组合公式 |
 | --- | --- | --- |
@@ -27,6 +31,12 @@ orphan: true
 非线性类别自行决定如何组合分量，`voiceclone_gated` 不使用配置里的线性系数。
 每个类别只调用自己需要的服务；不同类别共享服务的身份查询缓存、并发上限和
 SIM 参考 embedding 缓存。
+
+同一配置文件还支持可选的顶层 `scorers`，按组件指定评分函数路径和 `kwargs`。
+它负责把 ASR 文本或 embedding 转成该组件的 `raw` / `transformed`；未配置的组件
+继续使用默认算法。函数接口和完整示例见
+[自定义组件 scorer](../rewards/README.md#组件评分)。
+服务调用、限流、身份校验和缓存由客户端继续管理；类别函数负责组合这些组件结果。
 
 直接填写 [rewards.yaml](../configs/rewards.yaml) 中的服务地址和认证环境；模板三个系数均为 `1.0`。
 填写模型配置与样例参考音频后，运行：
@@ -52,6 +62,8 @@ bash examples/prism/run-grpo.sh \
 `0.15` 是示例实验阈值；可以直接修改 `MAX_ERROR_RATE`，或增加自己的类别函数。
 门控、乘积、最小值等组合都在评分之后、GRPO 组内归一化之前执行。同一 prompt group
 的所有候选应使用同一类别。全组都未通过门控时，组优势为零。
+门控返回零分的候选仍保留。需要拒绝整个组或屏蔽单条候选的 loss 时，使用
+[原生过滤 hook](../rewards/README.md#过滤)；这两种操作不属于组合公式。
 
 单独使用一种奖励时，直接指定对应函数，例如
 `--custom-rm-path examples.prism.rewards.voiceclone_gated.reward`。固定函数不要求填写 `reward_category`。包级 `reward_base`、`reward_voiceclone`、
@@ -91,7 +103,9 @@ reward.close = reward_states.close
 `aggregate(sample, components)` 是同步函数，返回有限标量。`components` 的每项
 包含 `raw`、`transformed`、`status`、`identity` 和 `details`，所以可以用原始 WER
 作阈值，或读取 `judge_clap.details.attribute_scores` 改变属性间的归约。
-当前变换为：WER/CER `1 / (1 + error_rate)`、SIM 非负 cosine、JudgeCLAP 属性均分。
+默认变换为：WER/CER `1 / (1 + error_rate)`、SIM 非负 cosine、JudgeCLAP 属性均分。
+自定义 scorer 可以改变这些公式；若类别使用原始 WER 阈值或 `attribute_scores`，
+替换 scorer 时应保持对应字段的语义，或同时调整类别公式。
 技术故障由评分客户端抛出；`invalid_audio` 是需要类别处理的明确评分结果。
 
 参见 [mixrl.example.jsonl](../data/mixrl.example.jsonl)，填写实际参考音频路径后作为数据模板使用。
@@ -126,7 +140,7 @@ reward.close = reward_states.close
 ```bash
 "$TRAIN_PYTHON" -m pytest \
   tests/test_prism_reward_categories.py tests/test_prism_reward_composition.py \
-  tests/test_tts_reward_plugin.py tests/test_grouped_rewards.py -q
+  tests/test_audio_reward_clients.py tests/test_grouped_rewards.py -q
 ```
 
 测试使用冻结评分协议的 CPU 替身，覆盖分量选择、混合批次、共享并发上限、配置与

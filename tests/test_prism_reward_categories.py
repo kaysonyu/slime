@@ -15,9 +15,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from examples.prism import rewards
-from test_tts_reward_plugin import Service, config, sample
+from test_audio_reward_clients import Service, config, sample
 
-from slime_plugins import tts_reward
+from slime_plugins.audio_rewards import client as audio_client
 
 NUM_GPUS = 0
 
@@ -25,8 +25,9 @@ NUM_GPUS = 0
 @pytest.fixture
 def service(monkeypatch):
     backend = Service()
-    monkeypatch.setattr(tts_reward, "get", backend.get)
-    monkeypatch.setattr(tts_reward, "post", backend.post)
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "get", staticmethod(backend.get))
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "post", staticmethod(backend.post))
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "post_file", staticmethod(backend.post_file))
     return backend
 
 
@@ -65,6 +66,12 @@ def test_category_selects_only_its_components(tmp_path, service, category, expec
 
 
 def test_shared_example_config_allows_wer_without_other_service_credentials(tmp_path, service, monkeypatch):
+    async def upload(url, **kwargs):
+        service.calls.append(("upload", url, kwargs))
+        assert kwargs["fields"]["model"] == "Qwen3-ASR-1.7B"
+        return {"text": service.text}
+
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "post_file", staticmethod(upload))
     settings = yaml.safe_load((REPO_ROOT / "examples/prism/configs/rewards.yaml").read_text())
     settings["services"]["wer"]["endpoint"] = "http://wer"
     settings["services"]["wer"].pop("auth_token_env")
@@ -189,7 +196,7 @@ def test_selected_reward_inputs_remain_strict(tmp_path, service, category, field
 
 @pytest.mark.parametrize(
     "weight,error",
-    [(0, ValueError), (-1, ValueError), (float("nan"), tts_reward.ScoringError), (True, tts_reward.ScoringError)],
+    [(0, ValueError), (-1, ValueError), (float("nan"), audio_client.ScoringError), (True, audio_client.ScoringError)],
 )
 def test_required_component_cannot_be_disabled_or_have_invalid_weight(tmp_path, service, weight, error):
     args = arguments(wer=1, sim=weight)
@@ -221,23 +228,21 @@ def test_zero_frame_keeps_selected_category_outcomes_without_http(tmp_path, serv
 
 def test_service_concurrency_limit_is_shared_across_categories(tmp_path, service, monkeypatch):
     args = arguments()
-    args.omni_reward_config["services"]["wer"]["max_inflight"] = 1
+    args.omni_reward_config["services"]["wer"]["concurrency"] = 1
     active = maximum = 0
-    original = service.post
+    original = service.post_file
 
-    async def post(url, payload, **kwargs):
+    async def upload(url, **kwargs):
         nonlocal active, maximum
-        if "/wer/" not in url:
-            return await original(url, payload, **kwargs)
         active += 1
         maximum = max(maximum, active)
         try:
             await asyncio.sleep(0.01)
-            return await original(url, payload, **kwargs)
+            return await original(url, **kwargs)
         finally:
             active -= 1
 
-    monkeypatch.setattr(tts_reward, "post", post)
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "post_file", staticmethod(upload))
     items = [categorized_sample(tmp_path, category) for category in ("base", "voiceclone", "instruction")]
     asyncio.run(rewards.reward(args, items))
     assert maximum == 1
@@ -253,14 +258,14 @@ def test_batch_failure_waits_for_other_categories_and_keeps_error_details(tmp_pa
             raise RuntimeError("speaker service unavailable")
         if "/judge_clap/" in url:
             await asyncio.sleep(0.01)
-            finished.append("judge_clap")
+            finished.append(url.rsplit("/", 1)[-1])
         return await original(url, payload, **kwargs)
 
-    monkeypatch.setattr(tts_reward, "post", post)
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "post", staticmethod(post))
     items = [categorized_sample(tmp_path, category) for category in ("voiceclone", "instruction", "base")]
     with pytest.raises(RuntimeError, match="speaker service unavailable"):
         asyncio.run(rewards.reward(arguments(), items))
-    assert finished == ["judge_clap"]
+    assert sorted(finished) == ["embed_audio", "embed_text"]
     assert items[0].metadata["omni_reward"]["status"] == "error"
     assert items[0].metadata["omni_reward"]["category"] == "voiceclone"
     assert "total" not in items[0].metadata["omni_reward"]

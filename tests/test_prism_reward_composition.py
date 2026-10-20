@@ -15,12 +15,13 @@ if str(REPO_ROOT) not in sys.path:
 
 from examples.prism import rewards
 from examples.prism.rewards import common
+from test_audio_reward_clients import Service, config
 from test_grouped_rewards import builder, segment
 from test_prism_reward_categories import categorized_sample
-from test_tts_reward_plugin import Service, config
 
 from slime.utils.misc import load_function
-from slime_plugins import tts_reward
+from slime_plugins.audio_rewards import client as audio_client
+from slime_plugins.prism import reward_adapter
 
 NUM_GPUS = 0
 
@@ -28,8 +29,9 @@ NUM_GPUS = 0
 @pytest.fixture
 def service(monkeypatch):
     backend = Service()
-    monkeypatch.setattr(tts_reward, "get", backend.get)
-    monkeypatch.setattr(tts_reward, "post", backend.post)
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "get", staticmethod(backend.get))
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "post", staticmethod(backend.post))
+    monkeypatch.setattr(audio_client.RewardHTTPClient, "post_file", staticmethod(backend.post_file))
     return backend
 
 
@@ -63,10 +65,10 @@ def test_category_functions_are_direct_single_and_batch_reward_hooks(tmp_path, s
 
 
 def test_component_scorer_exposes_raw_scores_and_attribute_details_without_aggregation(tmp_path, service):
-    scorer = tts_reward.RewardScorer(config(wer=1, sim=1, judge_clap=1)["services"])
+    scorer = reward_adapter.PrismRewardAdapter(config(wer=1, sim=1, judge_clap=1)["services"])
     result = asyncio.run(scorer.score_components(sample(tmp_path, "unused"), ["judge_clap"]))
     assert set(result) == {"judge_clap"}
-    assert result["judge_clap"]["details"]["attribute_scores"] == [0.4, 0.8]
+    assert result["judge_clap"]["details"]["attribute_scores"] == pytest.approx([0.4, 0.8])
     assert {call[1].split("/")[2] for call in service.calls} == {"judge_clap"}
 
 
@@ -141,19 +143,8 @@ def test_immediate_stop_stays_zero_even_for_a_category_with_an_additive_bonus(tm
 def test_gate_changes_ranking_before_native_grpo_and_preserves_mixed_groups(
     tmp_path, service, std, batch_rm, monkeypatch
 ):
-    original = service.post
-
-    async def post(url, payload, **kwargs):
-        candidate = Path(payload["audio"]["path"]).name
-        result = await original(url, payload, **kwargs)
-        if "/wer/" in url:
-            result["result"]["text"] = "你好，世。" if candidate == "a.wav" else "你好，世界！"
-        elif "/sim/" in url and not payload["request_id"].endswith("reference"):
-            cosine = 0.99 if candidate == "a.wav" else 0.7
-            result["result"]["embedding"] = [cosine, math.sqrt(1 - cosine**2)]
-        return result
-
-    monkeypatch.setattr(tts_reward, "post", post)
+    service.texts_by_file = {"a.wav": "你好，世。", "b.wav": "你好，世界！"}
+    service.vectors_by_file = {"a.wav": [0.99, math.sqrt(1 - 0.99**2)], "b.wav": [0.7, math.sqrt(1 - 0.7**2)]}
     args = arguments()
     args.custom_rm_path = "examples.prism.rewards.reward"
     items = [

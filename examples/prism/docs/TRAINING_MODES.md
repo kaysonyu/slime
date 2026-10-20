@@ -221,5 +221,5 @@ CPU 协议替身验证不替代 GPU 训练验收：
 ```bash
 python -m pytest tests/test_prism_experiment_artifacts.py \
   tests/test_prism_reward_categories.py tests/test_prism_reward_composition.py \
-  tests/test_tts_reward_plugin.py tests/test_omni_rollout_plugin.py -q
+  tests/test_audio_reward_clients.py tests/test_omni_rollout_plugin.py -q
 ```

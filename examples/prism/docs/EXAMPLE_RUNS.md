@@ -50,7 +50,9 @@ bash examples/prism/run-grpo.sh "${COMMON_ARGS[@]}" \
   --omni-reward-config "$PWD/examples/prism/configs/rewards.yaml"
 ```
 
-奖励公式见 [rewards/](../rewards/)，各类别共享学生、optimizer 和 checkpoint。此入口仍使用 GRPO 的候选分组。
+奖励调用、组件算法、组合与过滤的完整入口见 [rewards/README.md](../rewards/README.md)。
+上面的命令默认不启用过滤；[完整流程示例](../rewards/README.md#完整训练示例) 展示两个原生过滤 hook。
+各类别共享学生、optimizer 和 checkpoint。此入口仍使用 GRPO 的候选分组。
 
 ## MoPD：冻结教师动作评分
 

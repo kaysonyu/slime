@@ -429,9 +429,6 @@ def _write_audio(response, args, sample, config, required, *, evaluation=False):
     else:
         output = directory / f"sample-{sample.index}-{uuid.uuid4().hex}.wav"
     if audio.get("data") is not None:
-        limit = int(getattr(args, "omni_max_audio_bytes", 64 * 1024 * 1024))
-        if len(audio["data"]) > (limit + 2) // 3 * 4:
-            raise ValueError("Omni waveform exceeds the configured byte budget")
         data = base64.b64decode(audio["data"], validate=True)
     elif audio.get("path") is not None:
         data = Path(audio["path"]).read_bytes()

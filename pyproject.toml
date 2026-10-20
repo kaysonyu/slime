@@ -24,6 +24,7 @@ line_length = 119
 
 [tool.ruff]
 line-length = 320  # TODO
+extend-exclude = ["slime_plugins/audio_rewards/serving/vendor"]
 
 [tool.ruff.lint]
 select = [
