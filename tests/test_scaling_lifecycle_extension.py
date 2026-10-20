@@ -38,6 +38,13 @@ def test_lifecycle_recipe_preserves_periodic_and_resume_saving(tmp_path):
     assert resume["save"] and resume["save_interval"] == 10000
 
 
+def test_topology_cache_is_an_explicit_case_opt_in(tmp_path):
+    base = dict(name="short", router_python="/pinned/router", router_policy="round_robin")
+    assert "cache_weight_topology" not in recipe_for(tmp_path, base)
+    assert "cache_weight_topology" not in recipe_for(tmp_path, dict(base, cache_weight_topology=False))
+    assert recipe_for(tmp_path, dict(base, cache_weight_topology=True))["cache_weight_topology"] is True
+
+
 def test_controller_requires_unadmitted_original_parent(tmp_path):
     write_json(tmp_path / "services/request.json", {"case": "held"})
     write_json(tmp_path / "runs/held/prepared.json", {})

@@ -196,6 +196,16 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             )
             # Delta weight sync.
             parser.add_argument(
+                "--cache-weight-topology",
+                action="store_true",
+                default=False,
+                help=(
+                    "Experimental: reuse unchanged engine actor handles between weight publications. "
+                    "Refreshes topology at every engine recovery boundary; external serving without "
+                    "fault tolerance keeps the original live-fetch path."
+                ),
+            )
+            parser.add_argument(
                 "--update-weight-mode",
                 choices=["full", "delta"],
                 default="full",

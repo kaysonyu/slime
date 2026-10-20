@@ -34,6 +34,7 @@ def test_weight_update_preserves_connections_or_recovers_missing_engine(monkeypa
     from slime.ray.serving import ServingCluster
 
     manager = object.__new__(rollout.RolloutManager.__ray_metadata__.modified_class)
+    manager.args = SimpleNamespace(cache_weight_topology=False)
     manager.rollout_id = previous_rollout
     manager.servers = {}
     calls = []
@@ -376,7 +377,9 @@ def test_synchronous_rollout_stores_during_generation_and_preserves_legacy_hook(
     args.rollout_all_samples_process_path = "test.all_samples" if all_samples_hook else None
     saved = []
     hook_calls = []
-    state = SimpleNamespace(remaining_batch_size=0, pendings=set(), completed=asyncio.Queue(), reset=lambda: None)
+    state = SimpleNamespace(
+        remaining_batch_size=0, pendings=set(), completed=asyncio.Queue(), reset=lambda: None, teacher_runtime=None
+    )
     state.next_completed = sr.GenerateState.next_completed.__get__(state)
 
     async def exercise():

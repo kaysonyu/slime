@@ -32,7 +32,7 @@ def require_held(root, plan):
 def recipe_for(root, case):
     run = root / "runs" / case["name"]
     checkpoint = bool(case.get("choose_best") or case.get("resume"))
-    return {
+    recipe = {
         "save": str(run / "checkpoint") if checkpoint else None,
         "save_interval": case.get("save_interval", 10000) if checkpoint else None,
         "prism_artifact_dir": str(run / "experiment"),
@@ -43,6 +43,9 @@ def recipe_for(root, case):
         "omni_python": case["router_python"],
         "omni_router_policy": case["router_policy"],
     }
+    if case.get("cache_weight_topology", False):
+        recipe["cache_weight_topology"] = True
+    return recipe
 
 
 def audit_cleanup(root, case, script, output):
@@ -93,6 +96,8 @@ def run(root, rank, plan):
                 for key in ("gpus", "batch", "workers", "concurrency", "asr_replicas", "asr_inflight"):
                     if case[key] != config[key]:
                         raise RuntimeError(f"Confirmation workload differs: {key}")
+                if case.get("cache_weight_topology", False) != config.get("cache_weight_topology", False):
+                    raise RuntimeError("Confirmation workload differs: cache_weight_topology")
             atomic_json(output / "case.json", case)
             atomic_json(output / "recipe.json", recipe_for(root, case))
             atomic_json(
