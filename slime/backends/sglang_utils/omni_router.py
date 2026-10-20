@@ -17,7 +17,7 @@ from pathlib import Path
 import httpx
 
 
-def install_transport_error_diagnostics():
+def install_transport_error_diagnostics(*, component="omni_router"):
     """Observe native DP transport failures without retrying or changing pools.
 
     Install only in the standalone data-plane process, before clients exist.
@@ -48,7 +48,8 @@ def install_transport_error_diagnostics():
                 )
                 current = current.__cause__ or current.__context__
             logging.getLogger(__name__).error(
-                "omni_router_transport_failure %s",
+                "%s_transport_failure %s",
+                component,
                 json.dumps(
                     {
                         "time": time.time(),
@@ -68,7 +69,7 @@ def install_transport_error_diagnostics():
     httpx.AsyncClient.send = send
 
 
-def install_active_close_diagnostics():
+def install_active_close_diagnostics(*, component="omni_router"):
     """Record the caller closing an active HTTP/1 stream, without delaying it."""
     from httpcore._async.http11 import AsyncHTTP11Connection, HTTPConnectionState
 
@@ -79,7 +80,8 @@ def install_active_close_diagnostics():
     async def close(connection):
         if connection._state == HTTPConnectionState.ACTIVE:
             logging.getLogger(__name__).error(
-                "omni_router_active_connection_close %s",
+                "%s_active_connection_close %s",
+                component,
                 json.dumps(
                     {
                         "time": time.time(),
@@ -87,6 +89,7 @@ def install_active_close_diagnostics():
                         "host": connection._origin.host.decode("ascii", errors="replace"),
                         "port": connection._origin.port,
                         "request_count": connection._request_count,
+                        "connection_id": id(connection),
                         "frames": [
                             {"file": frame.filename, "line": frame.lineno, "function": frame.name}
                             for frame in traceback.extract_stack(limit=20)

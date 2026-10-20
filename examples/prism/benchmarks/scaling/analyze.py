@@ -228,6 +228,23 @@ def acceptance_status(root, manifest, reports):
     and a verified checkpoint restart.
     """
     required = [case for case in manifest["cases"] if case.get("choose_best") or case.get("resume")]
+    by_name = {case["name"]: case for case in required}
+    superseded = {}
+    for case in required:
+        replacement = case.get("acceptance_superseded_by")
+        if replacement:
+            target = by_name[replacement]
+            if any(case.get(key) != target.get(key) for key in ("gpus", "batch")):
+                raise ValueError("A lifecycle retry cannot change GPU/batch acceptance scope")
+            if target["steps"] < case["steps"] or bool(case.get("resume")) != bool(target.get("resume")):
+                raise ValueError("A short run cannot replace lifecycle acceptance")
+            if target.get("acceptance_superseded_by"):
+                raise ValueError("Use an explicit final replacement, not chained/cyclic acceptance aliases")
+            superseded[case["name"]] = replacement
+    required = [case for case in required if case["name"] not in superseded]
+    for case in required:
+        if case.get("resume") and case["resume"] in superseded:
+            raise ValueError("Resume must reference the actual replacement checkpoint")
     results = {}
     for case in required:
         name = case["name"]
@@ -257,6 +274,7 @@ def acceptance_status(root, manifest, reports):
         "accepted": accepted,
         "status": status,
         "required_cases": results,
+        "superseded_attempts": superseded,
         "scope": "Requires independent confirmation plus checkpoint/optimizer/scheduler restart validation. Platform exit and complete/all_valid matrix fields are not acceptance.",
     }
 
@@ -369,7 +387,7 @@ def analyze(root):
             "caveat": "Descriptive means from separate runs, not statistical significance. Native multiprocess also changes upstream HTTP pool implementation; the first native comparison is not process-count-only.",
         }
     if "target_weak_scaling_efficiency" in manifest:
-        confirmation = root / "runs/128-confirm/case.json"
+        confirmation = root / "runs" / manifest.get("scaling_confirmation_case", "128-confirm") / "case.json"
         selected = json.loads(confirmation.read_text()).get("selected_from") if confirmation.exists() else None
         comparison = aggregate["planned_comparisons"].get(selected, {})
         efficiency = comparison.get("scaling_efficiency")

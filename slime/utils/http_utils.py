@@ -164,6 +164,18 @@ class _ShardedHTTPTransport(httpx.AsyncBaseTransport):
     """
 
     def __init__(self, max_connections: int):
+        # Rollout clients have the same httpcore HTTP/1 assignment/expiry
+        # ownership as the standalone router. Protect both ends; never retry
+        # generation POSTs to hide a transport failure.
+        from slime.backends.sglang_utils.omni_router import (
+            install_active_close_diagnostics,
+            install_reserved_connection_guard,
+            install_transport_error_diagnostics,
+        )
+
+        install_reserved_connection_guard()
+        install_transport_error_diagnostics(component="slime_http_client")
+        install_active_close_diagnostics(component="slime_http_client")
         count = max(1, (max_connections + 31) // 32)
         size, remainder = divmod(max(1, max_connections), count)
         self._pool_sizes = [size + (i < remainder) for i in range(count)]
