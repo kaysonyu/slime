@@ -37,11 +37,17 @@ def summarize_case(run):
             issues.append(message)
 
     receipts = [json.loads(path.read_text()) for path in run.glob("done-*.json")]
-    check(len(receipts) == 8 and all(item["returncode"] == 0 for item in receipts), "node failure/incomplete cleanup")
+    allocated_nodes = case.get("allocated_nodes", 8)
+    check(
+        len(receipts) == allocated_nodes
+        and {item.get("rank") for item in receipts} == set(range(allocated_nodes))
+        and all(item["returncode"] == 0 for item in receipts),
+        "node failure/incomplete cleanup",
+    )
     phases = rows(run / "phases.jsonl")
     check(bool(phases) and all(item["error"] is None for item in phases), "missing/failed driver phases")
     generated = {item["rollout"]: item for item in phases if item["phase"] == "generate"}
-    first_step = 100 if case.get("resume") else 0
+    first_step = case.get("first_step", 100 if case.get("resume") else 0)
     expected = list(range(first_step, case["steps"]))
     check(sorted(generated) == expected, "incomplete generate steps")
     trained = [item for item in phases if item["phase"] == "async_train"]
@@ -260,6 +266,26 @@ def analyze(root):
         "runs": reports,
         "acceptance": acceptance_status(root, manifest, reports),
     }
+    aggregate["planned_comparisons"] = {}
+    for comparison in manifest.get("comparisons", []):
+        controls = [reports.get(name, {}) for name in comparison["controls"]]
+        candidate = reports.get(comparison["candidate"], {})
+        if not all(row.get("valid") and row.get("steady_steps", 0) >= 21 for row in [*controls, candidate]):
+            continue
+        control_seconds = sum(row["step_seconds"] * row["steady_steps"] for row in controls) / sum(
+            row["steady_steps"] for row in controls
+        )
+        speedup = comparison["batch_ratio"] * control_seconds / candidate["step_seconds"]
+        aggregate["planned_comparisons"][comparison["name"]] = {
+            **comparison,
+            "control_seconds": control_seconds,
+            "candidate_seconds": candidate["step_seconds"],
+            "throughput_speedup": speedup,
+            "scaling_efficiency": speedup / comparison["gpu_ratio"],
+            "control_drift_percent": (
+                (controls[-1]["step_seconds"] / controls[0]["step_seconds"] - 1) * 100 if len(controls) > 1 else None
+            ),
+        }
     anchors = [
         reports[name]
         for name in ("32-b2048-a4-w16-start", "32-b2048-a4-w16-end")
@@ -294,6 +320,7 @@ def analyze(root):
             "speedup": a["step_seconds"] / b["step_seconds"],
             "efficiency": a["step_seconds"] / b["step_seconds"] / 2,
         }
+
     def latest_valid_attempt(name):
         family = {name}
         for case in manifest["cases"]:
@@ -334,6 +361,18 @@ def analyze(root):
                 for key, value in a.get("phase_seconds", {}).items()
             },
             "caveat": "Descriptive means from separate runs, not statistical significance. Native multiprocess also changes upstream HTTP pool implementation; the first native comparison is not process-count-only.",
+        }
+    if "target_weak_scaling_efficiency" in manifest:
+        confirmation = root / "runs/128-confirm/case.json"
+        selected = json.loads(confirmation.read_text()).get("selected_from") if confirmation.exists() else None
+        comparison = aggregate["planned_comparisons"].get(selected, {})
+        efficiency = comparison.get("scaling_efficiency")
+        aggregate["scaling_target"] = {
+            "selected_from": selected,
+            "efficiency": efficiency,
+            "required_efficiency": manifest["target_weak_scaling_efficiency"],
+            "met": efficiency is not None and efficiency >= manifest["target_weak_scaling_efficiency"],
+            "scope": "Same-allocation 64/B4096 versus selected 128/B8192 short-run throughput; requires valid pre/post controls, and is separate from long-run/checkpoint acceptance.",
         }
     write_json(root / "analysis/report.json", aggregate)
     table = ["case,valid,updates,steady_steps,step_seconds,p95_seconds,samples_per_second,frames_per_second"]

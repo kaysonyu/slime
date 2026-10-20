@@ -20,7 +20,7 @@ NUM_GPUS = 0
 pytestmark = pytest.mark.unit
 
 
-@pytest.mark.parametrize("processes,updates", [(2, 1), (4, 64)])
+@pytest.mark.parametrize("processes,updates", [(2, 1), (4, 64), (8, 128), (16, 128)])
 def test_native_multiprocess_router_control_forwarding_and_cleanup(tmp_path, processes, updates):
     pytest.importorskip("sglang_omni_router.python.supervisor")
     payload = json.dumps({"echo": "x" * 100000}).encode()

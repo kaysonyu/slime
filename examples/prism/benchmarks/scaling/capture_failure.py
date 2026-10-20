@@ -11,6 +11,38 @@ from pathlib import Path
 from campaign import atomic_json
 
 
+def capture_local_failure(run, rank, started):
+    """Archive only Ray sessions created during this case, before pod release."""
+    output = run / "failure-evidence" / f"node-{rank}"
+    output.mkdir(parents=True, exist_ok=True)
+    sessions = [
+        path
+        for path in Path("/tmp/ray").glob("session_*")
+        if not path.is_symlink() and path.is_dir() and path.stat().st_mtime >= started - 1
+    ]
+    files = []
+    with tarfile.open(output / "ray-logs.tar.gz", "w:gz") as bundle:
+        for session in sessions:
+            for path in sorted((session / "logs").glob("*")):
+                if path.is_file() and not path.is_symlink() and path.suffix in {".out", ".err", ".log"}:
+                    bundle.add(path, arcname=f"{session.name}/{path.name}", recursive=False)
+                    files.append(str(path))
+    atomic_json(
+        output / "receipt.json",
+        {
+            "captured": time.time(),
+            "case_started": started,
+            "rank": rank,
+            "files": files,
+            "cgroup": {
+                name: (Path("/sys/fs/cgroup") / name).read_text()
+                for name in ("memory.events", "memory.peak", "cpu.stat", "cpu.max")
+                if (Path("/sys/fs/cgroup") / name).exists()
+            },
+        },
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
@@ -28,8 +60,8 @@ def main():
     if not args.session.name.startswith("session_") or args.session.name == "session_latest":
         raise ValueError("Invalid session")
     rank = int(os.environ["PET_NODE_RANK"])
-    if os.environ.get("PET_NNODES") != "8" or rank not in range(8):
-        raise RuntimeError("Use the original eight-node allocation")
+    if int(os.environ.get("PET_NNODES", "0")) != manifest["nodes"] or rank not in range(manifest["nodes"]):
+        raise RuntimeError("Use the original campaign allocation")
     node = json.loads((args.root / "platform" / f"node-{rank}.json").read_text())
     output = run / "failure-evidence" / f"node-{rank}"
     output.mkdir(parents=True, exist_ok=False)

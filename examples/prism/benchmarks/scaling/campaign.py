@@ -1,4 +1,4 @@
-"""Run a complete scaling matrix in one eight-node allocation.
+"""Run a complete scaling matrix in one fixed-size allocation.
 
 All allocated nodes join barriers, including idle nodes in the four-node cases.
 A separate CPU watcher applies ASR replica requests and acknowledges readiness.
@@ -35,13 +35,14 @@ def resolve_case(root, candidate):
     case = dict(candidate)
     if case.get("choose_best"):
         eligible = []
-        for summary in (root / "runs").glob("64-b4096-*/summary.json"):
+        pattern = f"{case.get('gpus', 64)}-b{case.get('batch', 4096)}-*/summary.json"
+        for summary in (root / "runs").glob(pattern):
             stats = json.loads(summary.read_text())
             if stats.get("valid") and stats.get("steady_steps", 0) >= 16:
                 config = json.loads((summary.parent / "case.json").read_text())
                 eligible.append((stats["step_seconds"], config))
         if not eligible:
-            raise RuntimeError("No valid B4096 candidate for independent confirmation")
+            raise RuntimeError(f"No valid candidate for independent confirmation: {pattern}")
         _, best = min(eligible, key=lambda pair: pair[0])
         for key in ("asr_replicas", "workers", "concurrency", "asr_inflight"):
             case[key] = best[key]
@@ -53,13 +54,16 @@ def resolve_case(root, candidate):
         verification = parent / "checkpoint-verification.json"
         commit = parent / "checkpoint/rollout" / f"training_commit_{previous['steps'] - 1}.json"
         if not (
-            summary.exists() and json.loads(summary.read_text()).get("valid") is True
-            and verification.exists() and json.loads(verification.read_text()).get("valid") is True
+            summary.exists()
+            and json.loads(summary.read_text()).get("valid") is True
+            and verification.exists()
+            and json.loads(verification.read_text()).get("valid") is True
             and commit.is_file()
         ):
             raise RuntimeError(f"Resume prerequisite failed: {case['resume']} needs valid confirmation and checkpoint")
         for key in ("asr_replicas", "workers", "concurrency", "asr_inflight"):
             case[key] = previous[key]
+        case["first_step"] = previous["steps"]
     return case
 
 
@@ -70,7 +74,10 @@ def finish_campaign(root):
     receipt = {
         "finished": time.time(),
         "acceptance": result["acceptance"],
-        "returncode": 0 if result["acceptance"]["accepted"] else 1,
+        "scaling_target": result.get("scaling_target"),
+        "returncode": (
+            0 if result["acceptance"]["accepted"] and result.get("scaling_target", {}).get("met", True) else 1
+        ),
     }
     atomic_json(root / "campaign-finished.json", receipt)
     return receipt
@@ -206,6 +213,10 @@ def run_node(root, manifest, case, rank, master, address, index):
         finally:
             monitor.terminate()
             monitor.wait(timeout=15)
+    if status:
+        from capture_failure import capture_local_failure
+
+        capture_local_failure(run, rank, started)
     return {"rank": rank, "returncode": status, "participating": True, "started": started, "finished": time.time()}
 
 
@@ -217,8 +228,8 @@ def main():
     manifest = json.loads((root / "manifest.json").read_text())
     rank = int(os.environ.get("PET_NODE_RANK", os.environ.get("RANK", 0)))
     nodes = int(os.environ.get("PET_NNODES", os.environ.get("WORLD_SIZE", 1)))
-    if nodes != 8:
-        raise ValueError(f"Expected eight allocated nodes, got {nodes}")
+    if nodes != manifest["nodes"] or rank not in range(nodes):
+        raise ValueError(f"Expected {manifest['nodes']} allocated nodes, got {nodes}, rank {rank}")
     from ray._private.services import get_node_ip_address
 
     address = get_node_ip_address()
@@ -238,6 +249,7 @@ def main():
         if rank == 0:
             try:
                 case = resolve_case(root, candidate)
+                case["allocated_nodes"] = nodes
                 atomic_json(run / "case.json", case)
                 write_json(
                     run / "rewards.json",
@@ -259,7 +271,9 @@ def main():
                     run / "recipe.json",
                     {
                         "save": str(run / "checkpoint") if case.get("choose_best") or case.get("resume") else None,
-                        "save_interval": 10000 if case.get("choose_best") or case.get("resume") else None,
+                        "save_interval": (
+                            case.get("save_interval", 10000) if case.get("choose_best") or case.get("resume") else None
+                        ),
                         "prism_artifact_dir": str(run / "experiment"),
                         "omni_audio_dir": str(run / "audio"),
                         "rollout_sample_observer_path": ["slime_plugins.prism.artifacts.observe"],
@@ -268,18 +282,30 @@ def main():
                     },
                 )
                 atomic_json(root / "services/request.json", {"case": case["name"], "replicas": case["asr_replicas"]})
+                atomic_json(run / "prepared.json", {"time": time.time()})
             except Exception as error:
                 # A skipped prerequisite is a terminal invalid attempt, not a
                 # missing result or a successful zero-update benchmark.
-                atomic_json(run / "summary.json", {
-                    "case": candidate["name"], "valid": False, "updates": 0,
-                    "steady_steps": 0, "issues": [f"Case preparation failed: {error!r}"],
-                })
+                atomic_json(
+                    run / "summary.json",
+                    {
+                        "case": candidate["name"],
+                        "valid": False,
+                        "updates": 0,
+                        "steady_steps": 0,
+                        "issues": [f"Case preparation failed: {error!r}"],
+                    },
+                )
                 atomic_json(run / "skip.json", {"error": repr(error)})
-        wait_for(lambda: (run / "case.json").exists() or (run / "skip.json").exists(), "Case not prepared")
+        wait_for(lambda: (run / "prepared.json").exists() or (run / "skip.json").exists(), "Case not prepared")
         if (run / "skip.json").exists():
             continue
         case = json.loads((run / "case.json").read_text())
+        if rank == 0 and not (root / "platform/head-process-observer.json").exists():
+            subprocess.run(
+                [sys.executable, str(Path(__file__).with_name("observe_processes.py")), str(root), "--launch"],
+                check=True,
+            )
         wait_for(lambda: (run / "services-ready.json").exists(), f"ASR readiness for {case['name']}", seconds=7200)
         print(json.dumps({"event": "case_start", "case": case["name"], "rank": rank, "time": time.time()}), flush=True)
         receipt = run_node(root, manifest, case, rank, master, address, index)

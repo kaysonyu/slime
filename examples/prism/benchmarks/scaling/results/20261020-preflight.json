@@ -1,0 +1,18 @@
+{
+  "status": "CPU validated; GPU measurements pending",
+  "authorized_scope": "Prism 1.7B v0.4, fullclone_chinese, eight candidates, real Qwen3-ASR WER; at most 128 colocated learner/rollout H200 plus 32 ASR H200",
+  "branch": "perf/prism-grpo-128gpu-20261020",
+  "previous_slime_commit": "da20c7dae84d0ad25d07e6913b5d432fe2bb35af",
+  "omni_admission_fix_commit": "b3f9b9bdd",
+  "runtime_fix": "Only shared admission: bounded asynchronous wait for transient slot reads before request-body consumption or upstream forwarding; retain true-capacity shedding, fencing and cancellation; no retry of upstream generation",
+  "admission_tests": "21 passed, including live-writer recovery, dead-writer deadline, cancellation permit cleanup, capacity and fencing",
+  "router_suite": "457 passed, 1 skipped, 1 deselected after excluding local proxy environment variables. The deselected unrelated realtime route test needs unavailable silero_vad. Initial unfiltered run: 438 passed, 20 failed, 1 skipped due to proxy dependency and optional VAD availability; not described as a clean full-suite run.",
+  "omni_pre_commit": "pre-commit run --all-files passed after formatting two changed files",
+  "slime_campaign_and_router_tests": "44 passed, including real 8- and 16-data-plane HTTP/control-plane tests with 128 worker-update operations and process cleanup",
+  "planned_cases": 13,
+  "comparison": "Same-allocation pre/post 64/B4096 anchors, fixed-B4096 64/128 strong scaling, B8192 ASR16/32, router8/16, worker64/128, generation concurrency and ASR-admission variants",
+  "stability": "Independent 100-update confirmations on both 64 and 128 GPUs, intermediate saves at 25/50/75 plus final100, explicit checkpoint restart through updates100/101 and model/optimizer/scheduler verification",
+  "performance_gate": "Working near-linear target: at least 90% efficiency, equivalent to at least1.8x throughput for B4096 to B8192. Requires valid pre/post controls; separate from stability/checkpoint acceptance.",
+  "lifecycle": "One 16-node GPU Job; 12-hour runtime cap; one-hour failed-container retention; automatic local Ray log/cgroup capture on case failure; CPU-only service and same-thread event watchers",
+  "not_claimed": "No 128-GPU performance, near-linear scaling or GPU stability result exists at preflight time. CPU tests do not replace GPU acceptance."
+}

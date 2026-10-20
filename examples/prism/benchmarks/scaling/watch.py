@@ -90,10 +90,9 @@ def prepare_case_recipe(run):
             source_case = planned
         if selected and manifest_path.exists():
             diagnostic = json.loads(manifest_path.read_text()).get("router_diagnostic_override", {})
-            if (
-                source_case.get("router_processes", 1) > 1
-                and source_case.get("router_source_commit") in diagnostic.get("parent_commits", [])
-            ):
+            if source_case.get("router_processes", 1) > 1 and source_case.get(
+                "router_source_commit"
+            ) in diagnostic.get("parent_commits", []):
                 source_case = dict(source_case)
                 for key in ("router_python", "router_entry_sha256", "router_source_commit"):
                     source_case[key] = diagnostic[key]
@@ -199,7 +198,13 @@ def main():
             serving = cli("serving", "status", service, "--workspace", workspace)
             status = job.get("status", "UNKNOWN")
             atomic_json(root / "platform/monitor-state.json", {"time": time.time(), "job": job, "serving": serving})
-            if status in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+            if (root / "campaign-finished.json").exists() or status in {
+                "SUCCEEDED",
+                "FAILED",
+                "CANCELLED",
+                "SUCCEEDED_RETAINING",
+                "FAILED_RETAINING",
+            }:
                 if serving.get("status") != "STOPPED":
                     cli("serving", "stop", service, "--workspace", workspace)
                 from analyze import analyze
@@ -228,7 +233,7 @@ def main():
                         prepare_case_recipe(root / "runs" / request["case"])
                         snapshot_service_telemetry(root, manifest, request["case"])
                         replicas = request["replicas"]
-                        if replicas not in {4, 8, 16}:
+                        if replicas not in manifest.get("approved_asr_replicas", [4, 8, 16]):
                             raise ValueError("ASR request exceeds approved matrix")
                         if serving.get("status") != "RUNNING":
                             time.sleep(args.interval)

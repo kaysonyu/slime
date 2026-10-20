@@ -17,6 +17,7 @@ from diagnose import gpu_profile
 from observe_processes import role
 from profile_router import select_router
 from prepare import convert_prompt, write_json
+from prepare128 import matrix
 import router_python
 import router_extension
 from watch import admission_held, prepare_case_recipe, snapshot_service_telemetry
@@ -215,12 +216,17 @@ def test_confirmation_and_resume_inherit_selected_pinned_router(tmp_path, diagno
         write_json(entry, {"router": "error-only diagnostics"})
         expected_adapter = tmp_path / "diagnostic/examples/prism/benchmarks/scaling/router_python.py"
         expected_commit = "diagnostic-commit"
-        write_json(tmp_path / "manifest.json", {"router_diagnostic_override": {
-            "parent_commits": ["commit"],
-            "router_python": str(expected_adapter),
-            "router_source_commit": expected_commit,
-            "router_entry_sha256": hashlib.sha256(entry.read_bytes()).hexdigest(),
-        }})
+        write_json(
+            tmp_path / "manifest.json",
+            {
+                "router_diagnostic_override": {
+                    "parent_commits": ["commit"],
+                    "router_python": str(expected_adapter),
+                    "router_source_commit": expected_commit,
+                    "router_entry_sha256": hashlib.sha256(entry.read_bytes()).hexdigest(),
+                }
+            },
+        )
     for name, link in (("confirm", {"selected_from": "candidate"}), ("resume", {"resume": "confirm"})):
         run = tmp_path / "runs" / name
         write_json(run / "case.json", link)
@@ -399,7 +405,61 @@ def test_confirmation_selects_only_complete_valid_cases(tmp_path):
     assert chosen["steps"] == 100
 
 
-@pytest.mark.parametrize("missing", ["summary", "verification", "commit", "invalid_summary", "invalid_verification", None])
+def test_128_matrix_resource_bounds_and_matched_controls():
+    cases = matrix()
+    assert len(cases) == 13 and len({case["name"] for case in cases}) == 13
+    assert max(case["gpus"] for case in cases) == 128
+    assert max(case["asr_replicas"] for case in cases) == 32
+    assert all(case["gpus"] % 8 == 0 and case["batch"] % case["gpus"] == 0 for case in cases)
+    start, end = cases[0], cases[8]
+    assert {key: value for key, value in start.items() if key != "name"} == {
+        key: value for key, value in end.items() if key != "name"
+    }
+    assert [case["steps"] for case in cases if case.get("choose_best")] == [100, 100]
+    assert [case["save_interval"] for case in cases if case.get("choose_best")] == [25, 25]
+
+
+def test_128_confirmation_does_not_select_fast_64_or_B4096_candidate(tmp_path):
+    for name, seconds in (("64-b4096-fast", 1), ("128-b4096-fast", 2), ("128-b8192-valid", 17)):
+        run = tmp_path / "runs" / name
+        write_json(run / "summary.json", dict(valid=True, steady_steps=21, step_seconds=seconds))
+        write_json(run / "case.json", dict(name=name, asr_replicas=32, workers=64, concurrency=16, asr_inflight=4))
+    result = resolve_case(tmp_path, dict(name="128-confirm", gpus=128, batch=8192, choose_best=True, steps=100))
+    assert result["selected_from"] == "128-b8192-valid"
+
+
+def test_summary_accepts_sixteen_node_receipts_without_hiding_missing_rank(tmp_path):
+    write_json(tmp_path / "case.json", dict(name="128-case", allocated_nodes=16, steps=1, gpus=128, batch=8192))
+    for rank in range(16):
+        write_json(tmp_path / f"done-{rank}.json", dict(rank=rank, returncode=0))
+    assert "node failure/incomplete cleanup" not in summarize_case(tmp_path)["issues"]
+    write_json(tmp_path / "done-15.json", dict(rank=14, returncode=0))
+    assert "node failure/incomplete cleanup" in summarize_case(tmp_path)["issues"]
+
+
+def test_128_scaling_target_uses_valid_paired_controls(tmp_path):
+    names = ["control-start", "control-end", "128-b8192-measured"]
+    manifest = dict(
+        cases=[dict(name=name) for name in names],
+        target_weak_scaling_efficiency=0.9,
+        comparisons=[dict(name=names[2], controls=names[:2], candidate=names[2], batch_ratio=2, gpu_ratio=2)],
+    )
+    write_json(tmp_path / "manifest.json", manifest)
+    write_json(tmp_path / "runs/128-confirm/case.json", dict(selected_from=names[2]))
+    for name, seconds in zip(names, [15, 17, 17], strict=True):
+        write_json(
+            tmp_path / "runs" / name / "summary.json",
+            dict(case=name, valid=True, steady_steps=21, step_seconds=seconds),
+        )
+    report = analyze(tmp_path)
+    assert report["scaling_target"]["met"] and report["scaling_target"]["efficiency"] == 16 / 17
+    write_json(tmp_path / "runs/control-start/summary.json", dict(case="control-start", valid=False))
+    assert not analyze(tmp_path)["scaling_target"]["met"]
+
+
+@pytest.mark.parametrize(
+    "missing", ["summary", "verification", "commit", "invalid_summary", "invalid_verification", None]
+)
 def test_resume_requires_successful_parent_and_verified_checkpoint(tmp_path, missing):
     parent = tmp_path / "runs/confirm"
     previous = dict(steps=100, asr_replicas=16, workers=32, concurrency=16, asr_inflight=4)
@@ -420,8 +480,11 @@ def test_resume_requires_successful_parent_and_verified_checkpoint(tmp_path, mis
 
 
 def test_campaign_acceptance_rejects_short_success_and_failed_confirmation(tmp_path):
-    cases = [dict(name="short"), dict(name="confirm", choose_best=True, steps=100),
-             dict(name="resume", resume="confirm", steps=102)]
+    cases = [
+        dict(name="short"),
+        dict(name="confirm", choose_best=True, steps=100),
+        dict(name="resume", resume="confirm", steps=102),
+    ]
     manifest = {"cases": cases}
     reports = {"short": {"valid": True}}
     assert acceptance_status(tmp_path, manifest, reports)["status"] == "pending"
@@ -434,11 +497,17 @@ def test_campaign_acceptance_rejects_short_success_and_failed_confirmation(tmp_p
 
 
 def test_campaign_final_receipt_fails_closed_then_accepts_verified_restart_despite_historical_failure(tmp_path):
-    cases = [dict(name="exploration"), dict(name="confirm", choose_best=True, steps=100),
-             dict(name="resume", resume="confirm", steps=102)]
+    cases = [
+        dict(name="exploration"),
+        dict(name="confirm", choose_best=True, steps=100),
+        dict(name="resume", resume="confirm", steps=102),
+    ]
     write_json(tmp_path / "manifest.json", {"cases": cases})
     for case in cases:
-        write_json(tmp_path / "runs" / case["name"] / "summary.json", {"case": case["name"], "valid": case["name"] != "exploration"})
+        write_json(
+            tmp_path / "runs" / case["name"] / "summary.json",
+            {"case": case["name"], "valid": case["name"] != "exploration"},
+        )
     assert finish_campaign(tmp_path)["returncode"] == 1  # A 'valid' summary alone is insufficient.
     for case in cases[1:]:
         run = tmp_path / "runs" / case["name"]
