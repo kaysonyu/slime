@@ -350,14 +350,18 @@ def test_extension_hold_releases_only_after_all_helpers_finished(tmp_path):
 
 
 @pytest.mark.parametrize("router", [True, False])
-def test_router_adapter_preserves_engine_arguments_and_pins_only_router(tmp_path, monkeypatch, router):
+@pytest.mark.parametrize("replacement", [True, False])
+def test_router_adapter_preserves_engine_arguments_and_pins_only_router(tmp_path, monkeypatch, router, replacement):
     run = tmp_path / "runs/case"
     source = tmp_path / "original"
     write_json(tmp_path / "manifest.json", {"source": str(source)})
-    write_json(run / "case.json", {"router_processes": 4, "router_policy": "round_robin"})
+    runtime = tmp_path / "replacement" if replacement else source
+    write_json(run / "case.json", {
+        "router_processes": 4, "router_policy": "round_robin", "runtime_source": str(runtime),
+    })
     monkeypatch.setenv("PRISM_SCALE_RUN", str(run))
     arguments = (
-        [str(source / "slime/backends/sglang_utils/omni_router.py"), json.dumps([{"policy": "least_request"}, False])]
+        [str(runtime / "slime/backends/sglang_utils/omni_router.py"), json.dumps([{"policy": "least_request"}, False])]
         if router
         else ["-m", "sglang_omni.cli", "serve", "--config", "same-config"]
     )
@@ -372,8 +376,24 @@ def test_router_adapter_preserves_engine_arguments_and_pins_only_router(tmp_path
         assert config["router_processes"] == 4
         assert config["policy"] == "round_robin"
         assert disabled is False
+        receipt = json.loads((run / "router-launch.json").read_text())
+        assert receipt["incoming_entry"] == arguments[0]
+        assert receipt["router_processes"] == 4
+        assert receipt["entry"] == command[1]
     else:
         assert command[1:] == arguments
+        assert not (run / "router-launch.json").exists()
+
+
+def test_router_adapter_rejects_unrecognized_router_source(tmp_path, monkeypatch):
+    run = tmp_path / "runs/case"
+    write_json(tmp_path / "manifest.json", {"source": "/original"})
+    write_json(run / "case.json", {"router_processes": 8, "router_policy": "round_robin"})
+    monkeypatch.setenv("PRISM_SCALE_RUN", str(run))
+    monkeypatch.setattr(router_python.sys, "argv", ["adapter", "/unexpected/omni_router.py", "[{}, false]"])
+    monkeypatch.setattr(router_python.os, "execv", lambda *args: pytest.fail("Unexpected exec"))
+    with pytest.raises(RuntimeError, match="Unrecognized router source"):
+        router_python.main()
 
 
 @pytest.mark.parametrize("diagnostic", [False, True])

@@ -124,10 +124,23 @@ def run(root, rank, plan):
         wait_for(lambda: (output / "prepared.json").exists(), "Recovery case prepared", 180)
         case = json.loads((output / "case.json").read_text())
         wait_for(lambda: (output / "services-ready.json").exists(), "Recovery ASR ready", 3600)
+        topology = None
+        if rank == 0 and case.get("require_router_topology"):
+            with (output / "router-topology.log").open("w") as log:
+                topology = subprocess.Popen(
+                    [sys.executable, str(control_scripts / "verify_router_topology.py"), str(output)],
+                    stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                )
         try:
             receipt = run_node(root, runtime, case, rank, master, address, index)
         except Exception as error:
             receipt = {"rank": rank, "returncode": 1, "error": repr(error)}
+        if topology is not None:
+            if topology.poll() is None:
+                topology.terminate()
+            code = topology.wait(timeout=10)
+            if code != 0:
+                receipt.update(returncode=1, topology_verification_returncode=code)
         atomic_json(output / f"done-{rank}.json", receipt)
         wait_for(lambda: all((output / f"done-{i}.json").exists() for i in range(nodes)), "Recovery done", 6000)
         if rank == 0:

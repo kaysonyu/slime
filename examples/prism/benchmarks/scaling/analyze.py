@@ -41,6 +41,18 @@ def summarize_case(run):
     if exclusion is not None:
         check(False, f"Measurement excluded: {exclusion['reason']}")
 
+    if case.get("require_router_topology"):
+        topology_path = run / "router-topology.json"
+        topology = json.loads(topology_path.read_text()) if topology_path.exists() else {}
+        count = case["router_processes"]
+        check(
+            topology.get("valid") is True
+            and topology.get("expected_data_planes") == (count if count > 1 else 0)
+            and len(topology.get("data_plane_pids", [])) == (count if count > 1 else 0)
+            and len(topology.get("control_plane_pids", [])) == (1 if count > 1 else 0),
+            "missing/mismatched actual router process topology",
+        )
+
     receipts = [json.loads(path.read_text()) for path in run.glob("done-*.json")]
     allocated_nodes = case.get("allocated_nodes", 8)
     check(
