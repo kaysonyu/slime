@@ -1,5 +1,5 @@
-import sys
 import platform
+import sys
 
 from setuptools import find_packages, setup
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
@@ -36,12 +36,13 @@ setup(
     packages=find_packages(include=["slime*", "slime_plugins*"]),
     include_package_data=True,
     package_data={
+        "slime_plugins.audio_rewards": ["prosody_stats.json", "PROSODY_SOURCES.md"],
         "slime_plugins.audio_rewards.serving.vendor": ["SOURCES.md"],
         "slime_plugins.audio_rewards.serving.vendor.judge_clap": ["categories.json"],
         "slime_plugins.audio_rewards.serving.vendor.redimnet2": ["LICENSE", "LICENSE-APACHE-2.0"],
     },
     install_requires=_fetch_requirements("requirements.txt"),
-    extras_require={},
+    extras_require={"prosody": ["numpy", "scipy", "librosa>=0.10", "soundfile", "av", "threadpoolctl>=3.1"]},
     python_requires=">=3.10",
     classifiers=[
         "Programming Language :: Python :: 3.10",

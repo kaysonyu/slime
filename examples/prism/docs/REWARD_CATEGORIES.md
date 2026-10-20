@@ -10,13 +10,13 @@ orphan: true
 
 `examples.prism.rewards.reward` 是 MixRL 的奖励入口。各类别的公式分别放在
 [rewards/](../rewards/) 的独立文件中，`__init__.py` 的 `CATEGORY_REWARDS` 按 `metadata.reward_category` 选择函数。
-`common.py` 复用 `slime_plugins.prism.reward_adapter.PrismRewardAdapter` 的 WER、SIM、JudgeCLAP 基础评分，
+`common.py` 复用 `slime_plugins.prism.reward_adapter.PrismRewardAdapter` 的 WER、SIM、口音复用、韵律及 JudgeCLAP 基础评分，
 复用共享客户端状态，处理批量调用和结果记录。domain、Prism request 与奖励类别分别保留。
 
 | `metadata.reward_category` | 文件 | 当前组合公式 |
 | --- | --- | --- |
 | `base` | [`base.py`](../rewards/base.py) | 加权 WER/CER reward |
-| `voiceclone` | [`voiceclone.py`](../rewards/voiceclone.py) | WER/CER reward 与 SIM 加权和 |
+| `voiceclone` | [`voiceclone.py`](../rewards/voiceclone.py) | WER/CER、SIM 与非 none 的 accent / prosody 加权和；emotion 暂不计入 |
 | `instruction` | [`instruction.py`](../rewards/instruction.py) | WER/CER reward 与 JudgeCLAP 加权和 |
 | `voiceclone_gated` | [`voiceclone_gated.py`](../rewards/voiceclone_gated.py) | 原始 WER/CER ≤ 0.15 时取 SIM，否则 0 |
 
@@ -38,7 +38,7 @@ SIM 参考 embedding 缓存。
 [自定义组件 scorer](../rewards/README.md#组件评分)。
 服务调用、限流、身份校验和缓存由客户端继续管理；类别函数负责组合这些组件结果。
 
-直接填写 [rewards.yaml](../configs/rewards.yaml) 中的服务地址和认证环境；模板三个系数均为 `1.0`。
+直接填写 [rewards.yaml](../configs/rewards.yaml) 中的服务地址和认证环境；模板五个系数均为 `1.0`，其中 accent / prosody 仅在参考属性启用时生效。
 填写模型配置与样例参考音频后，运行：
 
 ```bash
@@ -52,8 +52,9 @@ bash examples/prism/run-grpo.sh \
   --custom-rm-path examples.prism.rewards.reward
 ```
 
-此时三类分别得到 `WER_reward`、`WER_reward + SIM_reward`、
-`WER_reward + JudgeCLAP_reward`。WER/CER 分量沿用 `1 / (1 + error_rate)`；SIM
+仅绑定音色参考时，三类分别得到 `WER_reward`、`WER_reward + SIM_reward`、
+`WER_reward + JudgeCLAP_reward`。绑定口音、韵律时，voiceclone 还会加入对应分量；
+公式、参考槽位规则、依赖安装及旧配置迁移见[参考声音属性](../rewards/README.md#参考声音属性)。WER/CER 分量沿用 `1 / (1 + error_rate)`；SIM
 沿用非负 cosine similarity；JudgeCLAP 沿用全局属性分数平均。修改 `weights` 可以
 调整这三个类别的分量系数，但其要求的分量不能通过零权重关闭。reward 总和不再额外归一化，
 后续组优势仍由原 GRPO 流程计算。
@@ -115,7 +116,8 @@ reward.close = reward_states.close
 
 - `base`：需要 `metadata.transcript_target` 和 `metadata.language`，不需要 SIM 参考或 JudgeCLAP 属性。
 - `voiceclone`：还需要有效的音色参考。示例在 `metadata.omni_prompt` 填写
-  `references.audio1` 与 `reference_attributes.timbre="audio1"`。
+  `references.audio1` 与 `reference_attributes.timbre="audio1"`。非 none 的口音复用音色分数，
+  非 none 的韵律按自己的参考槽位比较；emotion 不参与计算。
 - `instruction`：还需要可被 JudgeCLAP 评分的全局属性对象；`Language` 不参与评分，
   当前服务未支持的音乐属性（如 `Genre`）会报错。该类别不会调用 SIM。
 

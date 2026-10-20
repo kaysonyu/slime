@@ -12,7 +12,9 @@ Container launch scripts, runtime preparation and benchmark recipes are document
 in [reward_services/README.md](../reward_services/README.md).
 
 - Qwen3-ASR and Whisper use native vLLM OpenAI audio transcription endpoints.
-- ReDimNet2 returns unit speaker embeddings for local cosine rewards.
+- ReDimNet2 returns unit speaker embeddings for local cosine rewards; accent reuses the timbre score.
+- Prosody uses frozen local CPU features and zh/en statistics, with no remote endpoint.
+  Install and configure it through the [reference attribute guide](../rewards/README.md#参考声音属性).
 - JudgeCLAP returns unnormalized audio/text embeddings for the checkpoint's
   calibrated margin reward, with 27 instruction categories and no Loudness.
 - The [shared configuration](../configs/rewards.yaml) selects native ASR and
@@ -51,14 +53,18 @@ TensorBoard/W&B 和 `records/train/rollout_*.metrics.json` 中。
 | `component/<name>/timing/last_completed` | 该组件是否包含本批选中样本中最后完成的评分请求，取值 0/1。 |
 | `component/<name>/timing/finish_gap_s` | 该组件最后一次完成，比本批最后一次评分完成早多少秒。 |
 
-`<name>` 是 `wer`、`sim` 或 `judge_clap`；WER 的实际模型由服务配置决定。
+`<name>` 是 `wer`、`sim`、`prosody` 或 `judge_clap`；WER 的实际模型由服务配置决定。
+韵律的 `prepare_s` 包含子进程特征提取与 IPC，`client_queue_s` 为进程池或参考读取名额排队时间，
+`cache_wait_s` 为共享参考特征首次提取的等待时间；
+口音复用 SIM 分数，不重复记录服务耗时。`component/prosody/group/<group>/mean`
+报告 f0、energy、rate、pause 四组距离，越小越接近参考。
 其他字段包括 `prepare_s`（文件读取/上传编码）、`identity_wait_s`、
 `identity_http_s`（首次身份查询）、`cache_lookup_s`（文件摘要/SQLite 查询）、
 缓存命中/缺失数、错误与取消比例。失败或超时也保留耗时，零帧跳过和没有计时的旧记录
 不会被填成零延迟拉低组件统计。`http_requests` 统计逻辑 HTTP 调用，不拆分底层重试次数。
 
 同一组件内部的候选/参考音频、音频/文本可并发，阶段耗时是各操作耗时之和，
-不能相加当作组件墙钟时间；应以 `total_s` 为准。三个组件也并发，联合评分
+不能相加当作组件墙钟时间；应以 `total_s` 为准。所选组件也并发，联合评分
 通常等待最晚完成者。`sample_tail_s` 只表示同一样本最后一个组件比倒数第二个
 多等了多久，不等于删除该组件后的训练提速。跨 worker 的最后完成顺序使用系统
 时间戳，依赖节点时钟同步；时长本身使用单调时钟。

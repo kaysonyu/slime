@@ -129,7 +129,21 @@ def default_judge_clap(*, audio, texts, queries, identity):
     }
 
 
-_DEFAULT_SCORERS = {"wer": default_wer, "sim": default_sim, "judge_clap": default_judge_clap}
+def default_prosody(*, distance, groups, identity):
+    """Keep the benchmark distance and map it monotonically to a [0, 1] reward."""
+    return {
+        "raw": distance,
+        "transformed": 1 / (1 + distance),
+        "details": {"groups": groups, "reward_transform": "inverse_distance"},
+    }
+
+
+_DEFAULT_SCORERS = {
+    "wer": default_wer,
+    "sim": default_sim,
+    "judge_clap": default_judge_clap,
+    "prosody": default_prosody,
+}
 
 
 class ComponentScorers:
@@ -139,7 +153,7 @@ class ComponentScorers:
         if config is None:
             config = {}
         if not isinstance(config, Mapping) or set(config) - _DEFAULT_SCORERS.keys():
-            raise ValueError("scorers must map wer, sim, and judge_clap to path/kwargs objects")
+            raise ValueError("scorers must map wer, sim, judge_clap, and prosody to path/kwargs objects")
         self._custom = {}
         for name, options in config.items():
             if not isinstance(options, Mapping) or "path" not in options or set(options) - {"path", "kwargs"}:

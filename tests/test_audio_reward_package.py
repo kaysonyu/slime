@@ -108,6 +108,9 @@ def test_wheel_contains_model_definitions_and_resources(installed_package):
             assert (target / "site" / prefix / name).is_file()
         categories = json.loads(archive.read(names[prefix + "judge_clap/categories.json"]))
         assert len(categories) == 27 and "Loudness" not in categories
+        stats_path = "slime_plugins/audio_rewards/prosody_stats.json"
+        assert set(json.loads(archive.read(names[stats_path]))) == {"zh", "en"}
+        assert (target / "site" / stats_path).is_file()
 
 
 def test_installed_serving_cli_does_not_need_examples_checkout(installed_package):

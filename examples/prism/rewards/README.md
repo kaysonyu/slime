@@ -7,6 +7,8 @@
 flowchart LR
     A["生成音频与样本 metadata"] --> B["PrismRewardAdapter 提取输入"]
     B --> C["AudioRewardClient 调用服务并复用缓存"]
+    B --> P["ProsodyScorer 在 CPU 提取参考和候选特征"]
+    P --> D
     C --> D["Scorer 计算组件 raw / transformed"]
     D --> E["类别 reward 组合最终分数"]
     E --> F["整组动态过滤"]
@@ -25,6 +27,7 @@ flowchart LR
 | 服务 URL、认证、并发、请求超时 | [`configs/rewards.yaml`](../configs/rewards.yaml) 的 `services` | `--omni-reward-config` |
 | HTTP 调用、协议与客户端生命周期 | [`client.py`](../../../slime_plugins/audio_rewards/client.py) 的 `ServiceClient`、[`transport.py`](../../../slime_plugins/audio_rewards/transport.py) | 通常通过 `AudioRewardClient` 使用 |
 | 组件请求编排、参考/文本缓存 | 同一 `client.py` 的 `AudioRewardClient` | `wer()`、`sim()`、`judge_clap()` |
+| 韵律特征、距离与参考特征缓存 | [`prosody.py`](../../../slime_plugins/audio_rewards/prosody.py) | 顶层 `prosody.processes` 控制每个 rollout worker 的 CPU 子进程数 |
 | 默认组件数学、自定义函数加载 | [`scoring.py`](../../../slime_plugins/audio_rewards/scoring.py) | YAML 的 `scorers.<组件名>.path/kwargs` |
 | 自定义组件算法示例 | [`scorers.py`](scorers.py) | 直接填写示例函数路径，或复制后修改 |
 | Prism 音频路径、目标文本、参考绑定、指令展开 | [`reward_adapter.py`](../../../slime_plugins/prism/reward_adapter.py) | 类别 hook 自动调用 |
@@ -93,6 +96,8 @@ asyncio.run(main())
 | --- | --- | --- |
 | `wer` | WER/CER / `1 / (1 + error_rate)` | `scorers.exponential_wer`：保留原始错误率，奖励改为 `exp(-alpha * error_rate)` |
 | `sim` | 单位向量 cosine / `max(0, cosine)` | 可复用通用模块的 `default_sim` 编写自己的变换 |
+| `accent` | 直接复用 `sim` 的 raw / transformed | 与音色参考相同时有效，无额外模型调用；随自定义 SIM scorer 一起改变 |
+| `prosody` | 18 维特征的分组距离 / `1 / (1 + distance)` | 可复用 `default_prosody` 改变奖励变换 |
 | `judge_clap` | checkpoint 校准属性概率的均值 / 同一均值 | `scorers.minimum_judge_clap`：两项均取属性概率最小值，保留每个属性的分数 |
 
 要启用示例，在原来的 YAML 中增加顶层 `scorers`：
@@ -117,6 +122,7 @@ scorers:
 | --- | --- |
 | `wer` | `reference` 目标文本、`hypothesis` 转写文本、`language`、`identity` |
 | `sim` | `candidate` 和 `reference` 单位向量 tuple、`identity` |
+| `prosody` | `distance` 原始距离、`groups` 四组距离、`identity` 特征版本及统计文件摘要 |
 | `judge_clap` | `audio` 向量、按顺序排列的 `texts` 向量、对应的原子 `queries`、`identity` |
 
 `identity` 提供模型、embedding 版本及校准等服务信息。统一返回：
@@ -127,7 +133,7 @@ scorers:
 
 `details` 可省略。两个分数必须是有限 Python 数值，不能是布尔值；runner 不裁剪分数。
 kwargs 和 details 必须可序列化成包含有限数值的 JSON。通用模块的 `default_wer`、
-`default_sim`、`default_judge_clap` 提供相同关键字接口，便于复用默认计算。
+`default_sim`、`default_judge_clap`、`default_prosody` 提供相同关键字接口，便于复用默认计算。
 
 函数可以同步或异步；都在训练 worker 的事件循环中执行，位于服务并发名额之外。
 同步计算应保持轻量，自定义异步 I/O 需要自己的超时。输入和参数会复制，避免修改共享缓存；
@@ -135,6 +141,74 @@ kwargs 和 details 必须可序列化成包含有限数值的 JSON。通用模�
 零帧和明确过短的 SIM 候选不调用 scorer，保留 `invalid_audio` 结果。
 WER 的归一化、分词以及 JudgeCLAP 的校准公式属于 scorer；替换后应与下游使用
 `raw` 或 `attribute_scores` 的组合、过滤逻辑保持一致。
+
+## 参考声音属性
+
+`voiceclone` 根据 `metadata.omni_prompt.reference_attributes` 选取分量，
+始终保留 WER 和音色 SIM；`accent`、`prosody` 仅在绑定了参考槽位时加入。
+属性缺失或为 `"none"` 时不评分、不加权，也不计为零分样本。
+`emotion` 暂无实现，即使绑定参考也不读取、不参与 reward。
+`task_type` 只作记录；是否选用 `voiceclone` 仍由显式奖励类别决定。
+
+| 输入组合 | timbre / SIM | accent | prosody | emotion |
+| --- | --- | --- | --- | --- |
+| sing clone / Base VoiceClone | audio1 | 复用 SIM | — | — |
+| Crosslingual / Instruction Voice Clone | audio1 | — | — | — |
+| Full VoiceClone | audio1 | 复用 SIM | audio1 | 暂不计入 |
+| Attribute Clone Pair | audio1 | 复用 SIM | audio1 | — |
+| Attribute Clone Triplet | audio1 | 复用 SIM | audio2 | 暂不计入 |
+
+`accent` 与 `timbre` 必须指向同一槽位；不同槽位会报错，避免把音色分数错误地
+当成另一份参考的口音分数。SIM 只请求一次候选 embedding，并复用现有参考缓存。
+记录仍以 `sim` 表示音色，`accent.details.reused_from="sim"` 标记复用来源；
+两者不是独立测量。默认权重均为 1，所以同时启用两项会有两份相同的 SIM 奖励贡献。
+
+韵律在 rollout worker 持有的 CPU 进程池中计算，无需新增远程服务。在**训练环境**安装：
+
+```bash
+pip install -e '.[prosody]'
+```
+
+`prosody.processes` 是每个 rollout worker 的 CPU 子进程数，默认 8；与远程服务的总
+`concurrency` 独立。进程池在首次韵律评分时才创建，使用 `spawn`，在后续批次持续复用。
+每个子进程将 OpenMP / BLAS / Numba 的线程数限制为 1，避免进程与数值库线程叠加。
+只传候选路径和参考字节，CPU 特征计算不占用 rollout 的事件循环。
+
+同一节点有 K 个 rollout worker、每个配置 P 个进程时，最多会有 K × P 个韵律子进程。
+按节点分配给韵律的 CPU 配额设置 P，并为生成、ASR 客户端和训练侧工作保留资源；
+容器可用 CPU 应看 quota，而不只看 `os.cpu_count()`。旧键 `workers` 作为 `processes`
+的兼容别名保留，两者不能同时填写。
+
+CPU 池最多接收 P 个未完成任务，其余样本在父进程异步等待；参考读取也限制为 P 路，
+避免整个 batch 同时持有音频字节。参考特征按内容 SHA-256 缓存在父进程，最多 256 项，
+由所有子进程共享结果；同一内容只提取一次，不同参考可以并行，内容更新后重新提取。
+取消任务会等待已提交的 CPU 读取完成；关闭奖励状态会取消等待者、排空任务并回收子进程。
+首次评分包含子进程启动和 librosa 初始化开销，比较稳定吞吐时应同时报告冷启动和热池数据。
+
+算法固定为 16 kHz 单声道、400 点能量窗 / 160 点 hop、2048 点 YIN 窗、55–500 Hz
+基频，使用与基准脚本一致的 18 维特征。按语言 median 和 IQR/1.349 归一化，
+**对两段音频的 z-score 差值**裁剪到 10，再依次计算 block RMSE、group RMSE、
+四组等权 RMSE。距离越小越相似；`raw` 保留距离，`transformed=1/(1+raw)`。
+`details.groups` 保留 `f0/energy/rate/pause`，`details.reference_id` 标记参考槽位。
+特征函数及统计量来源和摘要见
+[PROSODY_SOURCES.md](../../../slime_plugins/audio_rewards/PROSODY_SOURCES.md)。
+
+仅有 zh/en 统计量，接受 `Chinese`、`English`、`zh-cn`、`mandarin` 等基准别名，
+读取 `metadata.language`；隐藏模型 Language 提示不会改变评分语言。其他语言显式报错。
+空帧直接零分；过短、近静音、缺失有限特征的候选记录为 `invalid_audio`、`raw=null`、
+`transformed=0`。不可评分的参考或音频解码故障会报错，不把失败距离当作完美相似。
+
+旧配置若显式设置 `weights`，需为样本启用的 `accent` / `prosody` 增加正系数：
+
+```yaml
+weights: {wer: 1.0, sim: 1.0, accent: 1.0, prosody: 1.0, judge_clap: 1.0}
+prosody: {processes: 8}
+```
+
+不提供 `weights` 时所选分量默认均为 1。`scorers.prosody` 可自定义距离到奖励的变换；
+`accent` 直接继承 `scorers.sim`，不提供独立 scorer。`base`、`instruction` 及演示性的
+`voiceclone_gated` 保持各自显式选择的组件；需要其他组合时在类别函数中选择
+`accent` / `prosody` 即可。
 
 ## 组合最终 reward
 
@@ -144,7 +218,7 @@ WER 的归一化、分词以及 JudgeCLAP 的校准公式属于 scorer；替换�
 | 类别 | 所选组件 | 默认组合 |
 | --- | --- | --- |
 | `base` | WER | `w_wer * wer.transformed` |
-| `voiceclone` | WER + SIM | 两项 transformed 的加权和 |
+| `voiceclone` | WER + SIM + 非 none 的 accent / prosody | 所选分量 transformed 的加权和；emotion 暂不计入 |
 | `instruction` | WER + JudgeCLAP | 两项 transformed 的加权和 |
 | `voiceclone_gated` | WER + SIM | 原始错误率 ≤ 0.15 时取 SIM transformed，否则为 0；不使用线性权重 |
 

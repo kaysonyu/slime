@@ -42,7 +42,15 @@ services:
 weights:
   wer: 1.0
   sim: 1.0
+  # Applied by voiceclone only when the corresponding attribute is assigned.
+  accent: 1.0
+  prosody: 1.0
   judge_clap: 1.0
+# CPU feature extraction: processes per rollout worker, one native thread each.
+# Account for the number of rollout workers placed on each host when sizing this.
+# Install optional dependencies with: pip install -e '.[prosody]'
+prosody:
+  processes: 8
 # Optional component math, independent of services and final reward aggregation.
 # Omitted components retain their default scorers.
 # Runnable scorer examples: ../rewards/scorers.py

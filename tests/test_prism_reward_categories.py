@@ -37,9 +37,13 @@ def arguments(**weights):
 
 def categorized_sample(tmp_path, category, **metadata):
     item = sample(tmp_path, reward_category=category, domain="asmr", **metadata)
-    # Identical prompt conditions across categories exercise independent routing.
+    # Identical timbre-only conditions exercise category routing. The full
+    # attribute combinations are covered in test_prism_attribute_rewards.py.
     item.metadata["omni_prompt"]["reference_attributes"] = {
-        key: "audio1" for key in ("timbre", "accent", "prosody", "emotion")
+        "timbre": "audio1",
+        "accent": "none",
+        "prosody": "none",
+        "emotion": "audio1",
     }
     return item
 

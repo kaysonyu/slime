@@ -21,20 +21,21 @@ class _RewardState:
         if (
             not isinstance(config, Mapping)
             or "services" not in config
-            or set(config) - {"services", "weights", "scorers"}
+            or set(config) - {"services", "weights", "scorers", "prosody"}
         ):
-            raise ValueError("omni_reward_config requires services and optional weights/scorers mappings")
+            raise ValueError("omni_reward_config requires services and optional weights/scorers/prosody mappings")
         self.scorer = PrismRewardAdapter(
             config["services"],
             scorers=config.get("scorers"),
+            prosody=config.get("prosody"),
             worker_index=worker_index,
             worker_count=worker_count,
         )
         self.weights = None
         if "weights" in config:
             weights = config["weights"]
-            if not isinstance(weights, Mapping) or set(weights) - {"wer", "sim", "judge_clap"}:
-                raise ValueError("reward weights must map wer, sim, and judge_clap to coefficients")
+            if not isinstance(weights, Mapping) or set(weights) - {"wer", "sim", "accent", "prosody", "judge_clap"}:
+                raise ValueError("reward weights must map wer, sim, accent, prosody, and judge_clap to coefficients")
             self.weights = {name: finite(value, f"{name} weight") for name, value in weights.items()}
             if any(value < 0 for value in self.weights.values()):
                 raise ValueError("reward weights must be nonnegative")

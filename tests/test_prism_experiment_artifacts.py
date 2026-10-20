@@ -18,11 +18,15 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+from test_audio_reward_prosody import local_prosody_pool as _local_prosody_pool
+
 from slime.rollout.on_policy_distillation import score_teacher as score_opd_teacher
 from slime.rollout.rm_hub import async_rm, batched_async_rm
 from slime.rollout.sample_hooks import apply_rollout_sample_hooks, notify_sample_observers, rollout_context
 from slime.utils.types import Sample
 from slime_plugins.prism import artifacts
+
+local_prosody_pool = _local_prosody_pool
 
 NUM_GPUS = 0
 
@@ -473,13 +477,14 @@ def _template_groups(args, filename, group_size):
     ],
 )
 def test_grpo_templates_route_native_groups_and_archive_actual_rewards(
-    args, tmp_path, monkeypatch, filename, reward_path, categories
+    args, tmp_path, monkeypatch, filename, reward_path, categories, local_prosody_pool
 ):
     from test_audio_reward_clients import Service, config
     from test_omni_rollout_plugin import geometry, output
 
     from slime_plugins import omni_rollout
     from slime_plugins.audio_rewards import client as audio_client
+    from slime_plugins.audio_rewards import prosody
 
     service = Service()
     monkeypatch.setattr(audio_client.RewardHTTPClient, "get", staticmethod(service.get))
@@ -487,6 +492,8 @@ def test_grpo_templates_route_native_groups_and_archive_actual_rewards(
     monkeypatch.setattr(audio_client.RewardHTTPClient, "post_file", staticmethod(service.post_file))
     args.custom_rm_path = reward_path
     args.omni_reward_config = config(wer=1, sim=1, judge_clap=1)
+    args.omni_reward_config["weights"].update(accent=1, prosody=1)
+    monkeypatch.setattr(prosody, "extract_features", lambda raw: dict.fromkeys(prosody.FEATURES, 0.0))
     groups = _template_groups(args, filename, 2)
     audio = Path(args.omni_audio_dir)
     audio.mkdir()
@@ -512,7 +519,7 @@ def test_grpo_templates_route_native_groups_and_archive_actual_rewards(
     asyncio.run(run())
     components = {
         "base": {"wer"},
-        "voiceclone": {"wer", "sim"},
+        "voiceclone": {"wer", "sim", "accent", "prosody"},
         "instruction": {"wer", "judge_clap"},
         "voiceclone_gated": {"wer", "sim"},
     }

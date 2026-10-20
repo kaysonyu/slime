@@ -1,6 +1,7 @@
 """Adapt Prism samples to reusable audio reward component clients."""
 
 import asyncio
+import copy
 import json
 import re
 import uuid
@@ -11,6 +12,7 @@ from urllib.parse import unquote, urlsplit
 
 from slime_plugins.audio_rewards import timing
 from slime_plugins.audio_rewards.client import AudioRewardClient
+from slime_plugins.audio_rewards.prosody import ProsodyScorer, normalize_language
 
 QUERY_VERSION = "moss_tts_v2_revision6_instruction_v1"
 INSTRUCTION_FIELDS = (
@@ -84,29 +86,30 @@ def instruction_queries(value, *, modality="speech") -> list[str]:
     return queries
 
 
-def reference_audio(prompt, *, must_exist=True):
+def reference_audio(prompt, *, attribute="timbre", must_exist=True):
+    label = "SIM" if attribute == "timbre" else attribute.upper()
     references = prompt.get("references")
     if not isinstance(references, dict):
-        raise ValueError("SIM references must map audio slots to URI strings")
+        raise ValueError(f"{label} references must map audio slots to URI strings")
     targets = prompt.get("reference_attributes")
-    if not isinstance(targets, dict) or not isinstance(targets.get("timbre"), str):
-        raise ValueError("SIM requires explicit reference_attributes.timbre")
-    if targets["timbre"] == "none" or targets["timbre"] not in references:
-        raise ValueError("SIM timbre reference must select an existing audio slot")
-    uri = references[targets["timbre"]]
+    if not isinstance(targets, dict) or not isinstance(targets.get(attribute), str):
+        raise ValueError(f"{label} requires explicit reference_attributes.{attribute}")
+    if targets[attribute] == "none" or targets[attribute] not in references:
+        raise ValueError(f"{label} {attribute} reference must select an existing audio slot")
+    uri = references[targets[attribute]]
     if not isinstance(uri, str) or not uri.strip():
-        raise ValueError("SIM timbre reference must be a nonempty URI string")
+        raise ValueError(f"{label} {attribute} reference must be a nonempty URI string")
     parsed = urlsplit(uri)
     if parsed.scheme == "file" and parsed.netloc in {"", "localhost"}:
         path = Path(unquote(parsed.path))
     elif not parsed.scheme:
         path = Path(uri)
     else:
-        raise ValueError("SIM reference URI must be localized before scoring")
+        raise ValueError(f"{label} reference URI must be localized before scoring")
     path = path.resolve(strict=must_exist)
     if must_exist and not path.is_file():
-        raise ValueError("SIM reference audio must be a regular file")
-    return targets["timbre"], path
+        raise ValueError(f"{label} reference audio must be a regular file")
+    return targets[attribute], path
 
 
 def judge_queries(prompt):
@@ -123,26 +126,43 @@ def judge_queries(prompt):
     return atomic, dropped
 
 
+def _accent_record(sim, reference_id):
+    record = copy.deepcopy(sim)
+    # This is a reused measurement, not an additional HTTP request/timing.
+    record.pop("timing", None)
+    record.setdefault("details", {}).update(purpose="accent", reference_id=reference_id, reused_from="sim")
+    return record
+
+
 class PrismRewardAdapter:
     """Validate Prism metadata and score requested components without aggregating."""
 
-    def __init__(self, services, *, scorers=None, worker_index=0, worker_count=1):
+    def __init__(self, services, *, scorers=None, prosody=None, worker_index=0, worker_count=1):
         self.client = AudioRewardClient(
             services, scorers=scorers, worker_index=worker_index, worker_count=worker_count
         )
 
+        self.prosody = ProsodyScorer(prosody)
+
     async def aclose(self):
-        await self.client.aclose()
+        await asyncio.gather(self.client.aclose(), self.prosody.aclose())
 
     async def score_components(self, sample, component_names):
         """Return complete component records without choosing an aggregate reward."""
         names = tuple(component_names)
-        if not names or any(not isinstance(name, str) or name not in {"wer", "sim", "judge_clap"} for name in names):
-            raise ValueError("select nonempty reward components from wer, sim, and judge_clap")
+        if not names or any(
+            not isinstance(name, str) or name not in {"wer", "sim", "accent", "prosody", "judge_clap"}
+            for name in names
+        ):
+            raise ValueError("select nonempty reward components from wer, sim, accent, prosody, and judge_clap")
         if len(set(names)) != len(names):
             raise ValueError("selected reward components must be unique")
+        requested = names
+        if "accent" in names and "sim" not in names:
+            names = (*names, "sim")
         for name in names:
-            self.client.service(name)
+            if name not in {"accent", "prosody"}:
+                self.client.service(name)
         metadata = sample.metadata
         if not isinstance(metadata, dict) or not isinstance(metadata.get("omni_prompt"), Mapping):
             raise ValueError("TTS rewards require sample.metadata.omni_prompt")
@@ -165,6 +185,14 @@ class PrismRewardAdapter:
         if "sim" in names:
             reference_id, reference = reference_audio(prompt, must_exist=frames > 0)
             inputs["sim"] = (reference,)
+        if "accent" in names:
+            attributes = prompt.get("reference_attributes", {})
+            accent_id, _ = reference_audio(prompt, attribute="accent", must_exist=frames > 0)
+            if accent_id != attributes.get("timbre"):
+                raise ValueError("accent must share the timbre reference to reuse SIM")
+        if "prosody" in names:
+            prosody_id, reference = reference_audio(prompt, attribute="prosody", must_exist=frames > 0)
+            inputs["prosody"] = (reference, normalize_language(metadata.get("language")))
         if "judge_clap" in names:
             queries, dropped = judge_queries(prompt)
             inputs["judge_clap"] = (queries,)
@@ -192,19 +220,24 @@ class PrismRewardAdapter:
             async def score_one(name):
                 with timing.capture() as profile:
                     profile["request_id"] = request_id + "-" + name
-                    service = self.client.service(name)
-                    profile.update(
-                        concurrency=service.total_concurrency,
-                        worker_concurrency=service.concurrency,
-                        worker_index=service.worker_index,
-                        worker_count=service.worker_count,
-                    )
+                    if name != "prosody":
+                        service = self.client.service(name)
+                        profile.update(
+                            concurrency=service.total_concurrency,
+                            worker_concurrency=service.concurrency,
+                            worker_index=service.worker_index,
+                            worker_count=service.worker_count,
+                        )
                     try:
-                        method = getattr(self.client, name)
+                        method = self.prosody.score if name == "prosody" else getattr(self.client, name)
                         kwargs = {"query_version": QUERY_VERSION} if name == "judge_clap" else {}
+                        if name == "prosody":
+                            kwargs["scorers"] = self.client.scorers
                         record = await method(audio_path, *inputs[name], request_id=profile["request_id"], **kwargs)
                         if name == "sim" and record["status"] == "success":
                             record["details"].update(purpose="timbre", reference_id=reference_id)
+                        if name == "prosody":
+                            record["details"].update(purpose="prosody", reference_id=prosody_id)
                         if name == "judge_clap":
                             record["details"]["dropped_categories"] = dropped
                         components[name] = record
@@ -218,15 +251,17 @@ class PrismRewardAdapter:
                         components[name]["timing"] = profile
                 return record
 
+            scored_names = tuple(name for name in names if name != "accent")
             try:
-                outcomes = await asyncio.gather(*(score_one(name) for name in names), return_exceptions=True)
+                outcomes = await asyncio.gather(*(score_one(name) for name in scored_names), return_exceptions=True)
             except asyncio.CancelledError:
                 metadata["omni_reward"] = {"status": "cancelled", "components": components}
                 raise
-            components = {name: components[name] for name in names}
+            if "accent" in names:
+                components["accent"] = _accent_record(components["sim"], accent_id)
             failures = [
                 (name, outcome)
-                for name, outcome in zip(names, outcomes, strict=True)
+                for name, outcome in zip(scored_names, outcomes, strict=True)
                 if isinstance(outcome, BaseException)
             ]
             if failures:
@@ -236,7 +271,9 @@ class PrismRewardAdapter:
                     "errors": {name: type(error).__name__ for name, error in failures},
                 }
                 raise failures[0][1]
-        return components
+        if "accent" in names and frames == 0:
+            components["accent"] = _accent_record(components["sim"], accent_id)
+        return {name: components[name] for name in requested}
 
 
 def load_reward_config(value):

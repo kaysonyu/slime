@@ -173,7 +173,7 @@ def compute_metrics(records, group_size):
         for name, component in returned.items():
             components[name].append(component)
         for name in set(outcome.get("errors", {})) - returned.keys():
-            if name in {"wer", "sim", "judge_clap"}:
+            if name in {"wer", "sim", "accent", "prosody", "judge_clap"}:
                 components[name].append({"status": "error"})
     for name, items in components.items():
         prefix = f"component/{path_component(name)}"
@@ -212,6 +212,12 @@ def compute_metrics(records, group_size):
                         f"{key}/scored_count": len(counts),
                     }
                 )
+        elif name == "prosody":
+            for group in ("f0", "energy", "rate", "pause"):
+                values = [(item.get("details") or {}).get("groups", {}).get(group) for item in valid]
+                values = [value for value in values if _number(value)]
+                if values:
+                    metrics[f"{prefix}/group/{group}/mean"] = statistics.fmean(values)
         elif name == "judge_clap":
             attributes = defaultdict(list)
             for item in valid:
