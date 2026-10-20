@@ -20,6 +20,9 @@
 HTTP 客户端与向量缓存由 `slime_plugins.audio_rewards.client.AudioRewardClient` 管理。
 [ray.sh](ray.sh) 是两个入口共享的生命周期实现，不是独立的启动命令。
 
+训练中的七领域小评测见 [eval/README.md](eval/README.md)，可用 `eval/run-mopd-eval.sh` 接入，
+与训练奖励共用三个评分服务，数据和指标配方独立冻结。
+
 ## 准备和运行
 
 1. 准备兼容的 HF、native checkpoint 和 codec，安装训练及 Omni 依赖。

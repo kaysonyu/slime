@@ -128,6 +128,7 @@ PERF_ARGS=(
 )
 
 EVAL_ARGS=(
+    # Seven-domain small eval: eval/run-mopd-eval.sh and eval/README.md.
     # --eval-config /absolute/eval.yaml
     # --eval-interval 10
     # --omni-reward-config "${REPO_ROOT}/examples/prism/configs/rewards.yaml"

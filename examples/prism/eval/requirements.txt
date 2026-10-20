@@ -1,0 +1,5 @@
+OpenCC==1.4.2
+soundfile>=0.12.1
+# CPU-only normalization dependencies; install in Slime's training environment.
+# No additional GPU model or scoring service is required.
+zhconv==1.4.3
