@@ -13,6 +13,32 @@ from pathlib import Path
 from campaign import atomic_json
 
 
+def collect_events(root: Path, now: float) -> list[str]:
+    manifest = json.loads((root / "manifest.json").read_text())
+    events = []
+    if (root / "campaign-finished.json").exists() or (root / "platform/monitor-finished.json").exists():
+        events.append("terminal")
+    for case in manifest["cases"]:
+        path = root / "runs" / case["name"] / "summary.json"
+        if path.exists():
+            summary = json.loads(path.read_text())
+            events.append(("measured:" if summary.get("valid") else "failure:") + case["name"])
+    if len(list((root / "platform").glob("node-*.json"))) == manifest["nodes"]:
+        events.append("allocated-128")
+    heartbeat = root / "platform/monitor-state.json"
+    if heartbeat.exists() and now - heartbeat.stat().st_mtime > 600:
+        events.append(f"monitor-stale:{int(now // 1800)}")
+    request_path = root / "services/request.json"
+    if request_path.exists():
+        request = json.loads(request_path.read_text())
+        run = root / "runs" / request["case"]
+        waiting = now - request_path.stat().st_mtime
+        # Wake before the GPU parents' two-hour barrier expires, not every poll.
+        if waiting >= 900 and not (run / "services-ready.json").exists() and not (run / "summary.json").exists():
+            events.append(f"asr-readiness-stalled:{request['case']}:{int((waiting - 900) // 1800)}")
+    return events
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
@@ -23,7 +49,6 @@ def main():
     parser.add_argument("--launch", action="store_true")
     args = parser.parse_args()
     root = args.root
-    manifest = json.loads((root / "manifest.json").read_text())
     spec = importlib.util.spec_from_file_location("capacity_rpc", args.rpc_library)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -62,19 +87,7 @@ def main():
     state = json.loads(state_path.read_text()) if state_path.exists() else {"handled": []}
     while True:
         try:
-            events = []
-            if (root / "campaign-finished.json").exists() or (root / "platform/monitor-finished.json").exists():
-                events.append("terminal")
-            for case in manifest["cases"]:
-                path = root / "runs" / case["name"] / "summary.json"
-                if path.exists():
-                    summary = json.loads(path.read_text())
-                    events.append(("measured:" if summary.get("valid") else "failure:") + case["name"])
-            if len(list((root / "platform").glob("node-*.json"))) == manifest["nodes"]:
-                events.append("allocated-128")
-            heartbeat = root / "platform/monitor-state.json"
-            if heartbeat.exists() and time.time() - heartbeat.stat().st_mtime > 600:
-                events.append(f"monitor-stale:{int(time.time() // 1800)}")
+            events = collect_events(root, time.time())
             event = next((value for value in events if value not in state["handled"]), None)
             if event:
                 with module.RPC(args.socket) as client:

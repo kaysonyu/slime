@@ -18,6 +18,7 @@ from observe_processes import role
 from profile_router import select_router
 from prepare import convert_prompt, write_json
 from prepare128 import matrix
+from resume_watch import collect_events
 import router_python
 import router_extension
 from watch import admission_held, prepare_case_recipe, snapshot_service_telemetry
@@ -219,6 +220,44 @@ def test_asr_admission_lists_every_replica_beyond_cli_default_limit(tmp_path, mo
     receipt = json.loads((tmp_path / "runs" / case / "services-ready.json").read_text())
     assert receipt["replicas"] == len(receipt["instances"]) == replicas
     assert receipt["business_smoke"]
+
+
+def test_resume_events_reload_supplemental_cases(tmp_path):
+    manifest = {"nodes": 16, "cases": [{"name": "original"}]}
+    write_json(tmp_path / "manifest.json", manifest)
+    write_json(tmp_path / "runs/original/summary.json", {"valid": False})
+    assert collect_events(tmp_path, 1000) == ["failure:original"]
+    manifest["cases"].append({"name": "retry"})
+    write_json(tmp_path / "manifest.json", manifest)
+    write_json(tmp_path / "runs/retry/summary.json", {"valid": True})
+    assert collect_events(tmp_path, 1000) == ["failure:original", "measured:retry"]
+    write_json(tmp_path / "campaign-finished.json", {})
+    assert collect_events(tmp_path, 1000)[0] == "terminal"
+
+
+@pytest.mark.parametrize("waiting,bucket", [(899, None), (900, 0), (2699, 0), (2700, 1)])
+def test_resume_events_warn_before_asr_timeout_without_poll_spam(tmp_path, waiting, bucket):
+    import os
+
+    write_json(tmp_path / "manifest.json", {"nodes": 16, "cases": [{"name": "pending"}]})
+    request = tmp_path / "services/request.json"
+    write_json(request, {"case": "pending", "replicas": 32})
+    os.utime(request, (1000, 1000))
+    expected = [] if bucket is None else [f"asr-readiness-stalled:pending:{bucket}"]
+    assert collect_events(tmp_path, 1000 + waiting) == expected
+    write_json(tmp_path / "runs/pending/services-ready.json", {})
+    assert collect_events(tmp_path, 1000 + waiting) == []
+
+
+def test_resume_events_do_not_warn_for_terminal_attempt(tmp_path):
+    import os
+
+    write_json(tmp_path / "manifest.json", {"nodes": 16, "cases": [{"name": "failed"}]})
+    request = tmp_path / "services/request.json"
+    write_json(request, {"case": "failed", "replicas": 32})
+    os.utime(request, (1000, 1000))
+    write_json(tmp_path / "runs/failed/summary.json", {"valid": False})
+    assert collect_events(tmp_path, 5000) == ["failure:failed"]
 
 
 def test_manual_admission_hold_is_scoped_and_expires(tmp_path, monkeypatch):
