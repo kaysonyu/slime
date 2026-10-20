@@ -524,36 +524,8 @@ def test_router_launcher_uses_an_independent_script_and_private_environment(monk
     assert os.environ["SGLANG_OMNI_ADMIN_KEY"] == "parent-key"
 
 
-def test_router_transport_reuses_each_origin_pool_and_closes_all_pools(monkeypatch):
-    pools = []
-
-    class Transport:
-        def __init__(self, *, trust_env, limits):
-            assert trust_env is False
-            assert limits.max_connections == limits.max_keepalive_connections == 17
-            self.closed = False
-            pools.append(self)
-
-        async def handle_async_request(self, request):
-            return httpx.Response(200, request=request)
-
-        async def aclose(self):
-            self.closed = True
-
-    monkeypatch.setattr(omni_router.httpx, "AsyncHTTPTransport", Transport)
-
-    async def exercise():
-        transport = omni_router.WorkerTransport(17)
-        for url in ("http://worker:8000/a", "http://worker:8000/b", "http://worker:8001/a", "http://other:8000/a"):
-            await transport.handle_async_request(httpx.Request("GET", url))
-        assert len(pools) == 3
-        await transport.aclose()
-        assert all(pool.closed for pool in pools)
-
-    asyncio.run(exercise())
-
-
-def test_router_liveness_and_admission_do_not_replace_worker_readiness(monkeypatch, tmp_path):
+@pytest.mark.parametrize("disabled", [False, True])
+def test_router_liveness_and_admission_do_not_replace_worker_readiness(monkeypatch, tmp_path, disabled):
     pytest.importorskip("sglang_omni_router.python.app")
     native_client = httpx.AsyncClient
     clients = []
@@ -575,9 +547,14 @@ def test_router_liveness_and_admission_do_not_replace_worker_readiness(monkeypat
             "workers": [{"url": "http://worker:19888", "capabilities": ["chat"]}],
             "router_state_dir": str(tmp_path),
         }
-        app = omni_router.create_router_app(config)
+        app = omni_router.create_router_app(config, disabled=disabled)
         async with app.router.lifespan_context(app):
+            assert len(clients) == 2
+            assert app.state.http_client is clients[0]
+            assert app.state.health_http_client is clients[1]
+            assert all(not client.is_closed for client in clients)
             worker = app.state.workers[0]
+            assert worker.disabled is disabled
             for _ in range(100):
                 if worker.consecutive_successes:
                     break

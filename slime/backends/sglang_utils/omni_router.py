@@ -3,7 +3,6 @@
 This file must not import Slime: the serving interpreter may only contain Omni.
 """
 
-import asyncio
 import json
 import logging
 import os
@@ -166,58 +165,24 @@ def install_reserved_connection_guard():
     AsyncConnectionPool._assign_requests_to_connections = assign
 
 
-class WorkerTransport(httpx.AsyncBaseTransport):
-    """Keep each replica's upstream connection pool independent of other replicas."""
-
-    def __init__(self, connections_per_worker):
-        self.connections_per_worker = connections_per_worker
-        self.pools = {}
-
-    async def handle_async_request(self, request):
-        origin = (request.url.scheme, request.url.host, request.url.port)
-        if origin not in self.pools:
-            self.pools[origin] = httpx.AsyncHTTPTransport(
-                trust_env=False,
-                limits=httpx.Limits(
-                    max_connections=self.connections_per_worker,
-                    max_keepalive_connections=self.connections_per_worker,
-                ),
-            )
-        return await self.pools[origin].handle_async_request(request)
-
-    async def aclose(self):
-        await asyncio.gather(*(pool.aclose() for pool in self.pools.values()))
-
-
 def create_router_app(configuration, *, disabled=False):
     from sglang_omni_router.python.app import create_app
     from sglang_omni_router.python.config import RouterConfig
 
     configuration = dict(configuration)
-    connections_per_worker = configuration.pop("connections_per_worker", 128)
     configuration.pop("log_level", None)
     configuration.pop("log_level_http", None)
     configuration.pop("router_processes", None)
-    router_config = RouterConfig(**configuration)
-    client = httpx.AsyncClient(
-        transport=WorkerTransport(connections_per_worker),
-        timeout=httpx.Timeout(router_config.request_timeout_secs),
-        trust_env=False,
-    )
-    health_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(router_config.health_check_timeout_secs),
-        limits=httpx.Limits(max_connections=max(1, len(router_config.workers))),
-        trust_env=False,
-    )
-    app = create_app(router_config, client=client, health_client=health_client)
+    app = create_app(RouterConfig(**configuration))
+    if not disabled:
+        return app
     original_lifespan = app.router.lifespan_context
 
     @asynccontextmanager
     async def lifespan(application):
-        async with client, health_client, original_lifespan(application):
-            if disabled:
-                for worker in application.state.workers:
-                    worker.set_disabled(True)
+        async with original_lifespan(application):
+            for worker in application.state.workers:
+                worker.set_disabled(True)
             yield
 
     app.router.lifespan_context = lifespan
@@ -233,15 +198,9 @@ def run_multiprocess_router(configuration, *, disabled=False):
         raise ValueError("Initially disabled routers require single-process mode")
     configuration = dict(configuration)
     processes = configuration.pop("router_processes")
-    # Native Omni owns the aggregate HTTP pool in multi-process mode.
-    configuration.pop("connections_per_worker", None)
     level = configuration.pop("log_level", "warning")
     configuration.pop("log_level_http", None)
     os.environ["SGLANG_OMNI_ROUTER_LOG_LEVEL"] = "warning" if level == "warn" else level
-    # Like WorkerTransport(trust_env=False), all router traffic is internal.
-    # Native CP/DP clients otherwise inherit developer-machine HTTP proxies.
-    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
-        os.environ.pop(key, None)
 
     def spawn_control_plane(context):
         return subprocess.Popen(
@@ -340,6 +299,9 @@ def run_data_plane():
 
 
 def main():
+    # Native clients must connect directly to internal engines in every mode.
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        os.environ.pop(key, None)
     if sys.argv[1:] == ["--control-plane"]:
         run_control_plane()
         return

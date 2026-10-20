@@ -91,7 +91,6 @@ def start_omni_rollout_servers(
                 "policy": args.omni_router_policy,
                 "router_processes": getattr(args, "omni_router_processes", 1),
                 "request_timeout_secs": args.sglang_router_request_timeout_secs,
-                "connections_per_worker": max(8, 2 * args.sglang_server_concurrency),
                 "log_level": getattr(args, "router_log_level", "warn"),
                 "log_level_http": getattr(args, "sglang_log_level_http", None) or "warning",
             }

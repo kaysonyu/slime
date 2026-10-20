@@ -1,7 +1,8 @@
-"""Real CPU HTTP control/data-plane and process cleanup contract."""
+"""Real CPU HTTP forwarding, admission and process cleanup in all router modes."""
 
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -20,8 +21,8 @@ NUM_GPUS = 0
 pytestmark = pytest.mark.unit
 
 
-@pytest.mark.parametrize("processes,updates", [(2, 1), (4, 64), (8, 128), (16, 128)])
-def test_native_multiprocess_router_control_forwarding_and_cleanup(tmp_path, processes, updates):
+@pytest.mark.parametrize("processes,updates", [(1, 1), (2, 1), (4, 64), (8, 128), (16, 128)])
+def test_native_router_control_forwarding_and_cleanup(tmp_path, processes, updates):
     pytest.importorskip("sglang_omni_router.python.supervisor")
     payload = json.dumps({"echo": "x" * 100000}).encode()
 
@@ -65,11 +66,16 @@ def test_native_multiprocess_router_control_forwarding_and_cleanup(tmp_path, pro
     entry = Path(__file__).resolve().parents[1] / "slime/backends/sglang_utils/omni_router.py"
     logfile = tmp_path / "router.log"
     children = []
+    # Internal forwarding and health checks must work even when the parent has
+    # a proxy configured and no localhost bypass.
+    environment = {**os.environ, "CUDA_VISIBLE_DEVICES": "", "NO_PROXY": "", "no_proxy": ""}
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        environment[key] = "http://127.0.0.1:1"
     with logfile.open("w") as log, requests.Session() as client:
         client.trust_env = False
         process = subprocess.Popen(
             [sys.executable, str(entry), json.dumps([configuration, False])],
-            env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+            env=environment,
             stdout=log,
             stderr=log,
         )
@@ -99,7 +105,7 @@ def test_native_multiprocess_router_control_forwarding_and_cleanup(tmp_path, pro
         try:
             wait_status("/ready", 200)
             children = psutil.Process(process.pid).children(recursive=True)
-            assert len(children) == processes + 1  # one CP plus all DPs
+            assert len(children) == (processes + 1 if processes > 1 else 0)  # one CP plus all DPs
 
             def generate(_):
                 with requests.Session() as local:
@@ -145,5 +151,8 @@ def test_native_multiprocess_router_control_forwarding_and_cleanup(tmp_path, pro
                 process.wait(timeout=5)
             backend.shutdown()
             backend.server_close()
-        assert process.returncode == 0, logfile.read_text()
+        # Uvicorn can re-raise SIGTERM after graceful shutdown; the supervisor
+        # handles it itself and exits with zero.
+        expected_codes = {0} if processes > 1 else {0, -signal.SIGTERM}
+        assert process.returncode in expected_codes, logfile.read_text()
         assert not any(child.is_running() and child.status() != psutil.STATUS_ZOMBIE for child in children)
