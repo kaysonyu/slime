@@ -5,6 +5,7 @@ import errno
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -19,8 +20,10 @@ spec.loader.exec_module(router)
 
 def test_transport_diagnostic_preserves_exception_and_never_retries_or_leaks_payload(monkeypatch, caplog):
     request = httpx.Request(
-        "POST", "http://user:password@127.0.0.1:9999/generate?token=querysecret",
-        headers={"Authorization": "Bearer headersecret"}, content=b"bodysecret",
+        "POST",
+        "http://user:password@127.0.0.1:9999/generate?token=querysecret",
+        headers={"Authorization": "Bearer headersecret"},
+        content=b"bodysecret",
     )
     failure = httpx.ReadError("exceptionsecret", request=request)
     calls = []
@@ -63,3 +66,35 @@ def test_transport_diagnostic_success_is_silent_and_unchanged(monkeypatch, caplo
     assert asyncio.run(httpx.AsyncClient.send(object(), request, stream=True)) is response
     assert calls == [(request, {"stream": True})]
     assert not caplog.records
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_active_close_diagnostic_preserves_close_and_records_no_payload(monkeypatch, caplog, active):
+    from httpcore._async.http11 import AsyncHTTP11Connection, HTTPConnectionState
+
+    calls = []
+
+    async def original(connection):
+        calls.append(connection)
+        return "closed"
+
+    monkeypatch.setattr(AsyncHTTP11Connection, "aclose", original)
+    router.install_active_close_diagnostics()
+    installed = AsyncHTTP11Connection.aclose
+    router.install_active_close_diagnostics()
+    assert AsyncHTTP11Connection.aclose is installed
+    connection = SimpleNamespace(
+        _state=HTTPConnectionState.ACTIVE if active else HTTPConnectionState.IDLE,
+        _origin=SimpleNamespace(host=b"127.0.0.1", port=9999),
+        _request_count=7,
+        secret="must-not-be-logged",
+    )
+    assert asyncio.run(installed(connection)) == "closed"
+    assert calls == [connection]
+    if active:
+        payload = json.loads(caplog.records[-1].message.split("omni_router_active_connection_close ", 1)[1])
+        assert payload["host"] == "127.0.0.1" and payload["request_count"] == 7
+        assert payload["frames"]
+        assert "must-not-be-logged" not in caplog.text
+    else:
+        assert not caplog.records

@@ -68,6 +68,38 @@ def install_transport_error_diagnostics():
     httpx.AsyncClient.send = send
 
 
+def install_active_close_diagnostics():
+    """Record the caller closing an active HTTP/1 stream, without delaying it."""
+    from httpcore._async.http11 import AsyncHTTP11Connection, HTTPConnectionState
+
+    original_close = AsyncHTTP11Connection.aclose
+    if getattr(original_close, "_prism_active_close_diagnostics", False):
+        return
+
+    async def close(connection):
+        if connection._state == HTTPConnectionState.ACTIVE:
+            logging.getLogger(__name__).error(
+                "omni_router_active_connection_close %s",
+                json.dumps(
+                    {
+                        "time": time.time(),
+                        "pid": os.getpid(),
+                        "host": connection._origin.host.decode("ascii", errors="replace"),
+                        "port": connection._origin.port,
+                        "request_count": connection._request_count,
+                        "frames": [
+                            {"file": frame.filename, "line": frame.lineno, "function": frame.name}
+                            for frame in traceback.extract_stack(limit=20)
+                        ],
+                    }
+                ),
+            )
+        return await original_close(connection)
+
+    close._prism_active_close_diagnostics = True
+    AsyncHTTP11Connection.aclose = close
+
+
 class WorkerTransport(httpx.AsyncBaseTransport):
     """Keep each replica's upstream connection pool independent of other replicas."""
 
@@ -230,6 +262,7 @@ def run_data_plane():
     from sglang_omni_router.python.app_factory import load_config_from_env
 
     install_transport_error_diagnostics()
+    install_active_close_diagnostics()
     config = load_config_from_env()
     # Slime enables/disables every replica concurrently. Shared-socket accept
     # is not guaranteed fair: a DP may receive an entire publication burst.
